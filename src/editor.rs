@@ -37,6 +37,40 @@ pub enum ConfigUiEditMode {
     MultiChoice,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigUiKey {
+    Esc,
+    Enter,
+    Backspace,
+    Tab,
+    BackTab,
+    Up,
+    Down,
+    Left,
+    Right,
+    Char(char),
+    Ctrl(char),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConfigUiIntent {
+    None,
+    Exit,
+    BeginEdit {
+        field_index: usize,
+        path: String,
+    },
+    SetField {
+        field_index: usize,
+        path: String,
+        value: JsonValue,
+    },
+    UnsetField {
+        field_index: usize,
+        path: String,
+    },
+}
+
 impl ConfigUiApp {
     pub fn new(model: ConfigUiModel) -> Self {
         Self {
@@ -121,6 +155,338 @@ impl ConfigUiApp {
             text: text.into(),
             is_error: true,
         });
+    }
+
+    pub fn handle_key(&mut self, key: ConfigUiKey) -> ConfigUiIntent {
+        if self.edit.is_some() {
+            return self.handle_edit_key(key);
+        }
+        if self.search_active {
+            self.handle_search_key(key);
+            return ConfigUiIntent::None;
+        }
+        self.handle_normal_key(key)
+    }
+
+    pub fn begin_edit_field(&mut self, field_index: usize) {
+        self.notice = None;
+        let Some(field) = self.model.fields.get(field_index) else {
+            self.notice_error("Only settings rows can be edited.");
+            return;
+        };
+        if let Some(message) = structured_only_edit_notice(field).map(str::to_string) {
+            self.notice_info(message);
+            return;
+        }
+        let input = edit_input_for_field(field);
+        self.edit = Some(ConfigUiEditState {
+            field_index,
+            choice_index: initial_edit_choice_index(field, &input),
+            input,
+            mode: edit_mode_for_field(field),
+        });
+    }
+
+    pub fn finish_successful_write(&mut self) {
+        if self
+            .notice
+            .as_ref()
+            .map(|notice| !notice.is_error)
+            .unwrap_or(false)
+        {
+            self.edit = None;
+        }
+    }
+
+    fn handle_search_key(&mut self, key: ConfigUiKey) {
+        match key {
+            ConfigUiKey::Esc | ConfigUiKey::Enter => self.search_active = false,
+            ConfigUiKey::Backspace => {
+                self.search.pop();
+            }
+            ConfigUiKey::Ctrl('u') | ConfigUiKey::Ctrl('U') => {
+                self.search.clear();
+            }
+            ConfigUiKey::Char(ch) => {
+                self.search.push(ch);
+                self.selected_row = 0;
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_normal_key(&mut self, key: ConfigUiKey) -> ConfigUiIntent {
+        match key {
+            ConfigUiKey::Char('q') | ConfigUiKey::Esc | ConfigUiKey::Ctrl('c') => {
+                ConfigUiIntent::Exit
+            }
+            ConfigUiKey::Char('/') => {
+                self.search_active = true;
+                ConfigUiIntent::None
+            }
+            ConfigUiKey::Char('j') | ConfigUiKey::Down => {
+                self.move_down();
+                ConfigUiIntent::None
+            }
+            ConfigUiKey::Char('k') | ConfigUiKey::Up => {
+                self.move_up();
+                ConfigUiIntent::None
+            }
+            ConfigUiKey::Enter => self.activate_selected_field(),
+            ConfigUiKey::Char('e') => self.begin_edit_selected_field(),
+            ConfigUiKey::Char(' ') => self.quick_edit_selected_field(),
+            ConfigUiKey::Char('u') => self.unset_selected_field(),
+            ConfigUiKey::Tab | ConfigUiKey::Right | ConfigUiKey::Char('l') => {
+                self.next_tab();
+                ConfigUiIntent::None
+            }
+            ConfigUiKey::BackTab | ConfigUiKey::Left | ConfigUiKey::Char('h') => {
+                self.previous_tab();
+                ConfigUiIntent::None
+            }
+            _ => ConfigUiIntent::None,
+        }
+    }
+
+    fn handle_edit_key(&mut self, key: ConfigUiKey) -> ConfigUiIntent {
+        if let Some(mode) = self.edit.as_ref().map(|edit| edit.mode) {
+            match mode {
+                ConfigUiEditMode::Choice | ConfigUiEditMode::MultiChoice => {
+                    return self.handle_choice_edit_key(key, mode);
+                }
+                ConfigUiEditMode::Text => {}
+            }
+        }
+
+        match key {
+            ConfigUiKey::Esc => {
+                self.edit = None;
+                self.notice_info("Edit canceled.");
+                ConfigUiIntent::None
+            }
+            ConfigUiKey::Enter => self.save_edit(),
+            ConfigUiKey::Backspace => {
+                self.notice = None;
+                if let Some(edit) = &mut self.edit {
+                    edit.input.pop();
+                }
+                ConfigUiIntent::None
+            }
+            ConfigUiKey::Ctrl('u') | ConfigUiKey::Ctrl('U') => {
+                self.notice = None;
+                if let Some(edit) = &mut self.edit {
+                    edit.input.clear();
+                }
+                ConfigUiIntent::None
+            }
+            ConfigUiKey::Char(ch) => {
+                self.notice = None;
+                if let Some(edit) = &mut self.edit {
+                    edit.input.push(ch);
+                }
+                ConfigUiIntent::None
+            }
+            _ => ConfigUiIntent::None,
+        }
+    }
+
+    fn handle_choice_edit_key(
+        &mut self,
+        key: ConfigUiKey,
+        mode: ConfigUiEditMode,
+    ) -> ConfigUiIntent {
+        let scalar_enum = self
+            .edit
+            .as_ref()
+            .and_then(|edit| self.model.fields.get(edit.field_index))
+            .is_some_and(is_scalar_enum_field);
+        let multi_choice = mode == ConfigUiEditMode::MultiChoice;
+        match key {
+            ConfigUiKey::Esc => {
+                self.edit = None;
+                self.notice_info("Edit canceled.");
+                ConfigUiIntent::None
+            }
+            ConfigUiKey::Enter if scalar_enum => {
+                self.select_single_choice_edit();
+                self.save_edit()
+            }
+            ConfigUiKey::Enter => self.save_edit(),
+            ConfigUiKey::Up
+            | ConfigUiKey::Left
+            | ConfigUiKey::Char('k')
+            | ConfigUiKey::Char('h')
+                if scalar_enum || multi_choice =>
+            {
+                self.notice = None;
+                self.move_choice_edit(-1);
+                ConfigUiIntent::None
+            }
+            ConfigUiKey::Down
+            | ConfigUiKey::Right
+            | ConfigUiKey::Char('j')
+            | ConfigUiKey::Char('l')
+                if scalar_enum || multi_choice =>
+            {
+                self.notice = None;
+                self.move_choice_edit(1);
+                ConfigUiIntent::None
+            }
+            ConfigUiKey::Char(' ') if multi_choice => {
+                self.notice = None;
+                self.toggle_multi_choice_edit();
+                ConfigUiIntent::None
+            }
+            ConfigUiKey::Char(' ') if scalar_enum => {
+                self.notice = None;
+                self.select_single_choice_edit();
+                ConfigUiIntent::None
+            }
+            ConfigUiKey::Up
+            | ConfigUiKey::Right
+            | ConfigUiKey::Down
+            | ConfigUiKey::Left
+            | ConfigUiKey::Char(' ')
+                if !multi_choice =>
+            {
+                self.notice = None;
+                self.cycle_choice_edit();
+                ConfigUiIntent::None
+            }
+            _ => ConfigUiIntent::None,
+        }
+    }
+
+    fn cycle_choice_edit(&mut self) {
+        let Some(edit) = self.edit.clone() else {
+            return;
+        };
+        let next = if edit.input.trim() == "true" {
+            "false".to_string()
+        } else {
+            "true".to_string()
+        };
+        if let Some(edit) = &mut self.edit {
+            edit.input = next;
+        }
+    }
+
+    fn move_choice_edit(&mut self, delta: isize) {
+        let Some(edit) = self.edit.clone() else {
+            return;
+        };
+        let field = &self.model.fields[edit.field_index];
+        let len = field.allowed_values.len();
+        if len == 0 {
+            return;
+        }
+        let index = edit.choice_index.min(len - 1);
+        let next = if delta < 0 {
+            index.checked_sub(1).unwrap_or(len - 1)
+        } else {
+            (index + 1) % len
+        };
+        if let Some(edit) = &mut self.edit {
+            edit.choice_index = next;
+        }
+    }
+
+    fn select_single_choice_edit(&mut self) {
+        let Some(edit) = self.edit.clone() else {
+            return;
+        };
+        let field = &self.model.fields[edit.field_index];
+        let Some(value) = field.allowed_values.get(edit.choice_index) else {
+            return;
+        };
+        let value = value.clone();
+        if let Some(edit) = &mut self.edit {
+            edit.input = value;
+        }
+    }
+
+    fn toggle_multi_choice_edit(&mut self) {
+        let Some(edit) = self.edit.clone() else {
+            return;
+        };
+        let field = &self.model.fields[edit.field_index];
+        let next = match toggled_string_list_input(field, &edit.input, edit.choice_index) {
+            Ok(next) => next,
+            Err(message) => {
+                self.notice_error(message);
+                return;
+            }
+        };
+        if let Some(edit) = &mut self.edit {
+            edit.input = next;
+        }
+    }
+
+    fn activate_selected_field(&mut self) -> ConfigUiIntent {
+        if self.selected_field().is_some_and(is_bool_field) {
+            self.quick_edit_selected_field()
+        } else {
+            self.begin_edit_selected_field()
+        }
+    }
+
+    fn begin_edit_selected_field(&mut self) -> ConfigUiIntent {
+        self.notice = None;
+        let Some(field_index) = self.selected_field_index() else {
+            self.notice_error("Only settings rows can be edited.");
+            return ConfigUiIntent::None;
+        };
+        let path = self.model.fields[field_index].path.clone();
+        ConfigUiIntent::BeginEdit { field_index, path }
+    }
+
+    fn quick_edit_selected_field(&mut self) -> ConfigUiIntent {
+        self.notice = None;
+        let Some(field_index) = self.selected_field_index() else {
+            self.notice_error("Only settings rows can be edited.");
+            return ConfigUiIntent::None;
+        };
+        let field = &self.model.fields[field_index];
+        if is_bool_field(field) {
+            ConfigUiIntent::SetField {
+                field_index,
+                path: field.path.clone(),
+                value: JsonValue::Bool(!field_bool_value(field).unwrap_or(false)),
+            }
+        } else {
+            self.begin_edit_selected_field()
+        }
+    }
+
+    fn unset_selected_field(&mut self) -> ConfigUiIntent {
+        self.notice = None;
+        let Some(field_index) = self.selected_field_index() else {
+            self.notice_error("Only settings rows can be unset.");
+            return ConfigUiIntent::None;
+        };
+        ConfigUiIntent::UnsetField {
+            field_index,
+            path: self.model.fields[field_index].path.clone(),
+        }
+    }
+
+    fn save_edit(&mut self) -> ConfigUiIntent {
+        let Some(edit) = self.edit.clone() else {
+            return ConfigUiIntent::None;
+        };
+        let field = self.model.fields[edit.field_index].clone();
+        let value = match parse_edit_input(&field, &edit.input) {
+            Ok(value) => value,
+            Err(message) => {
+                self.notice_error(message);
+                return ConfigUiIntent::None;
+            }
+        };
+        ConfigUiIntent::SetField {
+            field_index: edit.field_index,
+            path: field.path,
+            value,
+        }
     }
 }
 
@@ -516,5 +882,162 @@ mod tests {
         assert_eq!(patched.mutation, PatchMutation::Replaced);
         assert!(patched.text.contains("// host-owned config"));
         assert!(patched.text.contains(r#""theme": "dark""#));
+    }
+
+    // Defends: normal-mode keyboard reduction is project-agnostic and emits semantic edit/write intents for the host.
+    #[test]
+    fn reducer_emits_normal_mode_intents_without_host_policy() {
+        let mut app = ConfigUiApp::new(test_model());
+
+        assert_eq!(app.handle_key(ConfigUiKey::Char('j')), ConfigUiIntent::None);
+        assert_eq!(app.selected_row, 1);
+        assert_eq!(
+            app.handle_key(ConfigUiKey::Char('e')),
+            ConfigUiIntent::BeginEdit {
+                field_index: 1,
+                path: "ui.theme".to_string()
+            }
+        );
+        assert_eq!(
+            app.handle_key(ConfigUiKey::Char('u')),
+            ConfigUiIntent::UnsetField {
+                field_index: 1,
+                path: "ui.theme".to_string()
+            }
+        );
+
+        app.selected_row = 0;
+        assert_eq!(
+            app.handle_key(ConfigUiKey::Char(' ')),
+            ConfigUiIntent::SetField {
+                field_index: 0,
+                path: "server.enabled".to_string(),
+                value: json!(true),
+            }
+        );
+        assert_eq!(app.handle_key(ConfigUiKey::Esc), ConfigUiIntent::Exit);
+    }
+
+    // Defends: typed edit parsing and allowed-value checks stay reusable rather than Yazelix-specific.
+    #[test]
+    fn edit_parser_uses_field_type_and_allowed_values() {
+        let bool_field = field("server.enabled", "bool", "false", &[]);
+        assert_eq!(
+            parse_edit_input(&bool_field, "true").expect("bool"),
+            json!(true)
+        );
+        assert!(parse_edit_input(&bool_field, "yes").is_err());
+
+        let enum_field = field("ui.theme", "string", "\"light\"", &["light", "dark"]);
+        assert_eq!(
+            parse_edit_input(&enum_field, "dark").expect("enum"),
+            json!("dark")
+        );
+        assert!(parse_edit_input(&enum_field, "wide").is_err());
+
+        let list_field = field(
+            "plugins.enabled",
+            "string_list",
+            r#"["git"]"#,
+            &["git", "search"],
+        );
+        assert_eq!(
+            parse_edit_input(&list_field, r#"["git","search"]"#).expect("list"),
+            json!(["git", "search"])
+        );
+        assert!(parse_edit_input(&list_field, r#"["unknown"]"#).is_err());
+    }
+
+    // Defends: bools keep direct choice edits while scalar enums use the single-select picker mode.
+    #[test]
+    fn edit_helpers_use_choice_modes_for_bool_and_enum() {
+        let bool_field = field("server.enabled", "bool", "true", &[]);
+        assert_eq!(field_bool_value(&bool_field), Some(true));
+        assert_eq!(edit_mode_for_field(&bool_field), ConfigUiEditMode::Choice);
+
+        let enum_field = field("ui.theme", "string", "\"light\"", &["light", "dark"]);
+        assert_eq!(edit_input_for_field(&enum_field), "light");
+        assert_eq!(edit_mode_for_field(&enum_field), ConfigUiEditMode::Choice);
+    }
+
+    // Defends: search input, cancellation, and row clamping live in the reusable reducer.
+    #[test]
+    fn reducer_updates_search_state() {
+        let mut app = ConfigUiApp::new(test_model());
+
+        assert_eq!(app.handle_key(ConfigUiKey::Char('/')), ConfigUiIntent::None);
+        assert!(app.search_active);
+        for ch in "theme".chars() {
+            assert_eq!(app.handle_key(ConfigUiKey::Char(ch)), ConfigUiIntent::None);
+        }
+        assert_eq!(app.search, "theme");
+        assert_eq!(app.visible_rows(), vec![UiRowRef::Field(1)]);
+        assert_eq!(app.selected_row, 0);
+        assert_eq!(app.handle_key(ConfigUiKey::Backspace), ConfigUiIntent::None);
+        assert_eq!(app.search, "them");
+        assert_eq!(app.handle_key(ConfigUiKey::Ctrl('u')), ConfigUiIntent::None);
+        assert!(app.search.is_empty());
+        assert_eq!(app.handle_key(ConfigUiKey::Enter), ConfigUiIntent::None);
+        assert!(!app.search_active);
+    }
+
+    // Defends: single-select and multiselect edit keys are generic reducer behavior.
+    #[test]
+    fn reducer_drives_single_select_and_multiselect_edits() {
+        let mut app = ConfigUiApp::new(test_model());
+
+        app.begin_edit_field(1);
+        assert_eq!(app.edit.as_ref().expect("single edit").choice_index, 0);
+        assert_eq!(app.handle_key(ConfigUiKey::Char('j')), ConfigUiIntent::None);
+        assert_eq!(app.edit.as_ref().expect("single edit").choice_index, 1);
+        assert_eq!(app.handle_key(ConfigUiKey::Char(' ')), ConfigUiIntent::None);
+        assert_eq!(app.edit.as_ref().expect("single edit").input, "dark");
+        assert_eq!(
+            app.handle_key(ConfigUiKey::Enter),
+            ConfigUiIntent::SetField {
+                field_index: 1,
+                path: "ui.theme".to_string(),
+                value: json!("dark"),
+            }
+        );
+
+        app.begin_edit_field(2);
+        assert_eq!(app.edit.as_ref().expect("multi edit").choice_index, 0);
+        assert_eq!(app.handle_key(ConfigUiKey::Char('j')), ConfigUiIntent::None);
+        assert_eq!(app.edit.as_ref().expect("multi edit").choice_index, 1);
+        assert_eq!(app.handle_key(ConfigUiKey::Char(' ')), ConfigUiIntent::None);
+        assert_eq!(
+            app.handle_key(ConfigUiKey::Enter),
+            ConfigUiIntent::SetField {
+                field_index: 2,
+                path: "plugins.enabled".to_string(),
+                value: json!(["git", "search"]),
+            }
+        );
+    }
+
+    fn test_model() -> ConfigUiModel {
+        ConfigUiModel {
+            active_config_path: PathBuf::from("/tmp/acme/settings.jsonc"),
+            cursor_config_path: PathBuf::from("/tmp/acme/cursors.jsonc"),
+            default_cursor_config_path: PathBuf::from("/tmp/acme/default_cursors.jsonc"),
+            active_config_exists: true,
+            config_owner: ConfigUiPathOwner::User,
+            config_read_only: false,
+            tabs: vec!["general".to_string()],
+            fields: vec![
+                field("server.enabled", "bool", "false", &[]),
+                field("ui.theme", "string", "\"light\"", &["light", "dark"]),
+                field(
+                    "plugins.enabled",
+                    "string_list",
+                    r#"["git"]"#,
+                    &["git", "search"],
+                ),
+            ],
+            sidecars: Vec::new(),
+            native_config_statuses: Vec::new(),
+            diagnostics: Vec::new(),
+        }
     }
 }
