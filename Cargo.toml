@@ -1,0 +1,12 @@
+[package]
+name = "yazelix-ratconfig"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "Apache-2.0"
+description = "Reusable Ratatui config editor for JSONC-backed settings"
+repository = "https://github.com/luccahuguet/yazelix-ratconfig"
+
+[dependencies]
+ratatui = { version = "0.30.0", default-features = false }
+serde_json = "1.0"
