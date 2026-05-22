@@ -14,6 +14,6 @@ It is extracted from Yazelix, but it is project-agnostic: applications provide t
 
 Yazelix-specific behavior stays out of this repository, including Home Manager ownership, Zellij/Yazi policy, generated runtime refreshes, and Yazelix command names
 
-## Initial Status
+## Status
 
-This repository starts as the child crate shell for the extraction. The reusable implementation is moved from the Yazelix main repository in focused follow-up commits
+The reusable model, editor, renderer, JSONC patcher, and migration primitives live in this crate. Host applications still own their own schema loading, validation, persistence policy, and post-save apply behavior
