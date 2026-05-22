@@ -47,6 +47,14 @@ impl ConfigUiApp {
 }
 
 pub fn draw_config_ui(frame: &mut Frame<'_>, app: &mut ConfigUiApp) {
+    draw_config_ui_with_details(frame, app, ConfigUiApp::render_details);
+}
+
+pub fn draw_config_ui_with_details(
+    frame: &mut Frame<'_>,
+    app: &mut ConfigUiApp,
+    detail_lines: impl Fn(&ConfigUiApp, UiRowRef) -> Vec<Line<'static>>,
+) {
     let area = frame.area();
     let root = Layout::default()
         .direction(Direction::Vertical)
@@ -60,7 +68,7 @@ pub fn draw_config_ui(frame: &mut Frame<'_>, app: &mut ConfigUiApp) {
 
     render_header(frame, app, root[0]);
     render_tabs(frame, app, root[1]);
-    render_body(frame, app, root[2]);
+    render_body(frame, app, root[2], &detail_lines);
     render_footer(frame, app, root[3]);
 }
 
@@ -196,7 +204,12 @@ fn render_tabs(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect) {
     );
 }
 
-fn render_body(frame: &mut Frame<'_>, app: &mut ConfigUiApp, area: Rect) {
+fn render_body(
+    frame: &mut Frame<'_>,
+    app: &mut ConfigUiApp,
+    area: Rect,
+    detail_lines: &impl Fn(&ConfigUiApp, UiRowRef) -> Vec<Line<'static>>,
+) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(44), Constraint::Percentage(56)])
@@ -204,7 +217,13 @@ fn render_body(frame: &mut Frame<'_>, app: &mut ConfigUiApp, area: Rect) {
     let rows = app.visible_rows();
     app.clamp_selection_for_len(rows.len());
     render_list(frame, app, chunks[0], &rows);
-    render_details(frame, app, chunks[1], rows.get(app.selected_row).copied());
+    render_details(
+        frame,
+        app,
+        chunks[1],
+        rows.get(app.selected_row).copied(),
+        detail_lines,
+    );
 }
 
 fn render_list(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect, rows: &[UiRowRef]) {
@@ -286,9 +305,15 @@ fn status_list_header_line() -> Line<'static> {
     ])
 }
 
-fn render_details(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect, row: Option<UiRowRef>) {
+fn render_details(
+    frame: &mut Frame<'_>,
+    app: &ConfigUiApp,
+    area: Rect,
+    row: Option<UiRowRef>,
+    detail_lines: &impl Fn(&ConfigUiApp, UiRowRef) -> Vec<Line<'static>>,
+) {
     let lines = match row {
-        Some(row) => app.render_details(row),
+        Some(row) => detail_lines(app, row),
         None => vec![Line::from(Span::styled(
             "No settings match this tab/search.",
             Style::default().fg(Color::Gray),
