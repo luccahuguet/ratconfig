@@ -1,14 +1,9 @@
+use crate::patch::split_dotted_path;
 use jsonc_parser::ParseOptions;
 use jsonc_parser::cst::{CstInputValue, CstObject, CstRootNode};
 use serde_json::Value as JsonValue;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PatchMutation {
-    Inserted,
-    Replaced,
-    Removed,
-    Unchanged,
-}
+pub use crate::patch::PatchMutation;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PatchOutcome {
@@ -36,7 +31,7 @@ pub fn set_jsonc_value_text(
     value: &JsonValue,
 ) -> Result<PatchOutcome, PatchError> {
     let parts = split_path(path)?;
-    let replacement = cst_input_from_json_value(value, path)?;
+    let replacement = cst_input_from_json_value(value);
     let root = parse_cst(raw)?;
     let root_object = root.object_value_or_create().ok_or_else(|| {
         rewrite_required(
@@ -136,26 +131,9 @@ fn validate_jsonc(raw: &str) -> Result<(), PatchError> {
 }
 
 fn split_path(path: &str) -> Result<Vec<String>, PatchError> {
-    let parts = path
-        .split('.')
-        .map(str::trim)
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
-    if parts.is_empty()
-        || parts.iter().any(|part| {
-            part.is_empty()
-                || part.contains('[')
-                || part.contains(']')
-                || !part
-                    .chars()
-                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-        })
-    {
-        return Err(PatchError::InvalidPath {
-            path: path.to_string(),
-        });
-    }
-    Ok(parts)
+    split_dotted_path(path).ok_or_else(|| PatchError::InvalidPath {
+        path: path.to_string(),
+    })
 }
 
 fn parent_object_or_create(
@@ -202,39 +180,22 @@ fn parent_object_if_present(
     Ok(Some(current))
 }
 
-fn cst_input_from_json_value(value: &JsonValue, path: &str) -> Result<CstInputValue, PatchError> {
+fn cst_input_from_json_value(value: &JsonValue) -> CstInputValue {
     match value {
-        JsonValue::Null => Ok(CstInputValue::Null),
-        JsonValue::Bool(value) => Ok(CstInputValue::Bool(*value)),
-        JsonValue::Number(value) => Ok(CstInputValue::Number(value.to_string())),
-        JsonValue::String(value) => Ok(CstInputValue::String(value.clone())),
+        JsonValue::Null => CstInputValue::Null,
+        JsonValue::Bool(value) => CstInputValue::Bool(*value),
+        JsonValue::Number(value) => CstInputValue::Number(value.to_string()),
+        JsonValue::String(value) => CstInputValue::String(value.clone()),
         JsonValue::Array(values) => {
-            let mut items = Vec::new();
-            for value in values {
-                let Some(value) = value.as_str() else {
-                    return Err(unsupported_value(
-                        path,
-                        "Only arrays of strings are supported by the safe JSONC patcher.",
-                    ));
-                };
-                items.push(CstInputValue::String(value.to_string()));
-            }
-            Ok(CstInputValue::Array(items))
+            CstInputValue::Array(values.iter().map(cst_input_from_json_value).collect())
         }
         JsonValue::Object(object) => {
             let mut properties = Vec::new();
             for (key, value) in object {
-                properties.push((key.clone(), cst_input_from_json_value(value, path)?));
+                properties.push((key.clone(), cst_input_from_json_value(value)));
             }
-            Ok(CstInputValue::Object(properties))
+            CstInputValue::Object(properties)
         }
-    }
-}
-
-fn unsupported_value(path: &str, detail: &str) -> PatchError {
-    PatchError::UnsupportedValue {
-        path: path.to_string(),
-        detail: detail.to_string(),
     }
 }
 
@@ -242,5 +203,50 @@ fn rewrite_required(path: &str, detail: &str) -> PatchError {
     PatchError::RewriteRequired {
         path: path.to_string(),
         detail: detail.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // Defends: contract defaults can materialize structured JSON values without forcing a whole-file rewrite.
+    #[test]
+    fn set_jsonc_value_supports_nested_arrays_and_objects() {
+        let raw = r#"{
+  // keep root comment
+  "zellij": {}
+}
+"#;
+
+        let outcome = set_jsonc_value_text(
+            raw,
+            "zellij.custom_popups",
+            &json!([
+                {
+                    "id": "btm",
+                    "command": ["btm", "--basic"],
+                    "keep_alive": true,
+                    "geometry": { "width": 80, "height": 24 }
+                }
+            ]),
+        )
+        .expect("structured patch");
+        let value = parse_jsonc_value(&outcome.text).expect("jsonc");
+
+        assert_eq!(outcome.mutation, PatchMutation::Inserted);
+        assert!(outcome.text.contains("// keep root comment"));
+        assert_eq!(
+            get_json_path(&value, "zellij.custom_popups"),
+            Some(&json!([
+                {
+                    "id": "btm",
+                    "command": ["btm", "--basic"],
+                    "keep_alive": true,
+                    "geometry": { "width": 80, "height": 24 }
+                }
+            ]))
+        );
     }
 }

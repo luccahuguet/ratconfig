@@ -2,6 +2,7 @@ use crate::jsonc::{
     PatchError, PatchMutation, get_json_path, parse_jsonc_value, set_jsonc_value_text,
     unset_jsonc_value_text,
 };
+use crate::patch::dotted_paths_overlap;
 use serde_json::Value as JsonValue;
 
 pub type ValueTransform = fn(&JsonValue) -> Result<Option<JsonValue>, String>;
@@ -49,6 +50,7 @@ pub enum MigrationMutation {
 pub enum MigrationError {
     Patch(PatchError),
     DestinationExists { from: String, to: String },
+    OverlappingPaths { from: String, to: String },
     TransformFailed { path: String, message: String },
 }
 
@@ -100,6 +102,12 @@ fn rename_path(
     to: &str,
     mutations: &mut Vec<MigrationMutation>,
 ) -> Result<String, MigrationError> {
+    if dotted_paths_overlap(from, to) {
+        return Err(MigrationError::OverlappingPaths {
+            from: from.to_string(),
+            to: to.to_string(),
+        });
+    }
     let value_tree = parse_jsonc_value(text)?;
     let Some(value) = get_json_path(&value_tree, from).cloned() else {
         return Ok(text.to_string());
@@ -236,6 +244,27 @@ mod tests {
             MigrationError::DestinationExists {
                 from: "old".to_string(),
                 to: "new".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn rename_refuses_overlapping_paths() {
+        let raw = r#"{ "old": { "enabled": true } }"#;
+        let error = apply_migrations_text(
+            raw,
+            &[MigrationOp::Rename {
+                from: "old".to_string(),
+                to: "old.enabled_copy".to_string(),
+            }],
+        )
+        .expect_err("overlap");
+
+        assert_eq!(
+            error,
+            MigrationError::OverlappingPaths {
+                from: "old".to_string(),
+                to: "old.enabled_copy".to_string()
             }
         );
     }

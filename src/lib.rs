@@ -1,15 +1,19 @@
 //! Reusable Ratatui config editor boundary.
 //!
 //! Applications own loading, validation, persistence, and post-save apply
-//! behavior. Ratconfig owns project-agnostic model, editor, rendering, JSONC
+//! behavior. Ratconfig owns project-agnostic model, editor, rendering, text
 //! patching, and migration semantics.
 
+pub mod contract;
 pub mod editor;
 pub mod jsonc;
 pub mod migration;
 pub mod model;
+pub mod patch;
 pub mod render;
+pub mod toml_adapter;
 
+pub use contract::*;
 pub use editor::*;
 pub use model::{
     ConfigUiApplyStatus, ConfigUiContractField, ConfigUiDiagnostic, ConfigUiEditBehavior,

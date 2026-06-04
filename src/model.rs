@@ -795,7 +795,7 @@ help = "Theme name"
             field.edit_value,
             r#"["git","search","preview","terminal","theme"]"#
         );
-        assert_eq!(field.rebuild_required, true);
+        assert!(field.rebuild_required);
         assert_eq!(
             field.edit_behavior,
             ConfigUiEditBehavior::FriendlyStringList
