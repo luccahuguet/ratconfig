@@ -10,6 +10,7 @@ pub mod jsonc;
 pub mod migration;
 pub mod model;
 pub mod patch;
+#[cfg(feature = "ui")]
 pub mod render;
 pub mod toml_adapter;
 
@@ -27,4 +28,5 @@ pub use model::{
     effective_string_list_config, get_json_path, owner_label, render_json_edit_value,
     render_json_value, schema_tabs, tab_index, toml_value_to_json, visible_rows_for_tab_search,
 };
+#[cfg(feature = "ui")]
 pub use render::*;
