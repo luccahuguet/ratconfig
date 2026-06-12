@@ -4,6 +4,10 @@ Yazelix Ratconfig is a reusable Rust crate for building Ratatui config editors o
 
 It is extracted from Yazelix, but it is project-agnostic: applications provide their own config schema, default values, validation, file writes, and post-save apply behavior
 
+![Yazelix config UI powered by ratconfig](assets/screenshots/yazelix_config_ui.png)
+
+Example host integration in Yazelix: ratconfig owns the reusable tabs, rows, edit state, details pane, diagnostics, and rendering while the host supplies product-specific settings metadata and save/apply policy
+
 ## What It Owns
 
 - generic config document and field model
