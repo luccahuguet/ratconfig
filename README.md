@@ -1,6 +1,6 @@
-# Yazelix Ratconfig
+# Ratconfig
 
-Yazelix Ratconfig is a reusable Rust crate for building Ratatui config editors over JSONC- and TOML-backed settings
+Ratconfig is a reusable Rust crate for building Ratatui config editors over JSONC- and TOML-backed settings
 
 It is extracted from Yazelix, but it is project-agnostic: applications provide their own config schema, default values, validation, file writes, and post-save apply behavior
 
@@ -36,7 +36,7 @@ Yazelix-specific behavior stays out of this repository, including Home Manager o
 
 ```rust
 use std::path::PathBuf;
-use yazelix_ratconfig::{
+use ratconfig::{
     ConfigUiApplyStatus, ConfigUiEditBehavior, ConfigUiField, ConfigUiModel,
     ConfigUiPathOwner, ConfigUiValueState,
     jsonc::{PatchError, set_jsonc_value_text},
@@ -94,7 +94,7 @@ Host applications build the model from their own schema and config files, then u
 Ratconfig can also treat a config file as having "joined" a host-defined contract. The host gives ratconfig a linear version history, safe automatic operations, and explicit manual steps for changes that cannot be inferred without user intent.
 
 ```rust
-use yazelix_ratconfig::{
+use ratconfig::{
     ConfigContract, ContractChange, ManualMigrationStep,
     contract::{
         join_jsonc_contract_text_from_version, join_toml_contract_text_from_version,
@@ -133,7 +133,7 @@ fn contract() -> ConfigContract {
     }
 }
 
-fn adopt_old_config(raw: &str) -> Result<String, yazelix_ratconfig::ContractError> {
+fn adopt_old_config(raw: &str) -> Result<String, ratconfig::ContractError> {
     let outcome = join_jsonc_contract_text_from_version(
         raw,
         &contract(),
@@ -143,7 +143,7 @@ fn adopt_old_config(raw: &str) -> Result<String, yazelix_ratconfig::ContractErro
     Ok(outcome.text)
 }
 
-fn reconcile_existing_config(raw: &str) -> Result<String, yazelix_ratconfig::ContractError> {
+fn reconcile_existing_config(raw: &str) -> Result<String, ratconfig::ContractError> {
     let outcome = reconcile_joined_jsonc_contract_text(
         raw,
         &contract(),
@@ -152,7 +152,7 @@ fn reconcile_existing_config(raw: &str) -> Result<String, yazelix_ratconfig::Con
     Ok(outcome.text)
 }
 
-fn adopt_old_toml_config(raw: &str) -> Result<String, yazelix_ratconfig::ContractError> {
+fn adopt_old_toml_config(raw: &str) -> Result<String, ratconfig::ContractError> {
     let outcome = join_toml_contract_text_from_version(
         raw,
         &contract(),
@@ -162,7 +162,7 @@ fn adopt_old_toml_config(raw: &str) -> Result<String, yazelix_ratconfig::Contrac
     Ok(outcome.text)
 }
 
-fn reconcile_existing_toml_config(raw: &str) -> Result<String, yazelix_ratconfig::ContractError> {
+fn reconcile_existing_toml_config(raw: &str) -> Result<String, ratconfig::ContractError> {
     let outcome = reconcile_joined_toml_contract_text(
         raw,
         &contract(),

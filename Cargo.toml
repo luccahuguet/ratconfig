@@ -1,11 +1,11 @@
 [package]
-name = "yazelix-ratconfig"
+name = "ratconfig"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.94"
 license = "Apache-2.0"
 description = "Reusable Ratatui config editor for JSONC- and TOML-backed settings"
-repository = "https://github.com/luccahuguet/yazelix-ratconfig"
+repository = "https://github.com/luccahuguet/ratconfig"
 
 [dependencies]
 jsonc-parser = { version = "0.32.3", features = ["cst", "serde"] }
