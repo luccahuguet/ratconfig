@@ -314,9 +314,13 @@ pub fn config_ui_metadata_from_toml(metadata: &toml::Table) -> Result<ConfigUiMe
     Ok(ConfigUiMetadata { tabs, fields })
 }
 
-pub fn schema_tabs(schema: &JsonValue, default_tabs: &[&str]) -> Vec<String> {
+pub fn schema_tabs(
+    schema: &JsonValue,
+    schema_extension_key: &str,
+    default_tabs: &[&str],
+) -> Vec<String> {
     let mut tabs = schema
-        .get("x-yazelix")
+        .get(schema_extension_key)
         .and_then(|value| value.get("tabs"))
         .and_then(JsonValue::as_array)
         .into_iter()
@@ -643,17 +647,21 @@ mod tests {
     #[test]
     fn schema_tabs_use_schema_order_or_fallback_with_advanced() {
         let schema = json!({
-            "x-yazelix": {
+            "x-host-config": {
                 "tabs": ["general", "editor"]
             }
         });
         assert_eq!(
-            schema_tabs(&schema, &["fallback"]),
+            schema_tabs(&schema, "x-host-config", &["fallback"]),
             vec!["general", "editor", "advanced"]
         );
 
         assert_eq!(
-            schema_tabs(&json!({}), &["general", "workspace", "advanced"]),
+            schema_tabs(
+                &json!({}),
+                "x-host-config",
+                &["general", "workspace", "advanced"]
+            ),
             vec!["general", "workspace", "advanced"]
         );
     }
