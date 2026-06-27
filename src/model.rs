@@ -16,6 +16,7 @@ pub struct ConfigUiModel {
     pub active_config_exists: bool,
     pub config_owner: ConfigUiPathOwner,
     pub config_read_only: bool,
+    pub sources: Vec<ConfigUiSource>,
     pub tabs: Vec<String>,
     pub fields: Vec<ConfigUiField>,
     pub sidecars: Vec<ConfigUiSidecar>,
@@ -28,6 +29,17 @@ pub enum ConfigUiPathOwner {
     Default,
     HomeManager,
     User,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigUiSource {
+    pub id: String,
+    pub tab: String,
+    pub label: String,
+    pub path: PathBuf,
+    pub exists: bool,
+    pub owner: ConfigUiPathOwner,
+    pub read_only: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +81,20 @@ pub fn tab_index(tabs: &[String], tab: &str) -> usize {
     tabs.iter()
         .position(|candidate| candidate == tab)
         .unwrap_or(tabs.len())
+}
+
+pub fn selected_config_source(
+    model: &ConfigUiModel,
+    selected_tab: usize,
+) -> Option<&ConfigUiSource> {
+    let tab = model.tabs.get(selected_tab)?;
+    if tab == "advanced" {
+        return None;
+    }
+    model
+        .sources
+        .iter()
+        .find(|source| source.tab == tab.as_str())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -622,6 +648,48 @@ mod tests {
             detail: "Host applies this after saving.".to_string(),
             pending: true,
         }
+    }
+
+    // Defends: source metadata is selected by host tab while operational tabs can keep the legacy fallback.
+    #[test]
+    fn selected_config_source_matches_selected_tab() {
+        let source = |id: &str, tab: &str| ConfigUiSource {
+            id: id.to_string(),
+            tab: tab.to_string(),
+            label: String::new(),
+            path: PathBuf::new(),
+            exists: true,
+            owner: ConfigUiPathOwner::User,
+            read_only: false,
+        };
+        let model = ConfigUiModel {
+            active_config_path: PathBuf::from("/tmp/acme/settings.jsonc"),
+            cursor_config_path: PathBuf::new(),
+            default_cursor_config_path: PathBuf::new(),
+            active_config_exists: true,
+            config_owner: ConfigUiPathOwner::User,
+            config_read_only: false,
+            sources: vec![
+                source("settings-source", "settings"),
+                source("keys-source", "keys"),
+                source("advanced-source", "advanced"),
+            ],
+            tabs: vec![
+                "settings".to_string(),
+                "keys".to_string(),
+                "advanced".to_string(),
+            ],
+            fields: Vec::new(),
+            sidecars: Vec::new(),
+            native_config_statuses: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+
+        assert_eq!(
+            selected_config_source(&model, 1).map(|source| source.id.as_str()),
+            Some("keys-source")
+        );
+        assert!(selected_config_source(&model, 2).is_none());
     }
 
     fn spec<'a>(

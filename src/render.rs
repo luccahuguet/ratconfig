@@ -11,8 +11,18 @@ const HEADER_HORIZONTAL_PADDING: u16 = 1;
 const FIELD_TAKES_EFFECT_COLUMN_WIDTH: usize = 26;
 const FIELD_SETTING_COLUMN_WIDTH: usize = 30;
 const FIELD_VALUE_COLUMN_WIDTH: usize = 18;
+const HEADER_MIN_PATH_WIDTH: usize = 8;
+const HEADER_MIN_SOURCE_LABEL_WIDTH: usize = 4;
+const HEADER_SOURCE_LABEL_WIDTH: usize = 18;
 const STATUS_COLUMN_WIDTH: usize = 9;
 const STATUS_ITEM_COLUMN_WIDTH: usize = 42;
+
+struct HeaderMetadata {
+    source_label: Option<String>,
+    source_path: String,
+    owner: &'static str,
+    mode: &'static str,
+}
 
 impl ConfigUiApp {
     pub fn render_details(&self, row: UiRowRef) -> Vec<Line<'static>> {
@@ -73,20 +83,7 @@ pub fn draw_config_ui_with_details(
 }
 
 fn render_header(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect) {
-    let owner = owner_label(app.model.config_owner);
-    let write_state = if app.model.config_read_only {
-        "read-only"
-    } else {
-        "writable"
-    };
-    let source = if app.model.active_config_exists {
-        app.model.active_config_path.display().to_string()
-    } else {
-        format!(
-            "{} (missing; showing shipped defaults)",
-            app.model.active_config_path.display()
-        )
-    };
+    let metadata = header_metadata(&app.model, app.selected_tab);
     let warning_count = app
         .model
         .diagnostics
@@ -140,9 +137,7 @@ fn render_header(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect) {
     if metadata_area.width > 0 {
         frame.render_widget(
             Paragraph::new(header_metadata_line(
-                &source,
-                owner,
-                write_state,
+                &metadata,
                 &diagnostic_text,
                 diagnostic_style,
                 metadata_area.width as usize,
@@ -153,35 +148,82 @@ fn render_header(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect) {
     }
 }
 
+fn header_metadata(model: &ConfigUiModel, selected_tab: usize) -> HeaderMetadata {
+    if let Some(source) = selected_config_source(model, selected_tab) {
+        return HeaderMetadata {
+            source_label: Some(source.label.clone()),
+            source_path: config_path_text(&source.path, source.exists),
+            owner: owner_label(source.owner),
+            mode: write_mode(source.read_only),
+        };
+    }
+
+    HeaderMetadata {
+        source_label: None,
+        source_path: config_path_text(&model.active_config_path, model.active_config_exists),
+        owner: owner_label(model.config_owner),
+        mode: write_mode(model.config_read_only),
+    }
+}
+
+fn config_path_text(path: &std::path::Path, exists: bool) -> String {
+    if exists {
+        path.display().to_string()
+    } else {
+        format!("{} (missing; showing shipped defaults)", path.display())
+    }
+}
+
+fn write_mode(read_only: bool) -> &'static str {
+    if read_only { "read-only" } else { "writable" }
+}
+
 fn header_metadata_line(
-    source: &str,
-    owner: &str,
-    mode: &str,
+    metadata: &HeaderMetadata,
     diagnostic: &str,
     diagnostic_style: Style,
     width: usize,
 ) -> Line<'static> {
-    let fixed_width = "path: ".len()
+    let base_width = "path: ".len()
         + "  owner: ".len()
-        + owner.len()
+        + metadata.owner.len()
         + "  mode: ".len()
-        + mode.len()
+        + metadata.mode.len()
         + "  diag: ".len()
         + diagnostic.len();
-    let path = truncate_start(source, width.saturating_sub(fixed_width));
-    Line::from(vec![
+    let source_prefix_width = "source: ".len() + "  ".len();
+    let source_label = metadata.source_label.as_deref().and_then(|label| {
+        let available =
+            width.saturating_sub(base_width + source_prefix_width + HEADER_MIN_PATH_WIDTH);
+        (available >= HEADER_MIN_SOURCE_LABEL_WIDTH)
+            .then(|| truncate(label, available.min(HEADER_SOURCE_LABEL_WIDTH)))
+    });
+    let fixed_width = base_width
+        + source_label
+            .as_ref()
+            .map(|label| source_prefix_width + label.len())
+            .unwrap_or_default();
+    let path = truncate_start(&metadata.source_path, width.saturating_sub(fixed_width));
+    let mut spans = Vec::new();
+    if let Some(label) = source_label {
+        spans.push(Span::styled("source: ", metadata_key_style()));
+        spans.push(Span::styled(label, metadata_value_style()));
+        spans.push(Span::raw("  "));
+    }
+    spans.extend([
         Span::styled("path: ", metadata_key_style()),
         Span::styled(path, metadata_value_style()),
         Span::raw("  "),
         Span::styled("owner: ", metadata_key_style()),
-        Span::styled(owner.to_string(), metadata_value_style()),
+        Span::styled(metadata.owner, metadata_value_style()),
         Span::raw("  "),
         Span::styled("mode: ", metadata_key_style()),
-        Span::styled(mode.to_string(), metadata_value_style()),
+        Span::styled(metadata.mode, metadata_value_style()),
         Span::raw("  "),
         Span::styled("diag: ", metadata_key_style()),
         Span::styled(diagnostic.to_string(), diagnostic_style),
-    ])
+    ]);
+    Line::from(spans)
 }
 
 fn render_tabs(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect) {
@@ -909,6 +951,7 @@ mod tests {
             active_config_exists: true,
             config_owner: ConfigUiPathOwner::User,
             config_read_only: false,
+            sources: Vec::new(),
             tabs: vec!["general".to_string()],
             fields: vec![ConfigUiField {
                 source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
@@ -935,6 +978,98 @@ mod tests {
             native_config_statuses: Vec::new(),
             diagnostics: Vec::new(),
         }
+    }
+
+    fn source(
+        tab: &str,
+        label: &str,
+        exists: bool,
+        owner: ConfigUiPathOwner,
+        read_only: bool,
+    ) -> ConfigUiSource {
+        ConfigUiSource {
+            id: tab.to_string(),
+            tab: tab.to_string(),
+            label: label.to_string(),
+            path: PathBuf::from(format!("/home/alex/.config/acme/{tab}.toml")),
+            exists,
+            owner,
+            read_only,
+        }
+    }
+
+    // Defends: selected file-backed tabs drive header source, path, owner, and write-mode metadata.
+    #[test]
+    fn header_uses_selected_config_source_metadata() {
+        let mut model = test_model(ConfigUiValueState::Explicit);
+        let owner = ConfigUiPathOwner::HomeManager;
+        model.tabs = vec!["settings".to_string(), "keys".to_string()];
+        model.sources = vec![
+            source("settings", "Settings", true, ConfigUiPathOwner::User, false),
+            source("keys", "Keybindings", false, owner, true),
+        ];
+
+        let metadata = header_metadata(&model, 1);
+        assert_eq!(metadata.source_label.as_deref(), Some("Keybindings"));
+        assert!(metadata.source_path.contains("keys.toml"));
+        assert!(metadata.source_path.contains("missing"));
+        assert_eq!(metadata.owner, "home-manager");
+        assert_eq!(metadata.mode, "read-only");
+
+        let line = header_metadata_line(&metadata, "ok", Style::default(), 160);
+        let text = rendered_text(&line);
+        assert!(text.contains("source: Keybindings"));
+        assert!(text.contains("owner: home-manager"));
+        assert!(text.contains("mode: read-only"));
+    }
+
+    // Defends: callers without sources and the reserved advanced tab keep global fallback metadata.
+    #[test]
+    fn header_falls_back_to_model_config_metadata() {
+        let metadata = header_metadata(&test_model(ConfigUiValueState::Explicit), 0);
+        assert_eq!(metadata.source_label, None);
+        assert!(metadata.source_path.contains("settings.jsonc"));
+        assert_eq!(metadata.owner, "user");
+        assert_eq!(metadata.mode, "writable");
+
+        let line = header_metadata_line(&metadata, "ok", Style::default(), 160);
+        assert!(!rendered_text(&line).contains("source:"));
+
+        let mut model = test_model(ConfigUiValueState::Explicit);
+        let owner = ConfigUiPathOwner::HomeManager;
+        model.tabs = vec!["settings".to_string(), "advanced".to_string()];
+        model.sources = vec![source("advanced", "Advanced Source", true, owner, true)];
+
+        let metadata = header_metadata(&model, 1);
+        assert_eq!(metadata.source_label, None);
+        assert!(metadata.source_path.contains("settings.jsonc"));
+        assert_eq!(metadata.owner, "user");
+        assert_eq!(metadata.mode, "writable");
+    }
+
+    // Defends: source labels are bounded and omitted before they crowd out path context.
+    #[test]
+    fn header_bounds_source_label_for_narrow_widths() {
+        let metadata = HeaderMetadata {
+            source_label: Some("Very Long Source Label".to_string()),
+            source_path: "/home/alex/.config/acme/settings.toml".to_string(),
+            owner: "user",
+            mode: "writable",
+        };
+
+        let wide_text = rendered_text(&header_metadata_line(
+            &metadata,
+            "ok",
+            Style::default(),
+            120,
+        ));
+        assert!(wide_text.contains("source: Very Long Sourc..."));
+        assert!(!wide_text.contains("Very Long Source Label"));
+
+        let narrow_text =
+            rendered_text(&header_metadata_line(&metadata, "ok", Style::default(), 30));
+        assert!(!narrow_text.contains("source:"));
+        assert!(narrow_text.contains("path:"));
     }
 
     // Defends: settings rows expose apply/setting/value without repeating complete-config explicit state.

@@ -285,6 +285,7 @@ mod tests {
             active_config_exists: true,
             config_owner: ConfigUiPathOwner::User,
             config_read_only: false,
+            sources: Vec::new(),
             tabs: vec!["general".to_string()],
             fields: vec![
                 field("server.enabled", "bool", "false", &[]),

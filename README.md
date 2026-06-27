@@ -51,6 +51,7 @@ fn model() -> ConfigUiModel {
         active_config_exists: true,
         config_owner: ConfigUiPathOwner::User,
         config_read_only: false,
+        sources: Vec::new(),
         tabs: vec!["general".to_string()],
         fields: vec![ConfigUiField {
             source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
@@ -90,6 +91,8 @@ fn patch_jsonc() -> Result<String, PatchError> {
 ```
 
 Host applications build the model from their own schema and config files, then use ratconfig editor/rendering helpers inside their terminal event loop. After an edit, the host validates and writes the patched text, reloads the model, and applies any live runtime changes it owns
+
+Populate `ConfigUiModel::sources` when tabs represent separate host-owned config documents. Ratconfig uses that metadata only to render the selected tab's label, path, owner, and write mode; hosts still own discovery, loading, writes, creation policy, and validation
 
 Hosts that want ratconfig to own the crossterm terminal setup, draw loop, event reads, and key conversion can enable the optional runner:
 
