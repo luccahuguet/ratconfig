@@ -1,3 +1,5 @@
+// Test lane: default
+
 //! Deterministic config contract reconciliation.
 //!
 //! The low-level migration modules own individual text edits. This module

@@ -1,3 +1,5 @@
+// Test lane: default
+
 use crate::jsonc::{
     PatchError, PatchMutation, get_json_path, parse_jsonc_value, set_jsonc_value_text,
     unset_jsonc_value_text,

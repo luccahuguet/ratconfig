@@ -1,3 +1,5 @@
+// Test lane: default
+
 use super::{
     AppliedContractChange, ConfigContract, ContractApplyOutcome, ContractError,
     ContractJoinOutcome, ContractState, append_applied_change_ids, apply_contract_with,

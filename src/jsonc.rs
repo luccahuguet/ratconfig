@@ -1,3 +1,5 @@
+// Test lane: default
+
 use crate::patch::split_dotted_path;
 use jsonc_parser::ParseOptions;
 use jsonc_parser::cst::{CstInputValue, CstObject, CstRootNode};
