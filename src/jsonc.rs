@@ -1,6 +1,6 @@
 // Test lane: default
 
-use crate::patch::split_dotted_path;
+use crate::patch::{get_dotted_json_path, split_dotted_path};
 use jsonc_parser::ParseOptions;
 use jsonc_parser::cst::{CstInputValue, CstObject, CstRootNode};
 use serde_json::Value as JsonValue;
@@ -103,11 +103,7 @@ pub fn parse_jsonc_value(raw: &str) -> Result<JsonValue, PatchError> {
 }
 
 pub fn get_json_path<'a>(value: &'a JsonValue, path: &str) -> Option<&'a JsonValue> {
-    let mut current = value;
-    for part in path.split('.') {
-        current = current.as_object()?.get(part)?;
-    }
-    Some(current)
+    get_dotted_json_path(value, path)
 }
 
 pub fn jsonc_parse_options() -> ParseOptions {

@@ -4,7 +4,7 @@ use crate::migration::{
     MigrationMutation, MigrationOp, ValueTransform, defaults_to_add_default_ops,
 };
 use crate::model::toml_value_to_json;
-use crate::patch::{PatchMutation, dotted_paths_overlap, split_dotted_path};
+use crate::patch::{PatchMutation, dotted_paths_overlap, get_dotted_json_path, split_dotted_path};
 use serde_json::Value as JsonValue;
 use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value};
 
@@ -115,11 +115,7 @@ pub fn parse_toml_value(raw: &str) -> Result<JsonValue, TomlPatchError> {
 }
 
 pub fn get_toml_path<'a>(value: &'a JsonValue, path: &str) -> Option<&'a JsonValue> {
-    let mut current = value;
-    for part in path.split('.') {
-        current = current.as_object()?.get(part)?;
-    }
-    Some(current)
+    get_dotted_json_path(value, path)
 }
 
 pub fn apply_toml_migrations_text(

@@ -1,3 +1,5 @@
+use serde_json::Value as JsonValue;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PatchMutation {
     Inserted,
@@ -9,8 +11,7 @@ pub enum PatchMutation {
 pub fn split_dotted_path(path: &str) -> Option<Vec<String>> {
     let parts = path
         .split('.')
-        .map(str::trim)
-        .map(ToOwned::to_owned)
+        .map(|part| part.trim().to_owned())
         .collect::<Vec<_>>();
     if parts.is_empty()
         || parts.iter().any(|part| {
@@ -28,15 +29,13 @@ pub fn split_dotted_path(path: &str) -> Option<Vec<String>> {
 }
 
 pub fn dotted_paths_overlap(a: &str, b: &str) -> bool {
-    let Some(a) = split_dotted_path(a) else {
+    let (Some(a), Some(b)) = (split_dotted_path(a), split_dotted_path(b)) else {
         return false;
     };
-    let Some(b) = split_dotted_path(b) else {
-        return false;
-    };
-    is_strict_prefix(&a, &b) || is_strict_prefix(&b, &a)
+    (a.len() < b.len() && b.starts_with(&a)) || (b.len() < a.len() && a.starts_with(&b))
 }
 
-fn is_strict_prefix(prefix: &[String], path: &[String]) -> bool {
-    prefix.len() < path.len() && path.starts_with(prefix)
+pub(crate) fn get_dotted_json_path<'a>(value: &'a JsonValue, path: &str) -> Option<&'a JsonValue> {
+    path.split('.')
+        .try_fold(value, |current, part| current.as_object()?.get(part))
 }

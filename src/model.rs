@@ -1,5 +1,6 @@
 // Test lane: default
 
+use crate::patch::get_dotted_json_path;
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -533,11 +534,7 @@ fn search_matches<'a>(search: &str, candidates: impl IntoIterator<Item = &'a str
 }
 
 pub fn get_json_path<'a>(value: &'a JsonValue, path: &str) -> Option<&'a JsonValue> {
-    let mut current = value;
-    for part in path.split('.') {
-        current = current.as_object()?.get(part)?;
-    }
-    Some(current)
+    get_dotted_json_path(value, path)
 }
 
 pub fn effective_json_path<'a>(
