@@ -257,6 +257,7 @@ mod tests {
         ConfigUiField {
             source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
             path: path.to_string(),
+            display_label: String::new(),
             tab: "general".to_string(),
             kind: kind.to_string(),
             current_value: value.to_string(),

@@ -805,6 +805,7 @@ mod tests {
         ConfigUiField {
             source_id: source_id.to_string(),
             path: path.to_string(),
+            display_label: String::new(),
             tab: "general".to_string(),
             kind: kind.to_string(),
             current_value: value.to_string(),
@@ -933,6 +934,8 @@ mod tests {
             field_with_source("server", "server.enabled", "bool", "false", &[]),
             field_with_source("ui", "ui.title", "string", "\"light\"", &[]),
         ];
+        model.fields[0].display_label = "Server enabled".to_string();
+        model.fields[1].display_label = "Window title".to_string();
         let mut app = ConfigUiApp::new(model);
 
         assert_eq!(

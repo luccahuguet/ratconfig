@@ -380,7 +380,7 @@ pub fn row_line_for_model(model: &ConfigUiModel, row: UiRowRef) -> Line<'static>
                 ),
                 Span::styled(
                     fixed_label(
-                        &truncate(&field.path, FIELD_SETTING_COLUMN_WIDTH),
+                        &truncate(field_display_label(field), FIELD_SETTING_COLUMN_WIDTH),
                         FIELD_SETTING_COLUMN_WIDTH,
                     ),
                     field_key_style(field),
@@ -432,6 +432,26 @@ pub fn row_line_for_model(model: &ConfigUiModel, row: UiRowRef) -> Line<'static>
     }
 }
 
+fn field_display_label(field: &ConfigUiField) -> &str {
+    if field.display_label.is_empty() {
+        &field.path
+    } else {
+        &field.display_label
+    }
+}
+
+fn field_title_lines(field: &ConfigUiField) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(Span::styled(
+        field_display_label(field).to_string(),
+        config_key_style().add_modifier(Modifier::BOLD),
+    ))];
+    if !field.display_label.is_empty() && field.display_label != field.path {
+        lines.push(detail_line("path", &field.path));
+    }
+    lines.push(Line::from(""));
+    lines
+}
+
 fn field_key_style(field: &ConfigUiField) -> Style {
     if field.state == ConfigUiValueState::Invalid {
         state_style(field.state)
@@ -449,19 +469,15 @@ fn field_value_style(field: &ConfigUiField) -> Style {
 }
 
 pub fn default_field_detail_lines(field: &ConfigUiField) -> Vec<Line<'static>> {
-    let mut lines = vec![
-        Line::from(Span::styled(
-            field.path.clone(),
-            config_key_style().add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
+    let mut lines = field_title_lines(field);
+    lines.extend([
         detail_line("state", state_label(field.state)),
         detail_line("current", &field.current_value),
         detail_line("default", &field.default_value),
         detail_line("type", &field.kind),
         detail_line("takes effect", &field.apply_status.label),
         detail_line("after save", &field.apply_status.detail),
-    ];
+    ]);
     if !field.validation.is_empty() {
         lines.push(detail_line("validation", &field.validation));
     }
@@ -492,15 +508,9 @@ pub fn single_choice_detail_lines(
     edit: &ConfigUiEditState,
 ) -> Vec<Line<'static>> {
     let selected_value = edit.input.as_str();
-    let mut lines = vec![
-        Line::from(Span::styled(
-            field.path.clone(),
-            config_key_style().add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        detail_line("selected", selected_value),
-        Line::from(""),
-    ];
+    let mut lines = field_title_lines(field);
+    lines.push(detail_line("selected", selected_value));
+    lines.push(Line::from(""));
 
     append_single_choice_options(
         &mut lines,
@@ -561,18 +571,12 @@ pub fn multi_choice_detail_lines(
 ) -> Vec<Line<'static>> {
     let enabled_values = parse_string_list_values(field, &edit.input).unwrap_or_default();
     let enabled_set = enabled_values.iter().cloned().collect::<BTreeSet<_>>();
-    let mut lines = vec![
-        Line::from(Span::styled(
-            field.path.clone(),
-            config_key_style().add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        detail_line(
-            "enabled",
-            &format!("{}/{}", enabled_set.len(), field.allowed_values.len()),
-        ),
-        Line::from(""),
-    ];
+    let mut lines = field_title_lines(field);
+    lines.push(detail_line(
+        "enabled",
+        &format!("{}/{}", enabled_set.len(), field.allowed_values.len()),
+    ));
+    lines.push(Line::from(""));
 
     for (index, value) in field.allowed_values.iter().enumerate() {
         let selected = index
@@ -956,6 +960,7 @@ mod tests {
             fields: vec![ConfigUiField {
                 source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
                 path: "core.debug_mode".to_string(),
+                display_label: String::new(),
                 tab: "general".to_string(),
                 kind: "bool".to_string(),
                 current_value: "false".to_string(),
@@ -1091,6 +1096,26 @@ mod tests {
         assert_eq!(
             rendered_cells(&field_list_header_line()),
             vec!["takes effect", "setting", "value"]
+        );
+    }
+
+    // Defends: display labels improve visible text while details keep the stable field path.
+    #[test]
+    fn field_display_label_replaces_visible_label_but_keeps_path_detail() {
+        let mut model = test_model(ConfigUiValueState::Explicit);
+        model.fields[0].path = "ui.pane_frames.rounded_corners".to_string();
+        model.fields[0].display_label = "Rounded corners".to_string();
+
+        assert_eq!(
+            rendered_cells(&row_line_for_model(&model, UiRowRef::Field(0))),
+            vec!["after app restart", "Rounded corners", "false"]
+        );
+
+        let details = default_field_detail_lines(&model.fields[0]);
+        assert_eq!(rendered_text(&details[0]), "Rounded corners");
+        assert_eq!(
+            rendered_cells(&details[1]),
+            vec!["path", "ui.pane_frames.rounded_corners"]
         );
     }
 

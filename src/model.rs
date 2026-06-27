@@ -109,6 +109,7 @@ pub enum ConfigUiValueState {
 pub struct ConfigUiField {
     pub source_id: String,
     pub path: String,
+    pub display_label: String,
     pub tab: String,
     pub kind: String,
     pub current_value: String,
@@ -127,6 +128,7 @@ pub struct ConfigUiField {
 pub struct ConfigUiFieldRowSpec<'a> {
     pub source_id: &'a str,
     pub path: &'a str,
+    pub display_label: String,
     pub tab: &'a str,
     pub kind: &'a str,
     pub current: Option<&'a JsonValue>,
@@ -153,6 +155,7 @@ pub fn build_config_ui_field(spec: ConfigUiFieldRowSpec<'_>) -> ConfigUiField {
     ConfigUiField {
         source_id: spec.source_id.to_string(),
         path: spec.path.to_string(),
+        display_label: spec.display_label,
         tab: spec.tab.to_string(),
         kind: spec.kind.to_string(),
         current_value: spec
@@ -512,6 +515,7 @@ fn row_matches_search(model: &ConfigUiModel, row: UiRowRef, search: &str) -> boo
                 search,
                 [
                     field.path.as_str(),
+                    field.display_label.as_str(),
                     field.current_value.as_str(),
                     field.default_value.as_str(),
                     field.description.as_str(),
@@ -700,6 +704,7 @@ mod tests {
         ConfigUiFieldRowSpec {
             source_id: DEFAULT_CONFIG_SOURCE_ID,
             path: "ui.theme",
+            display_label: String::new(),
             tab: "general",
             kind: "string",
             current,
@@ -855,6 +860,7 @@ help = "Theme name"
         let field = build_config_ui_field(ConfigUiFieldRowSpec {
             source_id: "settings",
             path: "plugins.enabled",
+            display_label: "Enabled plugins".to_string(),
             tab: "advanced",
             kind: "string_list",
             current: Some(&current),
@@ -870,6 +876,7 @@ help = "Theme name"
 
         assert_eq!(field.source_id, "settings");
         assert_eq!(field.path, "plugins.enabled");
+        assert_eq!(field.display_label, "Enabled plugins");
         assert_eq!(field.tab, "advanced");
         assert_eq!(field.current_value, "[5 items]");
         assert_eq!(
