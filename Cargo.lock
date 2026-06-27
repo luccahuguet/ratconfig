@@ -553,7 +553,6 @@ dependencies = [
 name = "ratconfig"
 version = "0.1.0"
 dependencies = [
- "crossterm",
  "jsonc-parser",
  "ratatui",
  "serde_json",

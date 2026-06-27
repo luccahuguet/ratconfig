@@ -8,7 +8,7 @@
 //! the intent callback.
 
 use crate::{ConfigUiApp, ConfigUiIntent, ConfigUiKey, UiRowRef, draw_config_ui_with_details};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{DefaultTerminal, text::Line};
 use std::{error::Error, fmt, io};
 
@@ -150,7 +150,7 @@ mod tests {
         ConfigUiApplyStatus, ConfigUiEditBehavior, ConfigUiField, ConfigUiModel, ConfigUiPathOwner,
         ConfigUiValueState,
     };
-    use crossterm::event::{KeyEventState, MouseEvent, MouseEventKind};
+    use ratatui::crossterm::event::{KeyEventState, MouseEvent, MouseEventKind};
     use serde_json::json;
     use std::path::PathBuf;
 
