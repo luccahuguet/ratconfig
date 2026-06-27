@@ -98,6 +98,23 @@ pub fn apply_migrations_text(
     Ok(MigrationOutcome { text, mutations })
 }
 
+pub fn apply_defaults_text(
+    raw: &str,
+    defaults: &[(&str, JsonValue)],
+) -> Result<MigrationOutcome, MigrationError> {
+    apply_migrations_text(raw, &defaults_to_add_default_ops(defaults))
+}
+
+pub(crate) fn defaults_to_add_default_ops(defaults: &[(&str, JsonValue)]) -> Vec<MigrationOp> {
+    defaults
+        .iter()
+        .map(|(path, value)| MigrationOp::AddDefault {
+            path: (*path).to_string(),
+            value: value.clone(),
+        })
+        .collect()
+}
+
 fn rename_path(
     text: &str,
     from: &str,
@@ -227,6 +244,39 @@ mod tests {
         assert_eq!(get_json_path(&value, "project.name"), Some(&json!("ferox")));
         assert_eq!(get_json_path(&value, "server.enabled"), Some(&json!(true)));
         assert_eq!(get_json_path(&value, "ui.mode"), Some(&json!("compact")));
+    }
+
+    // Defends: text-level JSONC default completion reuses add-default semantics without replacing existing values.
+    #[test]
+    fn defaults_text_inserts_only_missing_jsonc_values() {
+        let raw = r#"{
+  // keep me
+  "core": { "debug": false }
+}
+"#;
+        let defaults = [
+            ("core.debug", json!(true)),
+            ("open.log_level", json!("info")),
+        ];
+        let outcome = apply_defaults_text(raw, &defaults).expect("jsonc defaults");
+
+        assert_eq!(
+            outcome.mutations,
+            vec![MigrationMutation::AddedDefault {
+                path: "open.log_level".to_string()
+            }]
+        );
+        assert!(outcome.text.contains("// keep me"));
+        let value = parse_jsonc_value(&outcome.text).expect("jsonc");
+        assert_eq!(get_json_path(&value, "core.debug"), Some(&json!(false)));
+        assert_eq!(
+            get_json_path(&value, "open.log_level"),
+            Some(&json!("info"))
+        );
+
+        let unchanged = apply_defaults_text(&outcome.text, &defaults).expect("unchanged defaults");
+        assert!(!unchanged.changed());
+        assert_eq!(unchanged.text, outcome.text);
     }
 
     #[test]

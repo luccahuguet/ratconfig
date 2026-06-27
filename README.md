@@ -227,6 +227,33 @@ The rules are deliberately strict:
 
 Use `join_jsonc_contract_text` or `join_toml_contract_text` only for configs the host has already validated against the current contract. Use the `*_from_version` variants when adopting an older known config version, so ratconfig applies every automatic change before recording the joined state.
 
+Run default completion on the text returned by join or reconcile, then validate and write that completed text:
+
+```rust
+use ratconfig::{
+    migration::{MigrationError, apply_defaults_text},
+    toml_adapter::{TomlMigrationError, apply_toml_defaults_text},
+};
+
+fn complete_jsonc_defaults(raw: &str) -> Result<String, MigrationError> {
+    let outcome = apply_defaults_text(
+        raw,
+        &[("open.log_level", serde_json::json!("info"))],
+    )?;
+    Ok(outcome.text)
+}
+
+fn complete_toml_defaults(raw: &str) -> Result<String, TomlMigrationError> {
+    let outcome = apply_toml_defaults_text(
+        raw,
+        &[("open.log_level", serde_json::json!("info"))],
+    )?;
+    Ok(outcome.text)
+}
+```
+
+Default completion returns complete patched text and mutation records; the host still chooses the defaults, validates the result, and writes atomically
+
 The contract layer is project-agnostic. Yazelix can use it for `settings.jsonc`, but another application can define a different contract id, state path, default values, validation, storage format, and write policy.
 
 ## Why In-House
@@ -248,4 +275,4 @@ The split-brain rule is simple: storage adapters may differ, contract semantics 
 
 ## Status
 
-The reusable model, editor, renderer, JSONC patcher, TOML patcher, deterministic contract layer, and migration primitives live in this crate.
+The reusable model, editor, renderer, JSONC patcher, TOML patcher, deterministic contract layer, default completion helpers, and migration primitives live in this crate

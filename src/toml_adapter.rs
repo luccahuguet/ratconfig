@@ -1,6 +1,8 @@
 // Test lane: default
 
-use crate::migration::{MigrationMutation, MigrationOp, ValueTransform};
+use crate::migration::{
+    MigrationMutation, MigrationOp, ValueTransform, defaults_to_add_default_ops,
+};
 use crate::model::toml_value_to_json;
 use crate::patch::{PatchMutation, dotted_paths_overlap, split_dotted_path};
 use serde_json::Value as JsonValue;
@@ -154,6 +156,13 @@ pub fn apply_toml_migrations_text(
         }
     }
     Ok(TomlMigrationOutcome { text, mutations })
+}
+
+pub fn apply_toml_defaults_text(
+    raw: &str,
+    defaults: &[(&str, JsonValue)],
+) -> Result<TomlMigrationOutcome, TomlMigrationError> {
+    apply_toml_migrations_text(raw, &defaults_to_add_default_ops(defaults))
 }
 
 fn parse_document(raw: &str) -> Result<DocumentMut, TomlPatchError> {
@@ -440,6 +449,40 @@ mode = "full"
         assert_eq!(get_toml_path(&value, "project.name"), Some(&json!("ferox")));
         assert_eq!(get_toml_path(&value, "server.enabled"), Some(&json!(true)));
         assert_eq!(get_toml_path(&value, "ui.mode"), Some(&json!("compact")));
+    }
+
+    // Defends: text-level TOML default completion preserves comments and existing host values.
+    #[test]
+    fn toml_defaults_text_inserts_only_missing_values() {
+        let raw = r#"# keep me
+
+[open]
+log_level = "info"
+"#;
+        let defaults = [
+            ("open.log_level", json!("debug")),
+            ("core.enabled", json!(true)),
+        ];
+        let outcome = apply_toml_defaults_text(raw, &defaults).expect("toml defaults");
+
+        assert_eq!(
+            outcome.mutations,
+            vec![MigrationMutation::AddedDefault {
+                path: "core.enabled".to_string()
+            }]
+        );
+        assert!(outcome.text.contains("# keep me"));
+        let value = parse_toml_value(&outcome.text).expect("toml");
+        assert_eq!(
+            get_toml_path(&value, "open.log_level"),
+            Some(&json!("info"))
+        );
+        assert_eq!(get_toml_path(&value, "core.enabled"), Some(&json!(true)));
+
+        let unchanged =
+            apply_toml_defaults_text(&outcome.text, &defaults).expect("unchanged defaults");
+        assert!(!unchanged.changed());
+        assert_eq!(unchanged.text, outcome.text);
     }
 
     // Defends: TOML adapter refuses null instead of inventing a lossy representation.
