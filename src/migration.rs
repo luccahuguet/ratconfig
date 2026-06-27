@@ -190,6 +190,7 @@ mod tests {
         }
     }
 
+    // Defends: JSONC migration operations run in order and preserve comments while recording semantic mutations.
     #[test]
     fn migrations_rename_delete_add_default_and_transform_jsonc() {
         let raw = r#"{
@@ -279,6 +280,7 @@ mod tests {
         assert_eq!(unchanged.text, outcome.text);
     }
 
+    // Defends: renames fail before overwriting an existing JSONC destination path.
     #[test]
     fn rename_refuses_to_overwrite_destination() {
         let raw = r#"{ "old": "a", "new": "b" }"#;
@@ -300,6 +302,7 @@ mod tests {
         );
     }
 
+    // Defends: parent-to-child renames are blocked before JSONC text can be rewritten destructively.
     #[test]
     fn rename_refuses_overlapping_paths() {
         let raw = r#"{ "old": { "enabled": true } }"#;

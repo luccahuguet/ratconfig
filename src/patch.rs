@@ -13,16 +13,14 @@ pub fn split_dotted_path(path: &str) -> Option<Vec<String>> {
         .split('.')
         .map(|part| part.trim().to_owned())
         .collect::<Vec<_>>();
-    if parts.is_empty()
-        || parts.iter().any(|part| {
-            part.is_empty()
-                || part.contains('[')
-                || part.contains(']')
-                || !part
-                    .chars()
-                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-        })
-    {
+    if parts.iter().any(|part| {
+        part.is_empty()
+            || part.contains('[')
+            || part.contains(']')
+            || !part
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    }) {
         return None;
     }
     Some(parts)

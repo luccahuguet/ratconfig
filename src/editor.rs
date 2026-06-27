@@ -58,15 +58,18 @@ pub enum ConfigUiIntent {
     Exit,
     BeginEdit {
         field_index: usize,
+        source_id: String,
         path: String,
     },
     SetField {
         field_index: usize,
+        source_id: String,
         path: String,
         value: JsonValue,
     },
     UnsetField {
         field_index: usize,
+        source_id: String,
         path: String,
     },
 }
@@ -188,14 +191,7 @@ impl ConfigUiApp {
     }
 
     pub fn finish_successful_write(&mut self) {
-        if self
-            .notice
-            .as_ref()
-            .map(|notice| !notice.is_error)
-            .unwrap_or(false)
-        {
-            self.edit = None;
-        }
+        self.edit = None;
     }
 
     fn cancel_edit(&mut self) -> ConfigUiIntent {
@@ -418,8 +414,12 @@ impl ConfigUiApp {
             self.notice_error("Only settings rows can be edited.");
             return ConfigUiIntent::None;
         };
-        let path = self.model.fields[field_index].path.clone();
-        ConfigUiIntent::BeginEdit { field_index, path }
+        let field = &self.model.fields[field_index];
+        ConfigUiIntent::BeginEdit {
+            field_index,
+            source_id: field.source_id.clone(),
+            path: field.path.clone(),
+        }
     }
 
     fn quick_edit_selected_field(&mut self) -> ConfigUiIntent {
@@ -432,6 +432,7 @@ impl ConfigUiApp {
         if is_bool_field(field) {
             ConfigUiIntent::SetField {
                 field_index,
+                source_id: field.source_id.clone(),
                 path: field.path.clone(),
                 value: JsonValue::Bool(!field_bool_value(field).unwrap_or(false)),
             }
@@ -446,9 +447,11 @@ impl ConfigUiApp {
             self.notice_error("Only settings rows can be unset.");
             return ConfigUiIntent::None;
         };
+        let field = &self.model.fields[field_index];
         ConfigUiIntent::UnsetField {
             field_index,
-            path: self.model.fields[field_index].path.clone(),
+            source_id: field.source_id.clone(),
+            path: field.path.clone(),
         }
     }
 
@@ -466,6 +469,7 @@ impl ConfigUiApp {
         };
         ConfigUiIntent::SetField {
             field_index: edit.field_index,
+            source_id: field.source_id,
             path: field.path,
             value,
         }
@@ -781,12 +785,25 @@ mod tests {
     use crate::jsonc::{PatchMutation, set_jsonc_value_text};
     #[cfg(feature = "ui")]
     use crate::row_line_for_model;
-    use crate::{ConfigUiApplyStatus, ConfigUiPathOwner, ConfigUiValueState};
+    use crate::{
+        ConfigUiApplyStatus, ConfigUiPathOwner, ConfigUiValueState, DEFAULT_CONFIG_SOURCE_ID,
+    };
     use serde_json::json;
     use std::path::PathBuf;
 
     fn field(path: &str, kind: &str, value: &str, allowed: &[&str]) -> ConfigUiField {
+        field_with_source(DEFAULT_CONFIG_SOURCE_ID, path, kind, value, allowed)
+    }
+
+    fn field_with_source(
+        source_id: &str,
+        path: &str,
+        kind: &str,
+        value: &str,
+        allowed: &[&str],
+    ) -> ConfigUiField {
         ConfigUiField {
+            source_id: source_id.to_string(),
             path: path.to_string(),
             tab: "general".to_string(),
             kind: kind.to_string(),
@@ -881,6 +898,7 @@ mod tests {
             app.handle_key(ConfigUiKey::Char('e')),
             ConfigUiIntent::BeginEdit {
                 field_index: 1,
+                source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
                 path: "ui.theme".to_string()
             }
         );
@@ -888,6 +906,7 @@ mod tests {
             app.handle_key(ConfigUiKey::Char('u')),
             ConfigUiIntent::UnsetField {
                 field_index: 1,
+                source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
                 path: "ui.theme".to_string()
             }
         );
@@ -897,11 +916,65 @@ mod tests {
             app.handle_key(ConfigUiKey::Char(' ')),
             ConfigUiIntent::SetField {
                 field_index: 0,
+                source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
                 path: "server.enabled".to_string(),
                 value: json!(true),
             }
         );
         assert_eq!(app.handle_key(ConfigUiKey::Esc), ConfigUiIntent::Exit);
+    }
+
+    // Defends: edit intents carry source identity and completed writes return to normal routing.
+    #[test]
+    fn edit_intents_preserve_selected_field_source() {
+        let mut model = test_model();
+        model.fields = vec![
+            field_with_source("server", "server.enabled", "bool", "false", &[]),
+            field_with_source("ui", "ui.title", "string", "\"light\"", &[]),
+        ];
+        let mut app = ConfigUiApp::new(model);
+
+        assert_eq!(
+            app.handle_key(ConfigUiKey::Char(' ')),
+            ConfigUiIntent::SetField {
+                field_index: 0,
+                source_id: "server".to_string(),
+                path: "server.enabled".to_string(),
+                value: json!(true),
+            }
+        );
+
+        app.selected_row = 1;
+        assert_eq!(
+            app.handle_key(ConfigUiKey::Char('e')),
+            ConfigUiIntent::BeginEdit {
+                field_index: 1,
+                source_id: "ui".to_string(),
+                path: "ui.title".to_string(),
+            }
+        );
+        app.begin_edit_field(1);
+        app.edit.as_mut().expect("edit").input = "dark".to_string();
+        assert_eq!(
+            app.handle_key(ConfigUiKey::Enter),
+            ConfigUiIntent::SetField {
+                field_index: 1,
+                source_id: "ui".to_string(),
+                path: "ui.title".to_string(),
+                value: json!("dark"),
+            }
+        );
+
+        app.finish_successful_write();
+        assert!(app.edit.is_none());
+        assert_eq!(
+            app.handle_key(ConfigUiKey::Char('u')),
+            ConfigUiIntent::UnsetField {
+                field_index: 1,
+                source_id: "ui".to_string(),
+                path: "ui.title".to_string(),
+            }
+        );
     }
 
     // Defends: typed edit parsing and allowed-value checks stay reusable rather than Yazelix-specific.
@@ -982,6 +1055,7 @@ mod tests {
             app.handle_key(ConfigUiKey::Enter),
             ConfigUiIntent::SetField {
                 field_index: 1,
+                source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
                 path: "ui.theme".to_string(),
                 value: json!("dark"),
             }
@@ -996,6 +1070,7 @@ mod tests {
             app.handle_key(ConfigUiKey::Enter),
             ConfigUiIntent::SetField {
                 field_index: 2,
+                source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
                 path: "plugins.enabled".to_string(),
                 value: json!(["git", "search"]),
             }

@@ -911,6 +911,7 @@ mod tests {
             config_read_only: false,
             tabs: vec!["general".to_string()],
             fields: vec![ConfigUiField {
+                source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
                 path: "core.debug_mode".to_string(),
                 tab: "general".to_string(),
                 kind: "bool".to_string(),

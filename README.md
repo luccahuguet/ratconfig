@@ -39,6 +39,7 @@ use std::path::PathBuf;
 use ratconfig::{
     ConfigUiApplyStatus, ConfigUiEditBehavior, ConfigUiField, ConfigUiModel,
     ConfigUiPathOwner, ConfigUiValueState,
+    DEFAULT_CONFIG_SOURCE_ID,
     jsonc::{PatchError, set_jsonc_value_text},
 };
 
@@ -52,6 +53,7 @@ fn model() -> ConfigUiModel {
         config_read_only: false,
         tabs: vec!["general".to_string()],
         fields: vec![ConfigUiField {
+            source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
             path: "core.debug".to_string(),
             tab: "general".to_string(),
             kind: "bool".to_string(),
@@ -105,12 +107,12 @@ fn run_editor(mut app: ConfigUiApp) -> Result<(), Box<dyn std::error::Error>> {
             ConfigUiIntent::BeginEdit { field_index, .. } => {
                 app.begin_edit_field(field_index);
             }
-            ConfigUiIntent::SetField { path, value, .. } => {
-                host_validate_and_write(&path, &value)?;
+            ConfigUiIntent::SetField { source_id, path, value, .. } => {
+                host_validate_and_write(&source_id, &path, &value)?;
                 app.finish_successful_write();
             }
-            ConfigUiIntent::UnsetField { path, .. } => {
-                host_unset_and_reload(&path)?;
+            ConfigUiIntent::UnsetField { source_id, path, .. } => {
+                host_unset_and_reload(&source_id, &path)?;
             }
             ConfigUiIntent::None | ConfigUiIntent::Exit => {}
         }
@@ -120,13 +122,17 @@ fn run_editor(mut app: ConfigUiApp) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn host_validate_and_write(
+    _source_id: &str,
     _path: &str,
     _value: &Value,
 ) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn host_unset_and_reload(_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn host_unset_and_reload(
+    _source_id: &str,
+    _path: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```

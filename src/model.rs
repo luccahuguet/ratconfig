@@ -6,6 +6,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use toml::Value as TomlValue;
 
+pub const DEFAULT_CONFIG_SOURCE_ID: &str = "config";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigUiModel {
     pub active_config_path: PathBuf,
@@ -79,6 +81,7 @@ pub enum ConfigUiValueState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigUiField {
+    pub source_id: String,
     pub path: String,
     pub tab: String,
     pub kind: String,
@@ -96,6 +99,7 @@ pub struct ConfigUiField {
 
 #[derive(Debug, Clone)]
 pub struct ConfigUiFieldRowSpec<'a> {
+    pub source_id: &'a str,
     pub path: &'a str,
     pub tab: &'a str,
     pub kind: &'a str,
@@ -121,6 +125,7 @@ pub fn build_config_ui_field(spec: ConfigUiFieldRowSpec<'_>) -> ConfigUiField {
         ConfigUiValueState::Unset
     };
     ConfigUiField {
+        source_id: spec.source_id.to_string(),
         path: spec.path.to_string(),
         tab: spec.tab.to_string(),
         kind: spec.kind.to_string(),
@@ -625,6 +630,7 @@ mod tests {
         has_blocking_diagnostic: bool,
     ) -> ConfigUiFieldRowSpec<'a> {
         ConfigUiFieldRowSpec {
+            source_id: DEFAULT_CONFIG_SOURCE_ID,
             path: "ui.theme",
             tab: "general",
             kind: "string",
@@ -779,6 +785,7 @@ help = "Theme name"
     fn field_row_builder_preserves_host_metadata() {
         let current = json!(["git", "search", "preview", "terminal", "theme"]);
         let field = build_config_ui_field(ConfigUiFieldRowSpec {
+            source_id: "settings",
             path: "plugins.enabled",
             tab: "advanced",
             kind: "string_list",
@@ -793,6 +800,7 @@ help = "Theme name"
             edit_behavior: ConfigUiEditBehavior::FriendlyStringList,
         });
 
+        assert_eq!(field.source_id, "settings");
         assert_eq!(field.path, "plugins.enabled");
         assert_eq!(field.tab, "advanced");
         assert_eq!(field.current_value, "[5 items]");

@@ -144,7 +144,7 @@ mod tests {
     use super::*;
     use crate::{
         ConfigUiApplyStatus, ConfigUiEditBehavior, ConfigUiField, ConfigUiModel, ConfigUiPathOwner,
-        ConfigUiValueState,
+        ConfigUiValueState, DEFAULT_CONFIG_SOURCE_ID,
     };
     use serde_json::json;
     use std::path::PathBuf;
@@ -202,10 +202,7 @@ mod tests {
         let mut app = ConfigUiApp::new(test_model());
 
         assert_eq!(
-            handle_crossterm_event(
-                &mut app,
-                Event::Key(key(KeyCode::Char('j'), KeyModifiers::NONE))
-            ),
+            handle_crossterm_event(&mut app, key_event(KeyCode::Char('j'), KeyModifiers::NONE)),
             ConfigUiIntent::None
         );
         assert_eq!(app.selected_row, 1);
@@ -213,6 +210,7 @@ mod tests {
             handle_crossterm_key(&mut app, key(KeyCode::Char('e'), KeyModifiers::NONE)),
             ConfigUiIntent::BeginEdit {
                 field_index: 1,
+                source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
                 path: "ui.theme".to_string(),
             }
         );
@@ -222,6 +220,7 @@ mod tests {
             handle_crossterm_key(&mut app, key(KeyCode::Char(' '), KeyModifiers::NONE)),
             ConfigUiIntent::SetField {
                 field_index: 0,
+                source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
                 path: "server.enabled".to_string(),
                 value: json!(true),
             }
@@ -250,8 +249,13 @@ mod tests {
         KeyEvent::new(code, modifiers)
     }
 
+    fn key_event(code: KeyCode, modifiers: KeyModifiers) -> Event {
+        Event::Key(key(code, modifiers))
+    }
+
     fn field(path: &str, kind: &str, value: &str, allowed: &[&str]) -> ConfigUiField {
         ConfigUiField {
+            source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
             path: path.to_string(),
             tab: "general".to_string(),
             kind: kind.to_string(),

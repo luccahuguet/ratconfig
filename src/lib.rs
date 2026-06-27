@@ -24,7 +24,7 @@ pub use model::{
     ConfigUiApplyStatus, ConfigUiContractField, ConfigUiDiagnostic, ConfigUiEditBehavior,
     ConfigUiField, ConfigUiFieldMetadata, ConfigUiFieldRowSpec, ConfigUiMetadata, ConfigUiModel,
     ConfigUiNativeStatus, ConfigUiPathOwner, ConfigUiSchemaField, ConfigUiSidecar,
-    ConfigUiValueState,
+    ConfigUiValueState, DEFAULT_CONFIG_SOURCE_ID,
 };
 pub use model::{
     UiRowRef, build_config_ui_field, collect_config_ui_schema_fields,
