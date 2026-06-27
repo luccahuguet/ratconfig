@@ -5,6 +5,8 @@
 //! patching, and migration semantics.
 
 pub mod contract;
+#[cfg(feature = "crossterm-runner")]
+pub mod crossterm_runner;
 pub mod editor;
 pub mod jsonc;
 pub mod migration;
@@ -15,6 +17,8 @@ pub mod render;
 pub mod toml_adapter;
 
 pub use contract::*;
+#[cfg(feature = "crossterm-runner")]
+pub use crossterm_runner::*;
 pub use editor::*;
 pub use model::{
     ConfigUiApplyStatus, ConfigUiContractField, ConfigUiDiagnostic, ConfigUiEditBehavior,

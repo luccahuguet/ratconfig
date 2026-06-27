@@ -89,6 +89,50 @@ fn patch_jsonc() -> Result<String, PatchError> {
 
 Host applications build the model from their own schema and config files, then use ratconfig editor/rendering helpers inside their terminal event loop. After an edit, the host validates and writes the patched text, reloads the model, and applies any live runtime changes it owns
 
+Hosts that want ratconfig to own the crossterm terminal setup, draw loop, event reads, and key conversion can enable the optional runner:
+
+```toml
+ratconfig = { version = "0.1", features = ["crossterm-runner"] }
+```
+
+```rust,no_run
+use ratconfig::{ConfigUiApp, ConfigUiIntent, run_config_ui};
+use serde_json::Value;
+
+fn run_editor(mut app: ConfigUiApp) -> Result<(), Box<dyn std::error::Error>> {
+    run_config_ui(&mut app, |app, intent| {
+        match intent {
+            ConfigUiIntent::BeginEdit { field_index, .. } => {
+                app.begin_edit_field(field_index);
+            }
+            ConfigUiIntent::SetField { path, value, .. } => {
+                host_validate_and_write(&path, &value)?;
+                app.finish_successful_write();
+            }
+            ConfigUiIntent::UnsetField { path, .. } => {
+                host_unset_and_reload(&path)?;
+            }
+            ConfigUiIntent::None | ConfigUiIntent::Exit => {}
+        }
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })?;
+    Ok(())
+}
+
+fn host_validate_and_write(
+    _path: &str,
+    _value: &Value,
+) -> Result<(), Box<dyn std::error::Error>> {
+    Ok(())
+}
+
+fn host_unset_and_reload(_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    Ok(())
+}
+```
+
+Use `run_config_ui_with_details` when the host supplies richer detail lines. The callback still owns validation, file writes, model reloads, notices, and apply policy
+
 ## Deterministic Config Contracts
 
 Ratconfig can also treat a config file as having "joined" a host-defined contract. The host gives ratconfig a linear version history, safe automatic operations, and explicit manual steps for changes that cannot be inferred without user intent.
