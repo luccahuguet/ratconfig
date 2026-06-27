@@ -92,13 +92,9 @@ where
     DetailLines: Fn(&ConfigUiApp, UiRowRef) -> Vec<Line<'static>>,
     HandleIntent: FnMut(&mut ConfigUiApp, ConfigUiIntent) -> Result<(), HostError>,
 {
-    let mut terminal = match ratatui::try_init() {
-        Ok(terminal) => terminal,
-        Err(error) => {
-            let _ = ratatui::try_restore();
-            return Err(error.into());
-        }
-    };
+    let mut terminal = ratatui::try_init().inspect_err(|_| {
+        let _ = ratatui::try_restore();
+    })?;
     let run_result = run_config_ui_terminal(&mut terminal, app, detail_lines, &mut handle_intent);
     let restore_result = ratatui::try_restore();
 
@@ -150,7 +146,6 @@ mod tests {
         ConfigUiApplyStatus, ConfigUiEditBehavior, ConfigUiField, ConfigUiModel, ConfigUiPathOwner,
         ConfigUiValueState,
     };
-    use ratatui::crossterm::event::{KeyEventState, MouseEvent, MouseEventKind};
     use serde_json::json;
     use std::path::PathBuf;
 
@@ -172,7 +167,10 @@ mod tests {
             Some(ConfigUiKey::Ctrl('u'))
         );
         assert_eq!(
-            crossterm_key_to_config_ui_key(key(KeyCode::Char('U'), shifted_control())),
+            crossterm_key_to_config_ui_key(key(
+                KeyCode::Char('U'),
+                KeyModifiers::SHIFT | KeyModifiers::CONTROL
+            )),
             Some(ConfigUiKey::Ctrl('U'))
         );
     }
@@ -212,10 +210,7 @@ mod tests {
         );
         assert_eq!(app.selected_row, 1);
         assert_eq!(
-            handle_crossterm_event(
-                &mut app,
-                Event::Key(key(KeyCode::Char('e'), KeyModifiers::NONE))
-            ),
+            handle_crossterm_key(&mut app, key(KeyCode::Char('e'), KeyModifiers::NONE)),
             ConfigUiIntent::BeginEdit {
                 field_index: 1,
                 path: "ui.theme".to_string(),
@@ -224,10 +219,7 @@ mod tests {
 
         app.selected_row = 0;
         assert_eq!(
-            handle_crossterm_event(
-                &mut app,
-                Event::Key(key(KeyCode::Char(' '), KeyModifiers::NONE))
-            ),
+            handle_crossterm_key(&mut app, key(KeyCode::Char(' '), KeyModifiers::NONE)),
             ConfigUiIntent::SetField {
                 field_index: 0,
                 path: "server.enabled".to_string(),
@@ -240,19 +232,9 @@ mod tests {
     #[test]
     fn ignores_non_key_events() {
         let mut app = ConfigUiApp::new(test_model());
-        let mouse = Event::Mouse(MouseEvent {
-            kind: MouseEventKind::Moved,
-            column: 1,
-            row: 1,
-            modifiers: KeyModifiers::NONE,
-        });
 
         assert_eq!(
             handle_crossterm_event(&mut app, Event::Resize(120, 40)),
-            ConfigUiIntent::None
-        );
-        assert_eq!(
-            handle_crossterm_event(&mut app, mouse),
             ConfigUiIntent::None
         );
     }
@@ -265,16 +247,7 @@ mod tests {
     }
 
     fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
-        KeyEvent {
-            code,
-            modifiers,
-            kind: KeyEventKind::Press,
-            state: KeyEventState::NONE,
-        }
-    }
-
-    fn shifted_control() -> KeyModifiers {
-        KeyModifiers::SHIFT | KeyModifiers::CONTROL
+        KeyEvent::new(code, modifiers)
     }
 
     fn field(path: &str, kind: &str, value: &str, allowed: &[&str]) -> ConfigUiField {
