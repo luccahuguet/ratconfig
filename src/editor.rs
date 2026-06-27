@@ -198,6 +198,20 @@ impl ConfigUiApp {
         }
     }
 
+    fn cancel_edit(&mut self) -> ConfigUiIntent {
+        self.edit = None;
+        self.notice_info("Edit canceled.");
+        ConfigUiIntent::None
+    }
+
+    fn update_edit_input<T>(&mut self, update: impl FnOnce(&mut String) -> T) -> ConfigUiIntent {
+        self.notice = None;
+        if let Some(edit) = &mut self.edit {
+            update(&mut edit.input);
+        }
+        ConfigUiIntent::None
+    }
+
     fn handle_search_key(&mut self, key: ConfigUiKey) {
         match key {
             ConfigUiKey::Esc | ConfigUiKey::Enter => self.search_active = false,
@@ -259,33 +273,13 @@ impl ConfigUiApp {
         }
 
         match key {
-            ConfigUiKey::Esc => {
-                self.edit = None;
-                self.notice_info("Edit canceled.");
-                ConfigUiIntent::None
-            }
+            ConfigUiKey::Esc => self.cancel_edit(),
             ConfigUiKey::Enter => self.save_edit(),
-            ConfigUiKey::Backspace => {
-                self.notice = None;
-                if let Some(edit) = &mut self.edit {
-                    edit.input.pop();
-                }
-                ConfigUiIntent::None
-            }
+            ConfigUiKey::Backspace => self.update_edit_input(String::pop),
             ConfigUiKey::Ctrl('u') | ConfigUiKey::Ctrl('U') => {
-                self.notice = None;
-                if let Some(edit) = &mut self.edit {
-                    edit.input.clear();
-                }
-                ConfigUiIntent::None
+                self.update_edit_input(String::clear)
             }
-            ConfigUiKey::Char(ch) => {
-                self.notice = None;
-                if let Some(edit) = &mut self.edit {
-                    edit.input.push(ch);
-                }
-                ConfigUiIntent::None
-            }
+            ConfigUiKey::Char(ch) => self.update_edit_input(|input| input.push(ch)),
             _ => ConfigUiIntent::None,
         }
     }
@@ -302,11 +296,7 @@ impl ConfigUiApp {
             .is_some_and(is_scalar_enum_field);
         let multi_choice = mode == ConfigUiEditMode::MultiChoice;
         match key {
-            ConfigUiKey::Esc => {
-                self.edit = None;
-                self.notice_info("Edit canceled.");
-                ConfigUiIntent::None
-            }
+            ConfigUiKey::Esc => self.cancel_edit(),
             ConfigUiKey::Enter if scalar_enum => {
                 self.select_single_choice_edit();
                 self.save_edit()
@@ -358,25 +348,20 @@ impl ConfigUiApp {
     }
 
     fn cycle_choice_edit(&mut self) {
-        let Some(edit) = self.edit.clone() else {
-            return;
-        };
-        let next = if edit.input.trim() == "true" {
-            "false".to_string()
-        } else {
-            "true".to_string()
-        };
         if let Some(edit) = &mut self.edit {
-            edit.input = next;
+            edit.input = if edit.input.trim() == "true" {
+                "false".to_string()
+            } else {
+                "true".to_string()
+            };
         }
     }
 
     fn move_choice_edit(&mut self, delta: isize) {
-        let Some(edit) = self.edit.clone() else {
+        let Some(edit) = &mut self.edit else {
             return;
         };
-        let field = &self.model.fields[edit.field_index];
-        let len = field.allowed_values.len();
+        let len = self.model.fields[edit.field_index].allowed_values.len();
         if len == 0 {
             return;
         }
@@ -386,33 +371,30 @@ impl ConfigUiApp {
         } else {
             (index + 1) % len
         };
-        if let Some(edit) = &mut self.edit {
-            edit.choice_index = next;
-        }
+        edit.choice_index = next;
     }
 
     fn select_single_choice_edit(&mut self) {
-        let Some(edit) = self.edit.clone() else {
+        let Some(edit) = &mut self.edit else {
             return;
         };
-        let field = &self.model.fields[edit.field_index];
-        let Some(value) = field.allowed_values.get(edit.choice_index) else {
+        let Some(value) = self.model.fields[edit.field_index]
+            .allowed_values
+            .get(edit.choice_index)
+        else {
             return;
         };
-        let value = value.clone();
-        if let Some(edit) = &mut self.edit {
-            edit.input = value;
-        }
+        edit.input = value.clone();
     }
 
     fn toggle_multi_choice_edit(&mut self) {
-        let Some(edit) = self.edit.clone() else {
-            return;
-        };
-        let field = &self.model.fields[edit.field_index];
-        let next = match toggled_string_list_input(field, &edit.input, edit.choice_index) {
-            Ok(next) => next,
-            Err(message) => {
+        let next = match self.edit.as_ref().map(|edit| {
+            let field = &self.model.fields[edit.field_index];
+            toggled_string_list_input(field, &edit.input, edit.choice_index)
+        }) {
+            None => return,
+            Some(Ok(next)) => next,
+            Some(Err(message)) => {
                 self.notice_error(message);
                 return;
             }
@@ -795,8 +777,11 @@ pub fn field_bool_value(field: &ConfigUiField) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "ui")]
     use crate::jsonc::{PatchMutation, set_jsonc_value_text};
-    use crate::{ConfigUiApplyStatus, ConfigUiPathOwner, ConfigUiValueState, row_line_for_model};
+    #[cfg(feature = "ui")]
+    use crate::row_line_for_model;
+    use crate::{ConfigUiApplyStatus, ConfigUiPathOwner, ConfigUiValueState};
     use serde_json::json;
     use std::path::PathBuf;
 
@@ -824,6 +809,7 @@ mod tests {
     }
 
     // Defends: the reusable ratconfig layer can drive a non-Yazelix config fixture with bool, select, multiselect, rendering, and JSONC patching.
+    #[cfg(feature = "ui")]
     #[test]
     fn non_yazelix_fixture_uses_generic_model_editor_render_and_jsonc_patch() {
         let model = ConfigUiModel {

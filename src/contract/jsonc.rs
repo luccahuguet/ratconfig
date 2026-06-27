@@ -3,9 +3,7 @@ use super::{
     ContractJoinOutcome, ContractState, append_applied_change_ids, apply_contract_with,
     contract_state_to_json, new_joined_state, validate_contract,
 };
-use crate::jsonc::{
-    PatchError, PatchOutcome, get_json_path, parse_jsonc_value, set_jsonc_value_text,
-};
+use crate::jsonc::{PatchError, PatchOutcome, parse_jsonc_value, set_jsonc_value_text};
 use crate::migration::apply_migrations_text;
 use crate::patch::PatchMutation;
 use serde_json::Value as JsonValue;
@@ -142,8 +140,4 @@ fn join_outcome(
         applied_changes,
         state_mutation,
     }
-}
-
-pub(super) fn json_path<'a>(value: &'a JsonValue, path: &str) -> Option<&'a JsonValue> {
-    get_json_path(value, path)
 }

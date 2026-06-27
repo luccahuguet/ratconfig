@@ -253,7 +253,7 @@ pub fn read_contract_state_from_json(
     value: &JsonValue,
     state_path: &str,
 ) -> Result<Option<ContractState>, ContractError> {
-    read_contract_state_from_value(value, state_path, jsonc::json_path)
+    read_contract_state_from_value(value, state_path, crate::jsonc::get_json_path)
 }
 
 fn read_contract_state_from_value(
