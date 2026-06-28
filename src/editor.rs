@@ -244,7 +244,7 @@ impl ConfigUiApp {
             }
             ConfigUiKey::Enter | ConfigUiKey::Char(' ') => self.quick_edit_selected_field(),
             ConfigUiKey::Char('e') => self.begin_edit_selected_field(),
-            ConfigUiKey::Char('u') => self.unset_selected_field(),
+            ConfigUiKey::Char('u') => self.return_selected_field_to_default(),
             ConfigUiKey::Tab | ConfigUiKey::Right | ConfigUiKey::Char('l') => {
                 self.next_tab();
                 ConfigUiIntent::None
@@ -429,13 +429,17 @@ impl ConfigUiApp {
         }
     }
 
-    fn unset_selected_field(&mut self) -> ConfigUiIntent {
+    fn return_selected_field_to_default(&mut self) -> ConfigUiIntent {
         self.notice = None;
         let Some(field_index) = self.selected_field_index() else {
-            self.notice_error("Only settings rows can be unset.");
+            self.notice_error("Only settings rows can be returned to default.");
             return ConfigUiIntent::None;
         };
         let field = &self.model.fields[field_index];
+        if !field.has_default_value() {
+            self.notice_info("This setting has no default value.");
+            return ConfigUiIntent::None;
+        }
         ConfigUiIntent::UnsetField {
             field_index,
             source_id: field.source_id.clone(),
@@ -977,6 +981,34 @@ mod tests {
                 source_id: "ui".to_string(),
                 path: "ui.title".to_string(),
             }
+        );
+    }
+
+    // Defends: return-to-default stays on the host-owned unset intent and is unavailable without a default.
+    #[test]
+    fn return_to_default_requires_default_value() {
+        let mut model = test_model();
+        model.fields = vec![
+            field_with_source("ui", "ui.theme", "string", "\"custom\"", &[]),
+            field_with_source("scratch", "scratch.note", "string", "\"custom\"", &[]),
+        ];
+        model.fields[1].default_value = "no default".to_string();
+        let mut app = ConfigUiApp::new(model);
+
+        assert_eq!(
+            app.handle_key(ConfigUiKey::Char('u')),
+            ConfigUiIntent::UnsetField {
+                field_index: 0,
+                source_id: "ui".to_string(),
+                path: "ui.theme".to_string(),
+            }
+        );
+
+        app.selected_row = 1;
+        assert_eq!(app.handle_key(ConfigUiKey::Char('u')), ConfigUiIntent::None);
+        assert_eq!(
+            app.notice.as_ref().map(|notice| notice.text.as_str()),
+            Some("This setting has no default value.")
         );
     }
 

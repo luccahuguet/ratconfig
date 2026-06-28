@@ -750,25 +750,29 @@ fn edit_status_line(field: &ConfigUiField, edit: &ConfigUiEditState) -> Line<'st
 
 fn normal_control_line(app: &ConfigUiApp) -> Line<'static> {
     match app.selected_field() {
-        Some(field) if is_bool_field(field) => Line::from(vec![
-            Span::raw("Enter/Space stage  "),
-            Span::raw("e edit  "),
-            Span::raw("u unset"),
-        ]),
-        Some(field) if is_scalar_enum_field(field) => Line::from(vec![
-            Span::raw("Enter/e/Space picker  "),
-            Span::raw("u unset"),
-        ]),
-        Some(field) if is_enum_string_list_field(field) => {
-            Line::from(vec![Span::raw("Enter/e picker  "), Span::raw("u unset")])
+        Some(field) if is_bool_field(field) => {
+            setting_control_line("Enter/Space stage  e edit", field)
         }
-        Some(field) if structured_only_edit_notice(field).is_some() => Line::from(vec![
-            Span::raw("structured view only  "),
-            Span::raw("u unset"),
-        ]),
-        Some(_) => Line::from(vec![Span::raw("Enter/e edit  "), Span::raw("u unset")]),
+        Some(field) if is_scalar_enum_field(field) => {
+            setting_control_line("Enter/e/Space picker", field)
+        }
+        Some(field) if is_enum_string_list_field(field) => {
+            setting_control_line("Enter/e picker", field)
+        }
+        Some(field) if structured_only_edit_notice(field).is_some() => {
+            setting_control_line("structured view only", field)
+        }
+        Some(field) => setting_control_line("Enter/e edit", field),
         None => Line::from(Span::raw("Select a setting row to edit")),
     }
+}
+
+fn setting_control_line(primary: &'static str, field: &ConfigUiField) -> Line<'static> {
+    let mut spans = vec![Span::raw(primary)];
+    if field.has_default_value() {
+        spans.push(Span::raw("  u reset default"));
+    }
+    Line::from(spans)
 }
 
 fn edit_control_line(field: &ConfigUiField, mode: ConfigUiEditMode) -> Line<'static> {
@@ -1106,5 +1110,15 @@ mod tests {
             line.spans[2].style,
             state_style(ConfigUiValueState::Invalid)
         );
+    }
+
+    // Defends: default reset is visible only when the selected field has a default.
+    #[test]
+    fn normal_controls_hide_default_reset_without_default() {
+        let mut app = ConfigUiApp::new(test_model(ConfigUiValueState::Explicit));
+        assert!(rendered_text(&normal_control_line(&app)).contains("u reset default"));
+
+        app.model.fields[0].default_value = "no default".to_string();
+        assert!(!rendered_text(&normal_control_line(&app)).contains("reset default"));
     }
 }

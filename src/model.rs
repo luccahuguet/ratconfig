@@ -124,6 +124,14 @@ pub struct ConfigUiField {
     pub edit_behavior: ConfigUiEditBehavior,
 }
 
+impl ConfigUiField {
+    pub fn has_default_value(&self) -> bool {
+        self.default_value != NO_DEFAULT_VALUE_LABEL
+    }
+}
+
+const NO_DEFAULT_VALUE_LABEL: &str = "no default";
+
 #[derive(Debug, Clone)]
 pub struct ConfigUiFieldRowSpec<'a> {
     pub source_id: &'a str,
@@ -171,7 +179,7 @@ pub fn build_config_ui_field(spec: ConfigUiFieldRowSpec<'_>) -> ConfigUiField {
         default_value: spec
             .default
             .map(render_json_value)
-            .unwrap_or_else(|| "no default".to_string()),
+            .unwrap_or_else(|| NO_DEFAULT_VALUE_LABEL.to_string()),
         state,
         description: spec.description,
         allowed_values: spec.allowed_values,
@@ -839,15 +847,18 @@ help = "Theme name"
         assert_eq!(explicit.current_value, "\"dark\"");
         assert_eq!(explicit.edit_value, "\"dark\"");
         assert_eq!(explicit.default_value, "\"light\"");
+        assert!(explicit.has_default_value());
 
         let defaulted = build_config_ui_field(spec(None, Some(&default), false));
         assert_eq!(defaulted.state, ConfigUiValueState::Defaulted);
         assert_eq!(defaulted.current_value, "\"light\"");
+        assert!(defaulted.has_default_value());
 
         let unset = build_config_ui_field(spec(None, None, false));
         assert_eq!(unset.state, ConfigUiValueState::Unset);
         assert_eq!(unset.current_value, "not set");
         assert_eq!(unset.default_value, "no default");
+        assert!(!unset.has_default_value());
 
         let invalid = build_config_ui_field(spec(Some(&current), Some(&default), true));
         assert_eq!(invalid.state, ConfigUiValueState::Invalid);

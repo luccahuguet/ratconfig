@@ -12,7 +12,7 @@ Example host integration in Yazelix: ratconfig owns the reusable tabs, rows, edi
 
 - generic config document and field model
 - tabs, visible rows, search, selection, notices, and edit state
-- staged bool toggles, scalar editing, single-select, and multiselect controls
+- staged bool toggles, scalar editing, single-select, multiselect, and default reset controls
 - generic Ratatui rendering for the model
 - optional host-supplied rich detail rendering callbacks
 - comment-preserving JSONC and TOML set/unset patch primitives
@@ -96,6 +96,8 @@ Host applications build the model from their own schema and config files, then u
 Populate `ConfigUiModel::sources` when tabs represent separate host-owned config documents. Ratconfig uses that metadata only to render the selected tab's label, path, owner, and write mode; hosts still own discovery, loading, writes, creation policy, and validation
 
 Use `ConfigUiField::display_label` when row and detail text should be friendlier than the stable field path. Ratconfig still uses `path` for edit intents and host write routing
+
+Fields with defaults expose a reset-to-default action that emits `ConfigUiIntent::UnsetField`. Hosts decide whether that means unsetting text, writing a default, validation, persistence, reloads, and apply behavior
 
 Hosts that want ratconfig to own the crossterm terminal setup, draw loop, event reads, and key conversion can enable the optional runner:
 
