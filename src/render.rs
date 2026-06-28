@@ -809,12 +809,12 @@ fn edit_status_line(field: &ConfigUiField, edit: &ConfigUiEditState) -> Line<'st
 }
 
 fn normal_control_line(app: &ConfigUiApp) -> Line<'static> {
-    if let Some(action) = app.selected_file_action() {
-        return if action.disabled_reason.is_some() {
-            Line::from("file action unavailable")
+    if let Some((_, action)) = app.selected_file_action() {
+        return Line::from(if action.disabled_reason.is_some() {
+            "file action unavailable"
         } else {
-            Line::from("Enter/e/Space open file")
-        };
+            "Enter/e/Space open file"
+        });
     }
     let Some(field) = app.selected_field() else {
         return Line::from("Select a setting row to edit");
@@ -913,12 +913,10 @@ pub fn file_action_status_label(action: &ConfigUiFileAction) -> &'static str {
 }
 
 pub fn file_action_status_style(action: &ConfigUiFileAction) -> Style {
-    if action.disabled_reason.is_some() {
-        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-    } else if action.read_only || !action.exists {
-        Style::default().fg(Color::Yellow)
-    } else {
-        Style::default().fg(Color::Green)
+    match file_action_status_label(action) {
+        "error" => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        "existing" => Style::default().fg(Color::Green),
+        _ => Style::default().fg(Color::Yellow),
     }
 }
 
@@ -1241,23 +1239,16 @@ mod tests {
             file_action(false, false, true, Some("Path cannot be resolved")),
         ];
 
-        assert_eq!(
-            rendered_cells(&row_line_for_model(&model, UiRowRef::FileAction(0))),
-            vec!["existing", "Native config", "/home/alex/.con..."]
-        );
-        assert_eq!(
-            rendered_cells(&row_line_for_model(&model, UiRowRef::FileAction(1))),
-            vec!["missing", "Native config", "/home/alex/.con..."]
-        );
-        assert_eq!(
-            rendered_cells(&row_line_for_model(&model, UiRowRef::FileAction(2))),
-            vec!["read-only", "Native config", "/home/alex/.con..."]
-        );
+        for (index, status) in ["existing", "missing", "read-only", "error"]
+            .into_iter()
+            .enumerate()
+        {
+            assert_eq!(
+                rendered_cells(&row_line_for_model(&model, UiRowRef::FileAction(index))),
+                vec![status, "Native config", "/home/alex/.con..."]
+            );
+        }
         let error_line = row_line_for_model(&model, UiRowRef::FileAction(3));
-        assert_eq!(
-            rendered_cells(&error_line),
-            vec!["error", "Native config", "/home/alex/.con..."]
-        );
         assert_eq!(
             error_line.spans[0].style,
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)

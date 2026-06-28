@@ -155,17 +155,15 @@ impl ConfigUiApp {
             .and_then(|index| self.model.fields.get(index))
     }
 
-    pub fn selected_file_action_index(&self) -> Option<usize> {
-        let row = self.visible_rows().get(self.selected_row).copied()?;
-        match row {
-            UiRowRef::FileAction(index) => Some(index),
-            _ => None,
-        }
-    }
-
-    pub fn selected_file_action(&self) -> Option<&ConfigUiFileAction> {
-        self.selected_file_action_index()
-            .and_then(|index| self.model.file_actions.get(index))
+    pub(crate) fn selected_file_action(&self) -> Option<(usize, &ConfigUiFileAction)> {
+        let UiRowRef::FileAction(index) = self.visible_rows().get(self.selected_row).copied()?
+        else {
+            return None;
+        };
+        self.model
+            .file_actions
+            .get(index)
+            .map(|action| (index, action))
     }
 
     pub fn notice_info(&mut self, text: impl Into<String>) {
@@ -425,25 +423,21 @@ impl ConfigUiApp {
     }
 
     fn edit_or_activate_selected_row(&mut self) -> ConfigUiIntent {
-        if self.selected_file_action_index().is_some() {
-            return self.activate_selected_file_action();
+        if let Some((index, _)) = self.selected_file_action() {
+            return self.activate_file_action(index);
         }
         self.begin_edit_selected_field()
     }
 
     fn activate_selected_row(&mut self) -> ConfigUiIntent {
-        if self.selected_file_action_index().is_some() {
-            return self.activate_selected_file_action();
+        if let Some((index, _)) = self.selected_file_action() {
+            return self.activate_file_action(index);
         }
         self.quick_edit_selected_field()
     }
 
-    fn activate_selected_file_action(&mut self) -> ConfigUiIntent {
+    fn activate_file_action(&mut self, file_action_index: usize) -> ConfigUiIntent {
         self.notice = None;
-        let Some(file_action_index) = self.selected_file_action_index() else {
-            self.notice_error("Select a file row to open.");
-            return ConfigUiIntent::None;
-        };
         let action = &self.model.file_actions[file_action_index];
         if let Some(reason) = &action.disabled_reason {
             self.notice_error(reason.clone());
@@ -1217,6 +1211,21 @@ mod tests {
         }
     }
 
+    fn open_file_intent(
+        file_action_index: usize,
+        action_id: &str,
+        path: &str,
+        create_if_missing: bool,
+    ) -> ConfigUiIntent {
+        ConfigUiIntent::OpenFile {
+            file_action_index,
+            source_id: "native".to_string(),
+            action_id: action_id.to_string(),
+            path: PathBuf::from(path),
+            create_if_missing,
+        }
+    }
+
     // Defends: file action rows emit stable host-owned open intents for existing and missing files.
     #[test]
     fn file_action_rows_emit_open_file_intents() {
@@ -1230,25 +1239,13 @@ mod tests {
 
         assert_eq!(
             app.handle_key(ConfigUiKey::Enter),
-            ConfigUiIntent::OpenFile {
-                file_action_index: 0,
-                source_id: "native".to_string(),
-                action_id: "existing".to_string(),
-                path: PathBuf::from("/tmp/acme/existing.toml"),
-                create_if_missing: false,
-            }
+            open_file_intent(0, "existing", "/tmp/acme/existing.toml", false)
         );
 
         app.selected_row = 1;
         assert_eq!(
             app.handle_key(ConfigUiKey::Char('e')),
-            ConfigUiIntent::OpenFile {
-                file_action_index: 1,
-                source_id: "native".to_string(),
-                action_id: "missing".to_string(),
-                path: PathBuf::from("/tmp/acme/missing.toml"),
-                create_if_missing: true,
-            }
+            open_file_intent(1, "missing", "/tmp/acme/missing.toml", true)
         );
     }
 

@@ -953,6 +953,21 @@ help = "Theme name"
     // Defends: host-owned file action rows join tab/search rows without becoming scalar settings.
     #[test]
     fn file_action_rows_are_visible_and_searchable_by_host_metadata() {
+        fn file_action(tab: &str, label: &str) -> ConfigUiFileAction {
+            ConfigUiFileAction {
+                source_id: "native".to_string(),
+                action_id: format!("open_{tab}"),
+                tab: tab.to_string(),
+                label: label.to_string(),
+                description: format!("Open {label}"),
+                path: PathBuf::from(format!("/home/alex/.config/acme/{tab}.toml")),
+                exists: true,
+                read_only: false,
+                create_if_missing: false,
+                disabled_reason: None,
+            }
+        }
+
         let model = ConfigUiModel {
             active_config_path: PathBuf::from("/tmp/acme/settings.jsonc"),
             cursor_config_path: PathBuf::new(),
@@ -964,30 +979,8 @@ help = "Theme name"
             tabs: vec!["general".to_string(), "advanced".to_string()],
             fields: vec![build_config_ui_field(spec(None, None, false))],
             file_actions: vec![
-                ConfigUiFileAction {
-                    source_id: "native".to_string(),
-                    action_id: "open_prompt".to_string(),
-                    tab: "general".to_string(),
-                    label: "Prompt config".to_string(),
-                    description: "Open the native prompt config".to_string(),
-                    path: PathBuf::from("/home/alex/.config/acme/prompt.toml"),
-                    exists: false,
-                    read_only: false,
-                    create_if_missing: true,
-                    disabled_reason: None,
-                },
-                ConfigUiFileAction {
-                    source_id: "native".to_string(),
-                    action_id: "open_native_logs".to_string(),
-                    tab: "advanced".to_string(),
-                    label: "Native logs".to_string(),
-                    description: "Open the host-owned native log config".to_string(),
-                    path: PathBuf::from("/home/alex/.config/acme/logs.toml"),
-                    exists: true,
-                    read_only: false,
-                    create_if_missing: false,
-                    disabled_reason: None,
-                },
+                file_action("general", "Prompt config"),
+                file_action("advanced", "Native logs"),
             ],
             sidecars: Vec::new(),
             native_config_statuses: Vec::new(),
