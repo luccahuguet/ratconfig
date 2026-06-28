@@ -14,8 +14,14 @@ const FIELD_VALUE_COLUMN_WIDTH: usize = 18;
 const HEADER_MIN_PATH_WIDTH: usize = 8;
 const HEADER_MIN_SOURCE_LABEL_WIDTH: usize = 4;
 const HEADER_SOURCE_LABEL_WIDTH: usize = 18;
-const STATUS_COLUMN_WIDTH: usize = 9;
+const STATUS_COLUMN_WIDTH: usize = 10;
 const STATUS_ITEM_COLUMN_WIDTH: usize = 42;
+
+#[derive(Clone, Copy)]
+enum ListLayout {
+    Field,
+    Status,
+}
 
 struct HeaderMetadata {
     source_label: Option<String>,
@@ -272,9 +278,10 @@ fn render_body(
 }
 
 fn render_list(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect, rows: &[UiRowRef]) {
+    let layout = list_layout(app);
     let items = rows
         .iter()
-        .map(|row| ListItem::new(row_line_for_model(&app.model, *row)))
+        .map(|row| ListItem::new(row_line_for_layout(&app.model, *row, layout)))
         .collect::<Vec<_>>();
     let mut state = ListState::default();
     if !items.is_empty() {
@@ -316,9 +323,16 @@ fn render_list(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect, rows: &[UiR
 }
 
 fn list_header_line(app: &ConfigUiApp) -> Line<'static> {
+    match list_layout(app) {
+        ListLayout::Field => field_list_header_line(),
+        ListLayout::Status => status_list_header_line(),
+    }
+}
+
+fn list_layout(app: &ConfigUiApp) -> ListLayout {
     match app.model.tabs.get(app.selected_tab).map(String::as_str) {
-        Some("advanced") => status_list_header_line(),
-        _ => field_list_header_line(),
+        Some("advanced") => ListLayout::Status,
+        _ => ListLayout::Field,
     }
 }
 
@@ -339,11 +353,11 @@ fn field_list_header_line() -> Line<'static> {
 fn status_list_header_line() -> Line<'static> {
     Line::from(vec![
         Span::styled(
-            fixed_label("status", STATUS_COLUMN_WIDTH),
+            status_column_cell("status", STATUS_COLUMN_WIDTH),
             column_header_style(),
         ),
         Span::styled(
-            fixed_label("item", STATUS_ITEM_COLUMN_WIDTH),
+            status_column_cell("item", STATUS_ITEM_COLUMN_WIDTH),
             column_header_style(),
         ),
         Span::styled("detail", column_header_style()),
@@ -373,6 +387,10 @@ fn render_details(
 }
 
 pub fn row_line_for_model(model: &ConfigUiModel, row: UiRowRef) -> Line<'static> {
+    row_line_for_layout(model, row, ListLayout::Field)
+}
+
+fn row_line_for_layout(model: &ConfigUiModel, row: UiRowRef, layout: ListLayout) -> Line<'static> {
     match row {
         UiRowRef::Field(index) => {
             let field = &model.fields[index];
@@ -396,36 +414,43 @@ pub fn row_line_for_model(model: &ConfigUiModel, row: UiRowRef) -> Line<'static>
         }
         UiRowRef::Sidecar(index) => {
             let sidecar = &model.sidecars[index];
-            Line::from(vec![
-                Span::styled(
-                    fixed_label(sidecar_status_label(sidecar.present), 9),
-                    sidecar_status_style(sidecar.present),
-                ),
-                Span::styled(sidecar.name.clone(), config_key_style()),
-            ])
+            status_row_line(
+                sidecar_status_label(sidecar.present),
+                sidecar_status_style(sidecar.present),
+                &sidecar.name,
+                sidecar.path.display().to_string(),
+            )
         }
         UiRowRef::FileAction(index) => {
             let action = &model.file_actions[index];
-            Line::from(vec![
-                Span::styled(
-                    fixed_label(
-                        file_action_status_label(action),
-                        FIELD_TAKES_EFFECT_COLUMN_WIDTH,
+            match layout {
+                ListLayout::Field => Line::from(vec![
+                    Span::styled(
+                        fixed_label(
+                            file_action_status_label(action),
+                            FIELD_TAKES_EFFECT_COLUMN_WIDTH,
+                        ),
+                        file_action_status_style(action),
                     ),
+                    Span::styled(
+                        fixed_label(
+                            &truncate(&action.label, FIELD_SETTING_COLUMN_WIDTH),
+                            FIELD_SETTING_COLUMN_WIDTH,
+                        ),
+                        config_key_style(),
+                    ),
+                    Span::styled(
+                        truncate(&action.path.display().to_string(), FIELD_VALUE_COLUMN_WIDTH),
+                        Style::default().fg(Color::Gray),
+                    ),
+                ]),
+                ListLayout::Status => status_row_line(
+                    file_action_status_label(action),
                     file_action_status_style(action),
+                    &action.label,
+                    action.path.display().to_string(),
                 ),
-                Span::styled(
-                    fixed_label(
-                        &truncate(&action.label, FIELD_SETTING_COLUMN_WIDTH),
-                        FIELD_SETTING_COLUMN_WIDTH,
-                    ),
-                    config_key_style(),
-                ),
-                Span::styled(
-                    truncate(&action.path.display().to_string(), FIELD_VALUE_COLUMN_WIDTH),
-                    Style::default().fg(Color::Gray),
-                ),
-            ])
+            }
         }
         UiRowRef::Diagnostic(index) => {
             let diagnostic = &model.diagnostics[index];
@@ -434,23 +459,46 @@ pub fn row_line_for_model(model: &ConfigUiModel, row: UiRowRef) -> Line<'static>
             } else {
                 Style::default().fg(Color::Yellow)
             };
-            Line::from(vec![
-                Span::styled(fixed_label(&diagnostic.status, 9), style),
-                Span::styled(truncate(&diagnostic.path, 42), config_key_style()),
-            ])
+            status_row_line(
+                &diagnostic.status,
+                style,
+                &diagnostic.path,
+                diagnostic.headline.as_str(),
+            )
         }
         UiRowRef::NativeStatus(index) => {
             let status = &model.native_config_statuses[index];
-            Line::from(vec![
-                Span::styled(fixed_label(&status.status, 24), native_status_style(status)),
-                Span::styled(truncate(&status.surface, 36), config_key_style()),
-                Span::styled(
-                    format!(" {}", truncate(&status.label, 42)),
-                    Style::default().fg(Color::Gray),
-                ),
-            ])
+            status_row_line(
+                &status.status,
+                native_status_style(status),
+                &status.surface,
+                status.label.as_str(),
+            )
         }
     }
+}
+
+fn status_row_line(
+    status: &str,
+    status_style: Style,
+    item: &str,
+    detail: impl Into<String>,
+) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            status_column_cell(status, STATUS_COLUMN_WIDTH),
+            status_style,
+        ),
+        Span::styled(
+            status_column_cell(item, STATUS_ITEM_COLUMN_WIDTH),
+            config_key_style(),
+        ),
+        Span::styled(detail.into(), Style::default().fg(Color::Gray)),
+    ])
+}
+
+fn status_column_cell(value: &str, width: usize) -> String {
+    format!("{:<width$}", truncate(value, width.saturating_sub(1)))
 }
 
 fn field_display_label(field: &ConfigUiField) -> &str {
@@ -994,6 +1042,10 @@ mod tests {
             .collect()
     }
 
+    fn span_width(line: &Line<'_>, index: usize) -> usize {
+        line.spans[index].content.chars().count()
+    }
+
     fn test_model(state: ConfigUiValueState) -> ConfigUiModel {
         ConfigUiModel {
             active_config_path: PathBuf::from("/home/alex/.config/acme/settings.jsonc"),
@@ -1196,7 +1248,16 @@ mod tests {
         }];
         let line = row_line_for_model(&model, UiRowRef::Sidecar(0));
 
-        assert_eq!(rendered_cells(&line), vec!["absent", "Native config"]);
+        assert_eq!(
+            rendered_cells(&line),
+            vec![
+                "absent",
+                "Native config",
+                "/home/alex/.config/acme/native.toml"
+            ]
+        );
+        assert_eq!(span_width(&line, 0), STATUS_COLUMN_WIDTH);
+        assert_eq!(span_width(&line, 1), STATUS_ITEM_COLUMN_WIDTH);
         assert_eq!(line.spans[0].style, Style::default().fg(Color::Gray));
         assert!(
             sidecar_detail_lines(&model.sidecars[0])
@@ -1204,6 +1265,53 @@ mod tests {
                 .map(rendered_text)
                 .any(|line| line.contains("state") && line.contains("absent"))
         );
+    }
+
+    // Defends: native status rows align with the advanced status/item/detail header.
+    #[test]
+    fn native_status_rows_use_advanced_status_columns() {
+        let mut model = test_model(ConfigUiValueState::Explicit);
+        model.native_config_statuses = vec![ConfigUiNativeStatus {
+            surface: "mars".to_string(),
+            tool: "mars".to_string(),
+            description: "Mars config".to_string(),
+            status: "existing".to_string(),
+            label: "Managed config present".to_string(),
+            severity: "ok".to_string(),
+            active_path: Some("/home/alex/.config/mars/config.toml".to_string()),
+            managed_path: Some("/home/alex/.config/yazelix/mars.toml".to_string()),
+            native_paths: vec!["/home/alex/.config/mars/config.toml".to_string()],
+            generated_path: None,
+            allowed_action: "none".to_string(),
+            read_only_reason: None,
+        }];
+        let line = row_line_for_model(&model, UiRowRef::NativeStatus(0));
+
+        assert_eq!(
+            rendered_cells(&line),
+            vec!["existing", "mars", "Managed config present"]
+        );
+        assert_eq!(span_width(&line, 0), STATUS_COLUMN_WIDTH);
+        assert_eq!(span_width(&line, 1), STATUS_ITEM_COLUMN_WIDTH);
+    }
+
+    // Defends: advanced file actions use status columns without changing normal tab file action rows.
+    #[test]
+    fn advanced_file_actions_use_status_columns() {
+        let mut model = test_model(ConfigUiValueState::Explicit);
+        model.file_actions = vec![file_action(true, true, false, None)];
+        let line = row_line_for_layout(&model, UiRowRef::FileAction(0), ListLayout::Status);
+
+        assert_eq!(
+            rendered_cells(&line),
+            vec![
+                "read-only",
+                "Native config",
+                "/home/alex/.config/acme/native.toml"
+            ]
+        );
+        assert_eq!(span_width(&line, 0), STATUS_COLUMN_WIDTH);
+        assert_eq!(span_width(&line, 1), STATUS_ITEM_COLUMN_WIDTH);
     }
 
     // Defends: default reset is visible only when the selected field has a default.
