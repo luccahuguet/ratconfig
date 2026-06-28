@@ -396,14 +396,9 @@ pub fn row_line_for_model(model: &ConfigUiModel, row: UiRowRef) -> Line<'static>
         }
         UiRowRef::Sidecar(index) => {
             let sidecar = &model.sidecars[index];
-            let status = if sidecar.present {
-                "present"
-            } else {
-                "missing"
-            };
             Line::from(vec![
                 Span::styled(
-                    fixed_label(status, 9),
+                    fixed_label(sidecar_status_label(sidecar.present), 9),
                     sidecar_status_style(sidecar.present),
                 ),
                 Span::styled(sidecar.name.clone(), config_key_style()),
@@ -637,14 +632,7 @@ pub fn sidecar_detail_lines(sidecar: &ConfigUiSidecar) -> Vec<Line<'static>> {
         )),
         Line::from(""),
         detail_line("path", &sidecar.path.display().to_string()),
-        detail_line(
-            "state",
-            if sidecar.present {
-                "present"
-            } else {
-                "missing"
-            },
-        ),
+        detail_line("state", sidecar_status_label(sidecar.present)),
         detail_line("owner", owner_label(sidecar.owner)),
         detail_line("write", write_detail_label(sidecar.read_only)),
     ]
@@ -888,8 +876,12 @@ pub fn sidecar_status_style(present: bool) -> Style {
     if present {
         Style::default().fg(Color::Green)
     } else {
-        Style::default().fg(Color::Yellow)
+        Style::default().fg(Color::Gray)
     }
+}
+
+fn sidecar_status_label(present: bool) -> &'static str {
+    if present { "present" } else { "absent" }
 }
 
 pub fn file_action_status_label(action: &ConfigUiFileAction) -> &'static str {
@@ -1188,6 +1180,29 @@ mod tests {
         assert_eq!(
             line.spans[2].style,
             state_style(ConfigUiValueState::Invalid)
+        );
+    }
+
+    // Defends: absent advanced status rows stay neutral instead of warning-colored.
+    #[test]
+    fn absent_sidecar_status_is_neutral() {
+        let mut model = test_model(ConfigUiValueState::Explicit);
+        model.sidecars = vec![ConfigUiSidecar {
+            name: "Native config".to_string(),
+            path: PathBuf::from("/home/alex/.config/acme/native.toml"),
+            present: false,
+            owner: ConfigUiPathOwner::User,
+            read_only: false,
+        }];
+        let line = row_line_for_model(&model, UiRowRef::Sidecar(0));
+
+        assert_eq!(rendered_cells(&line), vec!["absent", "Native config"]);
+        assert_eq!(line.spans[0].style, Style::default().fg(Color::Gray));
+        assert!(
+            sidecar_detail_lines(&model.sidecars[0])
+                .iter()
+                .map(rendered_text)
+                .any(|line| line.contains("state") && line.contains("absent"))
         );
     }
 
