@@ -607,12 +607,10 @@ pub fn multi_choice_detail_lines(
         &format!("{}/{}", enabled_set.len(), field.allowed_values.len()),
     ));
     if is_ordered_string_list_field(field) {
-        let order = if enabled_values.is_empty() {
-            "none".to_string()
-        } else {
-            enabled_values.join(", ")
-        };
-        lines.push(detail_line("order", &order));
+        lines.push(detail_line(
+            "order",
+            &string_list_order_label(&enabled_values),
+        ));
     }
     lines.push(Line::from(""));
 

@@ -305,16 +305,12 @@ impl ConfigUiApp {
         key: ConfigUiKey,
         mode: ConfigUiEditMode,
     ) -> ConfigUiIntent {
-        let scalar_enum = self
+        let field = self
             .edit
             .as_ref()
-            .and_then(|edit| self.model.fields.get(edit.field_index))
-            .is_some_and(is_scalar_enum_field);
-        let ordered_string_list = self
-            .edit
-            .as_ref()
-            .and_then(|edit| self.model.fields.get(edit.field_index))
-            .is_some_and(is_ordered_string_list_field);
+            .and_then(|edit| self.model.fields.get(edit.field_index));
+        let scalar_enum = field.is_some_and(is_scalar_enum_field);
+        let ordered_string_list = field.is_some_and(is_ordered_string_list_field);
         let multi_choice = mode == ConfigUiEditMode::MultiChoice;
         match key {
             ConfigUiKey::Esc => self.cancel_edit(),
@@ -413,26 +409,24 @@ impl ConfigUiApp {
     }
 
     fn toggle_multi_choice_edit(&mut self) {
-        let next = match self.edit.as_ref().map(|edit| {
-            let field = &self.model.fields[edit.field_index];
+        self.replace_choice_input(|field, edit| {
             toggled_string_list_input(field, &edit.input, edit.choice_index)
-        }) {
-            None => return,
-            Some(Ok(next)) => next,
-            Some(Err(message)) => {
-                self.notice_error(message);
-                return;
-            }
-        };
-        if let Some(edit) = &mut self.edit {
-            edit.input = next;
-        }
+        });
     }
 
     fn move_ordered_string_list_edit(&mut self, delta: isize) {
+        self.replace_choice_input(|field, edit| {
+            moved_ordered_string_list_input(field, &edit.input, edit.choice_index, delta)
+        });
+    }
+
+    fn replace_choice_input(
+        &mut self,
+        next_input: impl FnOnce(&ConfigUiField, &ConfigUiEditState) -> Result<String, String>,
+    ) {
         let next = match self.edit.as_ref().map(|edit| {
             let field = &self.model.fields[edit.field_index];
-            moved_ordered_string_list_input(field, &edit.input, edit.choice_index, delta)
+            next_input(field, edit)
         }) {
             None => return,
             Some(Ok(next)) => next,
@@ -746,20 +740,24 @@ pub fn multi_choice_status_value(field: &ConfigUiField, edit: &ConfigUiEditState
         .map(String::as_str)
         .unwrap_or("none");
     if is_ordered_string_list_field(field) {
-        let order = if values.is_empty() {
-            "none".to_string()
-        } else {
-            values.join(", ")
-        };
         return format!(
-            "{enabled}/{} enabled, selected {selected}, order {order}",
-            field.allowed_values.len()
+            "{enabled}/{} enabled, selected {selected}, order {}",
+            field.allowed_values.len(),
+            string_list_order_label(&values)
         );
     }
     format!(
         "{enabled}/{} enabled, selected {selected}",
         field.allowed_values.len()
     )
+}
+
+pub(crate) fn string_list_order_label(values: &[String]) -> String {
+    if values.is_empty() {
+        "none".to_string()
+    } else {
+        values.join(", ")
+    }
 }
 
 pub fn toggled_string_list_input(
@@ -798,13 +796,11 @@ fn moved_ordered_string_list_input(
         return render_string_list_input(field, &values);
     };
     let next = if delta < 0 {
-        let Some(next) = index.checked_sub(1) else {
-            return render_string_list_input(field, &values);
-        };
-        next
-    } else if index + 1 < values.len() {
-        index + 1
+        index.checked_sub(1)
     } else {
+        (index + 1 < values.len()).then_some(index + 1)
+    };
+    let Some(next) = next else {
         return render_string_list_input(field, &values);
     };
     values.swap(index, next);
@@ -817,9 +813,6 @@ fn render_string_list_input(field: &ConfigUiField, values: &[String]) -> Result<
 }
 
 fn ordered_string_list_values(field: &ConfigUiField, values: &[String]) -> Vec<String> {
-    if field.allowed_values.is_empty() {
-        return values.to_vec();
-    }
     let selected = values.iter().cloned().collect::<BTreeSet<_>>();
     field
         .allowed_values
