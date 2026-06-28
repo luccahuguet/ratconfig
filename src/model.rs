@@ -18,6 +18,7 @@ pub struct ConfigUiModel {
     pub config_read_only: bool,
     pub sources: Vec<ConfigUiSource>,
     pub tabs: Vec<String>,
+    pub tab_list_tables: BTreeMap<String, ConfigUiListTable>,
     pub fields: Vec<ConfigUiField>,
     pub file_actions: Vec<ConfigUiFileAction>,
     pub sidecars: Vec<ConfigUiSidecar>,
@@ -41,6 +42,17 @@ pub struct ConfigUiSource {
     pub exists: bool,
     pub owner: ConfigUiPathOwner,
     pub read_only: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigUiListTable {
+    pub columns: Vec<ConfigUiListColumn>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigUiListColumn {
+    pub title: String,
+    pub width: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,6 +135,7 @@ pub struct ConfigUiField {
     pub source_id: String,
     pub path: String,
     pub display_label: String,
+    pub list_cells: Vec<String>,
     pub tab: String,
     pub kind: String,
     pub current_value: String,
@@ -170,6 +183,7 @@ pub struct ConfigUiFieldRowSpec<'a> {
     pub source_id: &'a str,
     pub path: &'a str,
     pub display_label: String,
+    pub list_cells: Vec<String>,
     pub tab: &'a str,
     pub kind: &'a str,
     pub current: Option<&'a JsonValue>,
@@ -188,6 +202,7 @@ pub struct ConfigUiStringListChoiceSpec {
     pub source_id: String,
     pub path: String,
     pub display_label: String,
+    pub list_cells: Vec<String>,
     pub tab: String,
     pub current: Option<Vec<String>>,
     pub default: Option<Vec<String>>,
@@ -214,6 +229,7 @@ pub fn build_config_ui_field(spec: ConfigUiFieldRowSpec<'_>) -> ConfigUiField {
         source_id: spec.source_id.to_string(),
         path: spec.path.to_string(),
         display_label: spec.display_label,
+        list_cells: spec.list_cells,
         tab: spec.tab.to_string(),
         kind: spec.kind.to_string(),
         current_value: spec
@@ -264,6 +280,7 @@ pub fn build_string_list_choice_field(
         source_id: &spec.source_id,
         path: &spec.path,
         display_label: spec.display_label,
+        list_cells: spec.list_cells,
         tab: &spec.tab,
         kind: "string_list",
         current: current.as_ref(),
@@ -822,6 +839,7 @@ mod tests {
                 "keys".to_string(),
                 "advanced".to_string(),
             ],
+            tab_list_tables: BTreeMap::new(),
             fields: Vec::new(),
             file_actions: Vec::new(),
             sidecars: Vec::new(),
@@ -845,6 +863,7 @@ mod tests {
             source_id: DEFAULT_CONFIG_SOURCE_ID,
             path: "ui.theme",
             display_label: String::new(),
+            list_cells: Vec::new(),
             tab: "general",
             kind: "string",
             current,
@@ -1004,6 +1023,7 @@ help = "Theme name"
             source_id: "settings",
             path: "plugins.enabled",
             display_label: "Enabled plugins".to_string(),
+            list_cells: Vec::new(),
             tab: "advanced",
             kind: "string_list",
             current: Some(&current),
@@ -1041,6 +1061,7 @@ help = "Theme name"
             source_id: "settings".to_string(),
             path: "widgets.enabled".to_string(),
             display_label: "Enabled widgets".to_string(),
+            list_cells: Vec::new(),
             tab: "widgets".to_string(),
             current: Some(vec!["status".to_string(), "clock".to_string()]),
             default: Some(vec!["clock".to_string()]),
@@ -1105,6 +1126,7 @@ help = "Theme name"
             source_id: "settings".to_string(),
             path: "widgets.enabled".to_string(),
             display_label: String::new(),
+            list_cells: Vec::new(),
             tab: "widgets".to_string(),
             current: None,
             default: None,
@@ -1148,6 +1170,7 @@ help = "Theme name"
             config_read_only: false,
             sources: Vec::new(),
             tabs: vec!["general".to_string(), "advanced".to_string()],
+            tab_list_tables: BTreeMap::new(),
             fields: vec![build_config_ui_field(spec(None, None, false))],
             file_actions: vec![
                 file_action("general", "Prompt config"),

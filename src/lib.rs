@@ -23,9 +23,10 @@ pub use editor::*;
 pub use model::{
     ConfigUiApplyStatus, ConfigUiContractField, ConfigUiDiagnostic, ConfigUiEditBehavior,
     ConfigUiField, ConfigUiFieldMetadata, ConfigUiFieldRowSpec, ConfigUiFileAction,
-    ConfigUiMetadata, ConfigUiModel, ConfigUiNativeStatus, ConfigUiPathOwner, ConfigUiSchemaField,
-    ConfigUiSidecar, ConfigUiSource, ConfigUiStringListChoiceSpec, ConfigUiValueState,
-    DEFAULT_CONFIG_SOURCE_ID, NO_CONFIG_DEFAULT_VALUE_LABEL,
+    ConfigUiListColumn, ConfigUiListTable, ConfigUiMetadata, ConfigUiModel, ConfigUiNativeStatus,
+    ConfigUiPathOwner, ConfigUiSchemaField, ConfigUiSidecar, ConfigUiSource,
+    ConfigUiStringListChoiceSpec, ConfigUiValueState, DEFAULT_CONFIG_SOURCE_ID,
+    NO_CONFIG_DEFAULT_VALUE_LABEL,
 };
 pub use model::{
     UiRowRef, build_config_ui_field, build_string_list_choice_field,

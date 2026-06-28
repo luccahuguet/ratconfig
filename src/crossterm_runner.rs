@@ -253,6 +253,7 @@ mod tests {
             source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
             path: path.to_string(),
             display_label: String::new(),
+            list_cells: Vec::new(),
             tab: "general".to_string(),
             kind: kind.to_string(),
             current_value: value.to_string(),
@@ -283,6 +284,7 @@ mod tests {
             config_read_only: false,
             sources: Vec::new(),
             tabs: vec!["general".to_string()],
+            tab_list_tables: std::collections::BTreeMap::new(),
             fields: vec![
                 field("server.enabled", "bool", "false", &[]),
                 field("ui.theme", "string", "\"light\"", &["light", "dark"]),

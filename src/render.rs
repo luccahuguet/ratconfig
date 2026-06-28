@@ -8,19 +8,20 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tab
 use std::collections::BTreeSet;
 
 const HEADER_HORIZONTAL_PADDING: u16 = 1;
-const FIELD_TAKES_EFFECT_COLUMN_WIDTH: usize = 26;
-const FIELD_SETTING_COLUMN_WIDTH: usize = 30;
-const FIELD_VALUE_COLUMN_WIDTH: usize = 18;
+const FIELD_TAKES_EFFECT_COLUMN_WIDTH: usize = 18;
+const FIELD_SETTING_COLUMN_WIDTH: usize = 44;
+const FIELD_VALUE_COLUMN_WIDTH: usize = 28;
 const HEADER_MIN_PATH_WIDTH: usize = 8;
 const HEADER_MIN_SOURCE_LABEL_WIDTH: usize = 4;
 const HEADER_SOURCE_LABEL_WIDTH: usize = 18;
 const STATUS_COLUMN_WIDTH: usize = 10;
-const STATUS_ITEM_COLUMN_WIDTH: usize = 42;
+const STATUS_ITEM_COLUMN_WIDTH: usize = 24;
 
 #[derive(Clone, Copy)]
-enum ListLayout {
+enum ListLayout<'a> {
     Field,
     Status,
+    Table(&'a ConfigUiListTable),
 }
 
 struct HeaderMetadata {
@@ -254,7 +255,7 @@ fn render_body(
 ) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(44), Constraint::Percentage(56)])
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(area);
     let rows = app.visible_rows();
     app.clamp_selection_for_len(rows.len());
@@ -269,7 +270,7 @@ fn render_body(
 }
 
 fn render_list(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect, rows: &[UiRowRef]) {
-    let layout = list_layout(app);
+    let layout = list_layout(&app.model, app.selected_tab);
     let items = rows
         .iter()
         .map(|row| ListItem::new(row_line_for_layout(&app.model, *row, layout)))
@@ -295,7 +296,7 @@ fn render_list(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect, rows: &[UiR
         .constraints([Constraint::Length(1), Constraint::Min(0)])
         .split(inner);
     frame.render_widget(
-        Paragraph::new(list_header_line(app)).alignment(Alignment::Left),
+        Paragraph::new(list_header_line(layout)).alignment(Alignment::Left),
         list_chunks[0],
     );
     if list_chunks[1].height == 0 {
@@ -313,17 +314,24 @@ fn render_list(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect, rows: &[UiR
     );
 }
 
-fn list_header_line(app: &ConfigUiApp) -> Line<'static> {
-    match list_layout(app) {
+fn list_header_line(layout: ListLayout<'_>) -> Line<'static> {
+    match layout {
         ListLayout::Field => field_list_header_line(),
         ListLayout::Status => status_list_header_line(),
+        ListLayout::Table(table) => list_table_header_line(table),
     }
 }
 
-fn list_layout(app: &ConfigUiApp) -> ListLayout {
-    match app.model.tabs.get(app.selected_tab).map(String::as_str) {
-        Some("advanced") => ListLayout::Status,
-        _ => ListLayout::Field,
+fn list_layout(model: &ConfigUiModel, selected_tab: usize) -> ListLayout<'_> {
+    let Some(tab) = model.tabs.get(selected_tab).map(String::as_str) else {
+        return ListLayout::Field;
+    };
+    if tab == "advanced" {
+        ListLayout::Status
+    } else if let Some(table) = model.tab_list_tables.get(tab) {
+        ListLayout::Table(table)
+    } else {
+        ListLayout::Field
     }
 }
 
@@ -369,18 +377,25 @@ pub fn row_line_for_model(model: &ConfigUiModel, row: UiRowRef) -> Line<'static>
     row_line_for_layout(model, row, ListLayout::Field)
 }
 
-fn row_line_for_layout(model: &ConfigUiModel, row: UiRowRef, layout: ListLayout) -> Line<'static> {
+fn row_line_for_layout(
+    model: &ConfigUiModel,
+    row: UiRowRef,
+    layout: ListLayout<'_>,
+) -> Line<'static> {
     match row {
         UiRowRef::Field(index) => {
             let field = &model.fields[index];
-            field_row_line(
-                &field.apply_status.summary,
-                apply_status_style(&field.apply_status),
-                field_display_label(field),
-                field_style(field, config_key_style()),
-                &field.current_value,
-                field_style(field, fg_style(Color::Gray)),
-            )
+            match layout {
+                ListLayout::Table(table) => list_table_row_line(table, field),
+                _ => field_row_line(
+                    &field.apply_status.summary,
+                    apply_status_style(&field.apply_status),
+                    field_display_label(field),
+                    field_style(field, config_key_style()),
+                    &field.current_value,
+                    field_style(field, fg_style(Color::Gray)),
+                ),
+            }
         }
         UiRowRef::Sidecar(index) => {
             let sidecar = &model.sidecars[index];
@@ -394,7 +409,7 @@ fn row_line_for_layout(model: &ConfigUiModel, row: UiRowRef, layout: ListLayout)
         UiRowRef::FileAction(index) => {
             let action = &model.file_actions[index];
             match layout {
-                ListLayout::Field => field_row_line(
+                ListLayout::Field | ListLayout::Table(_) => field_row_line(
                     file_action_status_label(action),
                     file_action_status_style(action),
                     &action.label,
@@ -434,6 +449,40 @@ fn row_line_for_layout(model: &ConfigUiModel, row: UiRowRef, layout: ListLayout)
             )
         }
     }
+}
+
+fn list_table_header_line(table: &ConfigUiListTable) -> Line<'static> {
+    table
+        .columns
+        .iter()
+        .map(|column| column_header(list_table_cell(&column.title, column.width)))
+        .collect()
+}
+
+fn list_table_row_line(table: &ConfigUiListTable, field: &ConfigUiField) -> Line<'static> {
+    let style = field_style(field, metadata_value_style());
+    table
+        .columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            Span::styled(
+                list_table_cell(
+                    field
+                        .list_cells
+                        .get(index)
+                        .map(String::as_str)
+                        .unwrap_or_default(),
+                    column.width,
+                ),
+                style,
+            )
+        })
+        .collect()
+}
+
+fn list_table_cell(value: &str, width: usize) -> String {
+    fixed_label(&truncate(value, width), width)
 }
 
 fn column_header(value: impl Into<String>) -> Span<'static> {
@@ -1049,10 +1098,12 @@ mod tests {
             config_read_only: false,
             sources: Vec::new(),
             tabs: vec!["general".to_string()],
+            tab_list_tables: std::collections::BTreeMap::new(),
             fields: vec![ConfigUiField {
                 source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
                 path: "core.debug_mode".to_string(),
                 display_label: String::new(),
+                list_cells: Vec::new(),
                 tab: "general".to_string(),
                 kind: "bool".to_string(),
                 current_value: "false".to_string(),
@@ -1189,6 +1240,110 @@ mod tests {
         assert_eq!(
             rendered_cells(&field_list_header_line()),
             vec!["takes effect", "setting", "value"]
+        );
+    }
+
+    // Defends: host-defined field table profiles render supplied cells without parsing display labels or values.
+    #[test]
+    fn custom_field_table_renders_host_supplied_cells() {
+        let mut model = test_model(ConfigUiValueState::Explicit);
+        model.tabs = vec!["keys".to_string()];
+        model.fields[0].tab = "keys".to_string();
+        model.fields[0].display_label = "ignored label".to_string();
+        model.fields[0].current_value = "ignored value".to_string();
+        model.fields[0].list_cells = vec![
+            "editor".to_string(),
+            "Ctrl+x".to_string(),
+            "cut selection".to_string(),
+            "user".to_string(),
+            "settings.toml".to_string(),
+            "ignored extra".to_string(),
+        ];
+        model.tab_list_tables.insert(
+            "keys".to_string(),
+            ConfigUiListTable {
+                columns: vec![
+                    ConfigUiListColumn {
+                        title: "group".to_string(),
+                        width: 10,
+                    },
+                    ConfigUiListColumn {
+                        title: "keys".to_string(),
+                        width: 10,
+                    },
+                    ConfigUiListColumn {
+                        title: "action".to_string(),
+                        width: 18,
+                    },
+                    ConfigUiListColumn {
+                        title: "owner".to_string(),
+                        width: 8,
+                    },
+                    ConfigUiListColumn {
+                        title: "source".to_string(),
+                        width: 14,
+                    },
+                ],
+            },
+        );
+
+        let layout = list_layout(&model, 0);
+        assert_eq!(
+            rendered_cells(&list_header_line(layout)),
+            vec!["group", "keys", "action", "owner", "source"]
+        );
+        assert_eq!(
+            rendered_cells(&row_line_for_layout(&model, UiRowRef::Field(0), layout)),
+            vec!["editor", "Ctrl+x", "cut selection", "user", "settings.toml"]
+        );
+    }
+
+    // Defends: missing custom table cells render as blanks instead of panicking.
+    #[test]
+    fn custom_field_table_allows_missing_cells() {
+        let mut model = test_model(ConfigUiValueState::Explicit);
+        model.tab_list_tables.insert(
+            "general".to_string(),
+            ConfigUiListTable {
+                columns: vec![
+                    ConfigUiListColumn {
+                        title: "one".to_string(),
+                        width: 8,
+                    },
+                    ConfigUiListColumn {
+                        title: "two".to_string(),
+                        width: 8,
+                    },
+                ],
+            },
+        );
+        model.fields[0].list_cells = vec!["only".to_string()];
+
+        let layout = list_layout(&model, 0);
+        assert_eq!(
+            rendered_cells(&row_line_for_layout(&model, UiRowRef::Field(0), layout)),
+            vec!["only", ""]
+        );
+    }
+
+    // Defends: the reserved advanced tab keeps status columns even if a host table profile exists.
+    #[test]
+    fn advanced_tab_ignores_custom_field_table() {
+        let mut model = test_model(ConfigUiValueState::Explicit);
+        model.tabs = vec!["advanced".to_string()];
+        model.tab_list_tables.insert(
+            "advanced".to_string(),
+            ConfigUiListTable {
+                columns: vec![ConfigUiListColumn {
+                    title: "custom".to_string(),
+                    width: 8,
+                }],
+            },
+        );
+
+        assert_eq!(
+            rendered_cells(&list_header_line(list_layout(&model, 0))),
+            vec!["status", "item", "detail"]
         );
     }
 
@@ -1389,7 +1544,7 @@ mod tests {
         {
             assert_eq!(
                 rendered_cells(&row_line_for_model(&model, UiRowRef::FileAction(index))),
-                vec![status, "Native config", "/home/alex/.con..."]
+                vec![status, "Native config", "/home/alex/.config/acme/n..."]
             );
         }
         let error_line = row_line_for_model(&model, UiRowRef::FileAction(3));

@@ -12,6 +12,7 @@ Example host integration in Yazelix: ratconfig owns the reusable tabs, rows, edi
 
 - generic config document and field model
 - tabs, visible rows, search, selection, notices, and edit state
+- optional host-supplied list table profiles for structured field tabs
 - staged bool toggles, scalar editing, single-select, multiselect, and default reset controls
 - host-routed file action rows for native config files
 - generic Ratatui rendering for the model
@@ -55,10 +56,12 @@ fn model() -> ConfigUiModel {
         config_read_only: false,
         sources: Vec::new(),
         tabs: vec!["general".to_string()],
+        tab_list_tables: std::collections::BTreeMap::new(),
         fields: vec![ConfigUiField {
             source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
             path: "core.debug".to_string(),
             display_label: String::new(),
+            list_cells: Vec::new(),
             tab: "general".to_string(),
             kind: "bool".to_string(),
             current_value: "false".to_string(),
@@ -100,6 +103,8 @@ Populate `ConfigUiModel::sources` when tabs represent separate host-owned config
 
 Use `ConfigUiField::display_label` when row and detail text should be friendlier than the stable field path. Ratconfig still uses `path` for edit intents and host write routing
 
+Populate `ConfigUiModel::tab_list_tables` and matching `ConfigUiField::list_cells` when a tab should render a structured display table instead of the default `takes effect | setting | value` field list. This is presentation-only data; Ratconfig does not parse labels, values, paths, or host-specific concepts to build those cells
+
 Fields with defaults expose a reset-to-default action that emits `ConfigUiIntent::UnsetField`. Hosts decide whether that means unsetting text, writing a default, validation, persistence, reloads, and apply behavior. Use `NO_CONFIG_DEFAULT_VALUE_LABEL` for manually constructed fields that have no default; builder helpers set it automatically
 
 ## String-List Choices
@@ -119,6 +124,7 @@ fn sections_field() -> Result<ConfigUiField, String> {
         source_id: "settings".to_string(),
         path: "layout.sections".to_string(),
         display_label: "Layout sections".to_string(),
+        list_cells: Vec::new(),
         tab: "layout".to_string(),
         current: Some(vec!["left".to_string(), "center".to_string()]),
         default: Some(vec!["center".to_string()]),
