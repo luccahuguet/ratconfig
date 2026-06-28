@@ -73,12 +73,8 @@ pub fn join_jsonc_contract_text_from_version(
         return reconcile_joined_jsonc_contract_text(raw, contract, state_path);
     }
     let applied = apply_jsonc_contract_text(raw, contract, from_version)?;
-    write_jsonc_joined_state(
-        &applied.text,
-        contract,
-        state_path,
-        applied.applied_changes.clone(),
-    )
+    let text = applied.text;
+    write_jsonc_joined_state(&text, contract, state_path, applied.applied_changes)
 }
 
 pub fn reconcile_joined_jsonc_contract_text(

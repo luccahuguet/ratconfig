@@ -31,16 +31,16 @@ impl ConfigUiApp {
                 let field = &self.model.fields[index];
                 if let Some(edit) = &self.edit
                     && edit.field_index == index
-                    && edit.mode == ConfigUiEditMode::Choice
-                    && is_scalar_enum_field(field)
                 {
-                    return single_choice_detail_lines(field, edit);
-                }
-                if let Some(edit) = &self.edit
-                    && edit.field_index == index
-                    && edit.mode == ConfigUiEditMode::MultiChoice
-                {
-                    return multi_choice_detail_lines(field, edit);
+                    match edit.mode {
+                        ConfigUiEditMode::Choice if is_scalar_enum_field(field) => {
+                            return single_choice_detail_lines(field, edit);
+                        }
+                        ConfigUiEditMode::MultiChoice => {
+                            return multi_choice_detail_lines(field, edit);
+                        }
+                        _ => {}
+                    }
                 }
                 if is_scalar_enum_field(field) {
                     return single_choice_field_detail_lines(field);
@@ -119,7 +119,7 @@ fn render_header(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect) {
         height: area.height.saturating_sub(1).max(1),
     };
     let title_width = 15_u16.min(content.width);
-    let gap = if content.width > title_width { 1 } else { 0 };
+    let gap = u16::from(content.width > title_width);
     let title_area = Rect {
         x: content.x,
         y: content.y,
@@ -692,20 +692,18 @@ fn render_footer(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect) {
     if let Some(edit) = &app.edit {
         let field = &app.model.fields[edit.field_index];
         let editing = edit_status_line(field, edit);
-        let status = app
-            .notice
-            .as_ref()
-            .map(|notice| notice_line(notice, area.width as usize))
-            .unwrap_or_else(|| edit_control_line(field, edit.mode));
+        let status = app.notice.as_ref().map_or_else(
+            || edit_control_line(field, edit.mode),
+            |notice| notice_line(notice, area.width as usize),
+        );
         frame.render_widget(Paragraph::new(vec![editing, status]), area);
         return;
     }
 
-    let notice = app
-        .notice
-        .as_ref()
-        .map(|notice| notice_line(notice, area.width as usize))
-        .unwrap_or_else(|| normal_control_line(app));
+    let notice = app.notice.as_ref().map_or_else(
+        || normal_control_line(app),
+        |notice| notice_line(notice, area.width as usize),
+    );
     let search = if app.search_active {
         format!("search: {}_", app.search)
     } else if app.search.is_empty() {
@@ -792,7 +790,7 @@ fn edit_control_line(field: &ConfigUiField, mode: ConfigUiEditMode) -> Line<'sta
 }
 
 fn raw_line<const N: usize>(parts: [&'static str; N]) -> Line<'static> {
-    Line::from(parts.into_iter().map(Span::raw).collect::<Vec<_>>())
+    parts.into_iter().map(Span::raw).collect()
 }
 
 pub fn state_label(state: ConfigUiValueState) -> &'static str {

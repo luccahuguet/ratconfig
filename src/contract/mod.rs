@@ -467,17 +467,14 @@ fn optional_string_array(
             format!("{key} must be an array of strings"),
         ));
     };
-    let mut strings = Vec::new();
-    for item in items {
-        let Some(value) = item.as_str() else {
-            return Err(invalid_state(
-                state_path,
-                format!("{key} must be an array of strings"),
-            ));
-        };
-        strings.push(value.to_string());
-    }
-    Ok(strings)
+    items
+        .iter()
+        .map(|item| {
+            item.as_str().map(str::to_string).ok_or_else(|| {
+                invalid_state(state_path, format!("{key} must be an array of strings"))
+            })
+        })
+        .collect()
 }
 
 fn contract_state_to_json(state: &ContractState) -> JsonValue {

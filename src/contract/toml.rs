@@ -77,12 +77,8 @@ pub fn join_toml_contract_text_from_version(
         return reconcile_joined_toml_contract_text(raw, contract, state_path);
     }
     let applied = apply_toml_contract_text(raw, contract, from_version)?;
-    write_toml_joined_state(
-        &applied.text,
-        contract,
-        state_path,
-        applied.applied_changes.clone(),
-    )
+    let text = applied.text;
+    write_toml_joined_state(&text, contract, state_path, applied.applied_changes)
 }
 
 pub fn reconcile_joined_toml_contract_text(
