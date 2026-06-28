@@ -4,6 +4,7 @@ use super::{
     ConfigUiEditBehavior, ConfigUiField, ConfigUiFileAction, ConfigUiModel, UiRowRef,
     visible_rows_for_tab_search,
 };
+use crate::model::{string_list_values_from_json, validate_string_choice_value};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -658,18 +659,7 @@ fn parse_friendly_string_list_input(
 
 pub fn parse_string_list_values(field: &ConfigUiField, input: &str) -> Result<Vec<String>, String> {
     let value = parse_json_input(field, input, "JSON string array")?;
-    let array = value
-        .as_array()
-        .ok_or_else(|| format!("{} must be a JSON string array.", field.path))?;
-    let mut strings = Vec::with_capacity(array.len());
-    for value in array {
-        let Some(value) = value.as_str() else {
-            return Err(format!("{} must contain only strings.", field.path));
-        };
-        ensure_allowed_value(field, value)?;
-        strings.push(value.to_string());
-    }
-    Ok(strings)
+    string_list_values_from_json(&field.path, &value, &field.allowed_values)
 }
 
 fn parse_json_input(
@@ -695,16 +685,7 @@ pub fn parse_rendered_json_string(value: &str) -> Option<String> {
 }
 
 fn ensure_allowed_value(field: &ConfigUiField, value: &str) -> Result<(), String> {
-    if field.allowed_values.is_empty()
-        || field.allowed_values.iter().any(|allowed| allowed == value)
-    {
-        return Ok(());
-    }
-    Err(format!(
-        "{} must be one of: {}.",
-        field.path,
-        field.allowed_values.join(", ")
-    ))
+    validate_string_choice_value(&field.path, value, &field.allowed_values)
 }
 
 pub fn single_choice_status_value(field: &ConfigUiField, edit: &ConfigUiEditState) -> String {
@@ -1086,6 +1067,10 @@ mod tests {
         assert_eq!(
             parse_edit_input(&list_field, r#"["git","search"]"#).expect("list"),
             json!(["git", "search"])
+        );
+        assert_eq!(
+            parse_edit_input(&list_field, r#"["search","git"]"#).expect("ordered list"),
+            json!(["search", "git"])
         );
         assert!(parse_edit_input(&list_field, r#"["unknown"]"#).is_err());
     }

@@ -24,14 +24,15 @@ pub use model::{
     ConfigUiApplyStatus, ConfigUiContractField, ConfigUiDiagnostic, ConfigUiEditBehavior,
     ConfigUiField, ConfigUiFieldMetadata, ConfigUiFieldRowSpec, ConfigUiFileAction,
     ConfigUiMetadata, ConfigUiModel, ConfigUiNativeStatus, ConfigUiPathOwner, ConfigUiSchemaField,
-    ConfigUiSidecar, ConfigUiSource, ConfigUiValueState, DEFAULT_CONFIG_SOURCE_ID,
-    NO_CONFIG_DEFAULT_VALUE_LABEL,
+    ConfigUiSidecar, ConfigUiSource, ConfigUiStringListChoiceSpec, ConfigUiValueState,
+    DEFAULT_CONFIG_SOURCE_ID, NO_CONFIG_DEFAULT_VALUE_LABEL,
 };
 pub use model::{
-    UiRowRef, build_config_ui_field, collect_config_ui_schema_fields,
-    config_contract_fields_from_toml, config_ui_metadata_from_toml, effective_string_config,
-    effective_string_list_config, get_json_path, owner_label, render_json_edit_value,
-    render_json_value, schema_tabs, selected_config_source, tab_index, toml_value_to_json,
+    UiRowRef, build_config_ui_field, build_string_list_choice_field,
+    collect_config_ui_schema_fields, config_contract_fields_from_toml,
+    config_ui_metadata_from_toml, effective_string_config, effective_string_list_config,
+    get_json_path, owner_label, render_json_edit_value, render_json_value, schema_tabs,
+    selected_config_source, string_list_values_from_json, tab_index, toml_value_to_json,
     visible_rows_for_tab_search,
 };
 #[cfg(feature = "ui")]

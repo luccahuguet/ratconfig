@@ -183,6 +183,23 @@ pub struct ConfigUiFieldRowSpec<'a> {
     pub edit_behavior: ConfigUiEditBehavior,
 }
 
+#[derive(Debug, Clone)]
+pub struct ConfigUiStringListChoiceSpec {
+    pub source_id: String,
+    pub path: String,
+    pub display_label: String,
+    pub tab: String,
+    pub current: Option<Vec<String>>,
+    pub default: Option<Vec<String>>,
+    pub description: String,
+    pub allowed_values: Vec<String>,
+    pub validation: String,
+    pub rebuild_required: bool,
+    pub apply_status: ConfigUiApplyStatus,
+    pub has_blocking_diagnostic: bool,
+    pub edit_behavior: ConfigUiEditBehavior,
+}
+
 pub fn build_config_ui_field(spec: ConfigUiFieldRowSpec<'_>) -> ConfigUiField {
     let state = if spec.has_blocking_diagnostic {
         ConfigUiValueState::Invalid
@@ -221,6 +238,42 @@ pub fn build_config_ui_field(spec: ConfigUiFieldRowSpec<'_>) -> ConfigUiField {
         apply_status: spec.apply_status,
         edit_behavior: spec.edit_behavior,
     }
+}
+
+pub fn build_string_list_choice_field(
+    spec: ConfigUiStringListChoiceSpec,
+) -> Result<ConfigUiField, String> {
+    if spec.allowed_values.is_empty() {
+        return Err(format!(
+            "{} must define at least one allowed string-list value.",
+            spec.path
+        ));
+    }
+    if let Some(values) = spec.current.as_deref() {
+        validate_string_list_choice_values(&spec.path, values, &spec.allowed_values)?;
+    }
+    if let Some(values) = spec.default.as_deref() {
+        validate_string_list_choice_values(&spec.path, values, &spec.allowed_values)?;
+    }
+
+    let current = spec.current.as_deref().map(string_list_values_json);
+    let default = spec.default.as_deref().map(string_list_values_json);
+    Ok(build_config_ui_field(ConfigUiFieldRowSpec {
+        source_id: &spec.source_id,
+        path: &spec.path,
+        display_label: spec.display_label,
+        tab: &spec.tab,
+        kind: "string_list",
+        current: current.as_ref(),
+        default: default.as_ref(),
+        description: spec.description,
+        allowed_values: spec.allowed_values,
+        validation: spec.validation,
+        rebuild_required: spec.rebuild_required,
+        apply_status: spec.apply_status,
+        has_blocking_diagnostic: spec.has_blocking_diagnostic,
+        edit_behavior: spec.edit_behavior,
+    }))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -673,6 +726,54 @@ pub fn effective_string_list_config(
     }
 }
 
+pub fn string_list_values_from_json(
+    path: &str,
+    value: &JsonValue,
+    allowed_values: &[String],
+) -> Result<Vec<String>, String> {
+    let array = value
+        .as_array()
+        .ok_or_else(|| format!("{path} must be a JSON string array."))?;
+    let mut strings = Vec::with_capacity(array.len());
+    for value in array {
+        let Some(value) = value.as_str() else {
+            return Err(format!("{path} must contain only strings."));
+        };
+        validate_string_choice_value(path, value, allowed_values)?;
+        strings.push(value.to_string());
+    }
+    Ok(strings)
+}
+
+pub(crate) fn validate_string_choice_value(
+    path: &str,
+    value: &str,
+    allowed_values: &[String],
+) -> Result<(), String> {
+    if allowed_values.is_empty() || allowed_values.iter().any(|allowed| allowed == value) {
+        return Ok(());
+    }
+    Err(format!(
+        "{path} must be one of: {}.",
+        allowed_values.join(", ")
+    ))
+}
+
+fn validate_string_list_choice_values(
+    path: &str,
+    values: &[String],
+    allowed_values: &[String],
+) -> Result<(), String> {
+    for value in values {
+        validate_string_choice_value(path, value, allowed_values)?;
+    }
+    Ok(())
+}
+
+fn string_list_values_json(values: &[String]) -> JsonValue {
+    JsonValue::Array(values.iter().cloned().map(JsonValue::String).collect())
+}
+
 pub fn render_json_value(value: &JsonValue) -> String {
     match value {
         JsonValue::Null => "null".to_string(),
@@ -948,6 +1049,93 @@ help = "Theme name"
             ConfigUiEditBehavior::FriendlyStringList
         );
         assert_eq!(field.apply_status.summary, "after save");
+    }
+
+    // Defends: hosts can build allowed string-list choice fields without hand-assembling JSON row specs.
+    #[test]
+    fn string_list_choice_helper_builds_ordered_field() {
+        let field = build_string_list_choice_field(ConfigUiStringListChoiceSpec {
+            source_id: "settings".to_string(),
+            path: "widgets.enabled".to_string(),
+            display_label: "Enabled widgets".to_string(),
+            tab: "widgets".to_string(),
+            current: Some(vec!["status".to_string(), "clock".to_string()]),
+            default: Some(vec!["clock".to_string()]),
+            description: "Enabled widget ids".to_string(),
+            allowed_values: vec![
+                "clock".to_string(),
+                "status".to_string(),
+                "mode".to_string(),
+            ],
+            validation: "known widget ids only".to_string(),
+            rebuild_required: true,
+            apply_status: status(),
+            has_blocking_diagnostic: false,
+            edit_behavior: ConfigUiEditBehavior::Default,
+        })
+        .expect("valid string-list field");
+
+        assert_eq!(field.source_id, "settings");
+        assert_eq!(field.path, "widgets.enabled");
+        assert_eq!(field.display_label, "Enabled widgets");
+        assert_eq!(field.tab, "widgets");
+        assert_eq!(field.kind, "string_list");
+        assert_eq!(field.current_value, r#"["status","clock"]"#);
+        assert_eq!(field.edit_value, r#"["status","clock"]"#);
+        assert_eq!(field.default_value, r#"["clock"]"#);
+        assert_eq!(field.state, ConfigUiValueState::Explicit);
+        assert_eq!(field.allowed_values, vec!["clock", "status", "mode"]);
+        assert!(field.rebuild_required);
+    }
+
+    // Defends: string-list extraction keeps host order and reports generic validation errors.
+    #[test]
+    fn string_list_values_from_json_preserves_order_and_rejects_invalid_values() {
+        let allowed = vec!["clock".to_string(), "status".to_string()];
+
+        assert_eq!(
+            string_list_values_from_json("widgets.enabled", &json!(["status", "clock"]), &allowed)
+                .expect("valid list"),
+            vec!["status", "clock"]
+        );
+        assert!(
+            string_list_values_from_json("widgets.enabled", &json!("status"), &allowed)
+                .expect_err("not an array")
+                .contains("must be a JSON string array")
+        );
+        assert!(
+            string_list_values_from_json("widgets.enabled", &json!(["status", 1]), &allowed)
+                .expect_err("non-string")
+                .contains("must contain only strings")
+        );
+        assert!(
+            string_list_values_from_json("widgets.enabled", &json!(["unknown"]), &allowed)
+                .expect_err("unknown value")
+                .contains("must be one of: clock, status")
+        );
+    }
+
+    // Defends: the choice helper fails fast when no choice ids are available.
+    #[test]
+    fn string_list_choice_helper_requires_allowed_values() {
+        let error = build_string_list_choice_field(ConfigUiStringListChoiceSpec {
+            source_id: "settings".to_string(),
+            path: "widgets.enabled".to_string(),
+            display_label: String::new(),
+            tab: "widgets".to_string(),
+            current: None,
+            default: None,
+            description: String::new(),
+            allowed_values: Vec::new(),
+            validation: String::new(),
+            rebuild_required: false,
+            apply_status: status(),
+            has_blocking_diagnostic: false,
+            edit_behavior: ConfigUiEditBehavior::Default,
+        })
+        .expect_err("missing choices");
+
+        assert!(error.contains("must define at least one allowed string-list value"));
     }
 
     // Defends: host-owned file action rows join tab/search rows without becoming scalar settings.
