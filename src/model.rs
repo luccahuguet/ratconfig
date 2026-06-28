@@ -282,6 +282,7 @@ pub fn build_string_list_choice_field(
 pub enum ConfigUiEditBehavior {
     Default,
     FriendlyStringList,
+    OrderedStringList,
     StructuredOnly { notice: String },
 }
 

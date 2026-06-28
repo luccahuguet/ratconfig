@@ -310,6 +310,11 @@ impl ConfigUiApp {
             .as_ref()
             .and_then(|edit| self.model.fields.get(edit.field_index))
             .is_some_and(is_scalar_enum_field);
+        let ordered_string_list = self
+            .edit
+            .as_ref()
+            .and_then(|edit| self.model.fields.get(edit.field_index))
+            .is_some_and(is_ordered_string_list_field);
         let multi_choice = mode == ConfigUiEditMode::MultiChoice;
         match key {
             ConfigUiKey::Esc => self.cancel_edit(),
@@ -318,6 +323,16 @@ impl ConfigUiApp {
                 self.save_edit()
             }
             ConfigUiKey::Enter => self.save_edit(),
+            ConfigUiKey::Ctrl('k' | 'K') if ordered_string_list => {
+                self.notice = None;
+                self.move_ordered_string_list_edit(-1);
+                ConfigUiIntent::None
+            }
+            ConfigUiKey::Ctrl('j' | 'J') if ordered_string_list => {
+                self.notice = None;
+                self.move_ordered_string_list_edit(1);
+                ConfigUiIntent::None
+            }
             ConfigUiKey::Up | ConfigUiKey::Left | ConfigUiKey::Char('k' | 'h')
                 if scalar_enum || multi_choice =>
             {
@@ -401,6 +416,23 @@ impl ConfigUiApp {
         let next = match self.edit.as_ref().map(|edit| {
             let field = &self.model.fields[edit.field_index];
             toggled_string_list_input(field, &edit.input, edit.choice_index)
+        }) {
+            None => return,
+            Some(Ok(next)) => next,
+            Some(Err(message)) => {
+                self.notice_error(message);
+                return;
+            }
+        };
+        if let Some(edit) = &mut self.edit {
+            edit.input = next;
+        }
+    }
+
+    fn move_ordered_string_list_edit(&mut self, delta: isize) {
+        let next = match self.edit.as_ref().map(|edit| {
+            let field = &self.model.fields[edit.field_index];
+            moved_ordered_string_list_input(field, &edit.input, edit.choice_index, delta)
         }) {
             None => return,
             Some(Ok(next)) => next,
@@ -706,14 +738,24 @@ pub fn single_choice_status_value(field: &ConfigUiField, edit: &ConfigUiEditStat
 }
 
 pub fn multi_choice_status_value(field: &ConfigUiField, edit: &ConfigUiEditState) -> String {
-    let enabled = parse_string_list_values(field, &edit.input)
-        .map(|values| values.len())
-        .unwrap_or(0);
+    let values = parse_string_list_values(field, &edit.input).unwrap_or_default();
+    let enabled = values.len();
     let selected = field
         .allowed_values
         .get(edit.choice_index)
         .map(String::as_str)
         .unwrap_or("none");
+    if is_ordered_string_list_field(field) {
+        let order = if values.is_empty() {
+            "none".to_string()
+        } else {
+            values.join(", ")
+        };
+        return format!(
+            "{enabled}/{} enabled, selected {selected}, order {order}",
+            field.allowed_values.len()
+        );
+    }
     format!(
         "{enabled}/{} enabled, selected {selected}",
         field.allowed_values.len()
@@ -735,8 +777,42 @@ pub fn toggled_string_list_input(
     } else {
         values.push(target.clone());
     }
-    values = ordered_string_list_values(field, &values);
-    serde_json::to_string(&values)
+    if !is_ordered_string_list_field(field) {
+        values = ordered_string_list_values(field, &values);
+    }
+    render_string_list_input(field, &values)
+}
+
+fn moved_ordered_string_list_input(
+    field: &ConfigUiField,
+    input: &str,
+    choice_index: usize,
+    delta: isize,
+) -> Result<String, String> {
+    let target = field
+        .allowed_values
+        .get(choice_index)
+        .ok_or_else(|| format!("{} has no value selected.", field.path))?;
+    let mut values = parse_string_list_values(field, input)?;
+    let Some(index) = values.iter().position(|value| value == target) else {
+        return render_string_list_input(field, &values);
+    };
+    let next = if delta < 0 {
+        let Some(next) = index.checked_sub(1) else {
+            return render_string_list_input(field, &values);
+        };
+        next
+    } else if index + 1 < values.len() {
+        index + 1
+    } else {
+        return render_string_list_input(field, &values);
+    };
+    values.swap(index, next);
+    render_string_list_input(field, &values)
+}
+
+fn render_string_list_input(field: &ConfigUiField, values: &[String]) -> Result<String, String> {
+    serde_json::to_string(values)
         .map_err(|source| format!("Could not render {} string list: {source}.", field.path))
 }
 
@@ -767,6 +843,11 @@ pub fn is_scalar_enum_field(field: &ConfigUiField) -> bool {
 
 pub fn is_enum_string_list_field(field: &ConfigUiField) -> bool {
     field.kind == "string_list" && !field.allowed_values.is_empty()
+}
+
+pub(crate) fn is_ordered_string_list_field(field: &ConfigUiField) -> bool {
+    is_enum_string_list_field(field)
+        && field.edit_behavior == ConfigUiEditBehavior::OrderedStringList
 }
 
 pub fn structured_only_edit_notice(field: &ConfigUiField) -> Option<&str> {
@@ -1089,6 +1170,78 @@ mod tests {
         let enum_field = field("ui.theme", "string", "\"light\"", &["light", "dark"]);
         assert_eq!(edit_input_for_field(&enum_field), "light");
         assert_eq!(edit_mode_for_field(&enum_field), ConfigUiEditMode::Choice);
+    }
+
+    // Defends: default string-list multiselect remains set-like and canonicalizes selected values to allowed-value order.
+    #[test]
+    fn default_string_list_multiselect_keeps_allowed_value_order() {
+        let field = field(
+            "widgets.enabled",
+            "string_list",
+            r#"["status"]"#,
+            &["clock", "status", "mode"],
+        );
+
+        assert_eq!(
+            toggled_string_list_input(&field, r#"["status"]"#, 0).expect("toggle clock"),
+            r#"["clock","status"]"#
+        );
+    }
+
+    // Defends: ordered string-list editing is opt-in and preserves config order when toggling selected ids.
+    #[test]
+    fn ordered_string_list_multiselect_preserves_order_when_toggling() {
+        let mut field = field(
+            "widgets.enabled",
+            "string_list",
+            r#"["status","clock"]"#,
+            &["clock", "status", "mode"],
+        );
+        field.edit_behavior = ConfigUiEditBehavior::OrderedStringList;
+
+        assert!(is_ordered_string_list_field(&field));
+        assert_eq!(edit_mode_for_field(&field), ConfigUiEditMode::MultiChoice);
+        assert_eq!(
+            toggled_string_list_input(&field, r#"["status","clock"]"#, 2).expect("toggle mode"),
+            r#"["status","clock","mode"]"#
+        );
+        assert_eq!(
+            toggled_string_list_input(&field, r#"["status","clock","mode"]"#, 0)
+                .expect("remove clock"),
+            r#"["status","mode"]"#
+        );
+    }
+
+    // Defends: ordered string-list fields can move enabled ids without changing default multiselect semantics.
+    #[test]
+    fn ordered_string_list_reducer_reorders_enabled_values() {
+        let mut model = test_model();
+        model.fields = vec![field(
+            "widgets.enabled",
+            "string_list",
+            r#"["status","clock"]"#,
+            &["clock", "status", "mode"],
+        )];
+        model.fields[0].edit_behavior = ConfigUiEditBehavior::OrderedStringList;
+        let mut app = ConfigUiApp::new(model);
+
+        app.begin_edit_field(0);
+        assert_eq!(app.edit.as_ref().expect("ordered edit").choice_index, 1);
+        assert_eq!(app.handle_key(ConfigUiKey::Ctrl('j')), ConfigUiIntent::None);
+        assert_eq!(
+            app.edit.as_ref().expect("ordered edit").input,
+            r#"["clock","status"]"#
+        );
+        assert_eq!(app.handle_key(ConfigUiKey::Ctrl('k')), ConfigUiIntent::None);
+        assert_eq!(
+            app.handle_key(ConfigUiKey::Enter),
+            ConfigUiIntent::SetField {
+                field_index: 0,
+                source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
+                path: "widgets.enabled".to_string(),
+                value: json!(["status", "clock"]),
+            }
+        );
     }
 
     // Defends: search input, cancellation, and row clamping live in the reusable reducer.

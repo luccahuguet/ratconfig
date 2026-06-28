@@ -606,6 +606,14 @@ pub fn multi_choice_detail_lines(
         "enabled",
         &format!("{}/{}", enabled_set.len(), field.allowed_values.len()),
     ));
+    if is_ordered_string_list_field(field) {
+        let order = if enabled_values.is_empty() {
+            "none".to_string()
+        } else {
+            enabled_values.join(", ")
+        };
+        lines.push(detail_line("order", &order));
+    }
     lines.push(Line::from(""));
 
     for (index, value) in field.allowed_values.iter().enumerate() {
@@ -860,6 +868,13 @@ fn edit_control_line(field: &ConfigUiField, mode: ConfigUiEditMode) -> Line<'sta
             "Esc cancel",
         ]),
         ConfigUiEditMode::Choice => raw_line(["Space toggle  ", "Enter save  ", "Esc cancel"]),
+        ConfigUiEditMode::MultiChoice if is_ordered_string_list_field(field) => raw_line([
+            "hjkl/Arrows move  ",
+            "Space toggle  ",
+            "Ctrl+j/k reorder  ",
+            "Enter save  ",
+            "Esc cancel",
+        ]),
         ConfigUiEditMode::MultiChoice => raw_line([
             "hjkl/Arrows move  ",
             "Space enable/disable  ",
@@ -1307,6 +1322,40 @@ mod tests {
 
         app.model.fields[0].default_value = NO_CONFIG_DEFAULT_VALUE_LABEL.to_string();
         assert!(!rendered_text(&normal_control_line(&app)).contains("reset default"));
+    }
+
+    // Defends: ordered string-list editing exposes selected order and the generic reorder command.
+    #[test]
+    fn ordered_multichoice_rendering_shows_order_controls() {
+        let mut model = test_model(ConfigUiValueState::Explicit);
+        let field = &mut model.fields[0];
+        field.kind = "string_list".to_string();
+        field.current_value = r#"["status","clock"]"#.to_string();
+        field.edit_value = field.current_value.clone();
+        field.allowed_values = vec![
+            "clock".to_string(),
+            "status".to_string(),
+            "mode".to_string(),
+        ];
+        field.edit_behavior = ConfigUiEditBehavior::OrderedStringList;
+        let edit = ConfigUiEditState {
+            field_index: 0,
+            input: field.edit_value.clone(),
+            mode: ConfigUiEditMode::MultiChoice,
+            choice_index: 1,
+        };
+
+        assert!(multi_choice_status_value(field, &edit).contains("order status, clock"));
+        assert!(
+            multi_choice_detail_lines(field, &edit)
+                .iter()
+                .map(rendered_text)
+                .any(|line| line.contains("order") && line.contains("status, clock"))
+        );
+        assert!(
+            rendered_text(&edit_control_line(field, ConfigUiEditMode::MultiChoice))
+                .contains("Ctrl+j/k reorder")
+        );
     }
 
     fn file_action(
