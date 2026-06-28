@@ -1023,7 +1023,7 @@ help = "Theme name"
             source_id: "settings",
             path: "plugins.enabled",
             display_label: "Enabled plugins".to_string(),
-            list_cells: Vec::new(),
+            list_cells: vec!["plugins".to_string(), "5 enabled".to_string()],
             tab: "advanced",
             kind: "string_list",
             current: Some(&current),
@@ -1040,6 +1040,7 @@ help = "Theme name"
         assert_eq!(field.source_id, "settings");
         assert_eq!(field.path, "plugins.enabled");
         assert_eq!(field.display_label, "Enabled plugins");
+        assert_eq!(field.list_cells, vec!["plugins", "5 enabled"]);
         assert_eq!(field.tab, "advanced");
         assert_eq!(field.current_value, "[5 items]");
         assert_eq!(
@@ -1061,7 +1062,7 @@ help = "Theme name"
             source_id: "settings".to_string(),
             path: "widgets.enabled".to_string(),
             display_label: "Enabled widgets".to_string(),
-            list_cells: Vec::new(),
+            list_cells: vec!["widgets".to_string(), "2 selected".to_string()],
             tab: "widgets".to_string(),
             current: Some(vec!["status".to_string(), "clock".to_string()]),
             default: Some(vec!["clock".to_string()]),
@@ -1082,6 +1083,7 @@ help = "Theme name"
         assert_eq!(field.source_id, "settings");
         assert_eq!(field.path, "widgets.enabled");
         assert_eq!(field.display_label, "Enabled widgets");
+        assert_eq!(field.list_cells, vec!["widgets", "2 selected"]);
         assert_eq!(field.tab, "widgets");
         assert_eq!(field.kind, "string_list");
         assert_eq!(field.current_value, r#"["status","clock"]"#);

@@ -1043,11 +1043,10 @@ pub fn truncate(value: &str, limit: usize) -> String {
     if value.chars().count() <= limit {
         return value.to_string();
     }
-    value
-        .chars()
-        .take(limit.saturating_sub(3))
-        .collect::<String>()
-        + "..."
+    if limit <= 3 {
+        return ".".repeat(limit);
+    }
+    value.chars().take(limit - 3).collect::<String>() + "..."
 }
 
 pub fn truncate_start(value: &str, limit: usize) -> String {
@@ -1324,6 +1323,35 @@ mod tests {
             rendered_cells(&row_line_for_layout(&model, UiRowRef::Field(0), layout)),
             vec!["only", ""]
         );
+    }
+
+    // Defends: narrow host table widths bound rendered cells instead of leaking a full ellipsis.
+    #[test]
+    fn custom_field_table_honors_narrow_column_widths() {
+        let mut model = test_model(ConfigUiValueState::Explicit);
+        model.tab_list_tables.insert(
+            "general".to_string(),
+            ConfigUiListTable {
+                columns: vec![
+                    ConfigUiListColumn {
+                        title: "abcd".to_string(),
+                        width: 2,
+                    },
+                    ConfigUiListColumn {
+                        title: "empty".to_string(),
+                        width: 0,
+                    },
+                ],
+            },
+        );
+        model.fields[0].list_cells = vec!["wxyz".to_string(), "hidden".to_string()];
+
+        let layout = list_layout(&model, 0);
+        let header = list_header_line(layout);
+        let row = row_line_for_layout(&model, UiRowRef::Field(0), layout);
+
+        assert_eq!(rendered_cells(&header), vec!["..", ""]);
+        assert_eq!(rendered_cells(&row), vec!["..", ""]);
     }
 
     // Defends: the reserved advanced tab keeps status columns even if a host table profile exists.
