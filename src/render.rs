@@ -323,15 +323,13 @@ fn list_header_line(layout: ListLayout<'_>) -> Line<'static> {
 }
 
 fn list_layout(model: &ConfigUiModel, selected_tab: usize) -> ListLayout<'_> {
-    let Some(tab) = model.tabs.get(selected_tab).map(String::as_str) else {
-        return ListLayout::Field;
-    };
-    if tab == "advanced" {
-        ListLayout::Status
-    } else if let Some(table) = model.tab_list_tables.get(tab) {
-        ListLayout::Table(table)
-    } else {
-        ListLayout::Field
+    match model.tabs.get(selected_tab).map(String::as_str) {
+        Some("advanced") => ListLayout::Status,
+        Some(tab) => model
+            .tab_list_tables
+            .get(tab)
+            .map_or(ListLayout::Field, ListLayout::Table),
+        None => ListLayout::Field,
     }
 }
 
@@ -382,22 +380,22 @@ fn row_line_for_layout(
     row: UiRowRef,
     layout: ListLayout<'_>,
 ) -> Line<'static> {
-    match row {
-        UiRowRef::Field(index) => {
-            let field = &model.fields[index];
-            match layout {
-                ListLayout::Table(table) => list_table_row_line(table, field),
-                _ => field_row_line(
-                    &field.apply_status.summary,
-                    apply_status_style(&field.apply_status),
-                    field_display_label(field),
-                    field_style(field, config_key_style()),
-                    &field.current_value,
-                    field_style(field, fg_style(Color::Gray)),
-                ),
-            }
+    match (row, layout) {
+        (UiRowRef::Field(index), ListLayout::Table(table)) => {
+            list_table_row_line(table, &model.fields[index])
         }
-        UiRowRef::Sidecar(index) => {
+        (UiRowRef::Field(index), _) => {
+            let field = &model.fields[index];
+            field_row_line(
+                &field.apply_status.summary,
+                apply_status_style(&field.apply_status),
+                field_display_label(field),
+                field_style(field, config_key_style()),
+                &field.current_value,
+                field_style(field, fg_style(Color::Gray)),
+            )
+        }
+        (UiRowRef::Sidecar(index), _) => {
             let sidecar = &model.sidecars[index];
             status_row_line(
                 sidecar_status_label(sidecar.present),
@@ -406,26 +404,27 @@ fn row_line_for_layout(
                 sidecar.path.display().to_string(),
             )
         }
-        UiRowRef::FileAction(index) => {
+        (UiRowRef::FileAction(index), ListLayout::Status) => {
             let action = &model.file_actions[index];
-            match layout {
-                ListLayout::Field | ListLayout::Table(_) => field_row_line(
-                    file_action_status_label(action),
-                    file_action_status_style(action),
-                    &action.label,
-                    config_key_style(),
-                    &action.path.display().to_string(),
-                    fg_style(Color::Gray),
-                ),
-                ListLayout::Status => status_row_line(
-                    file_action_status_label(action),
-                    file_action_status_style(action),
-                    &action.label,
-                    action.path.display().to_string(),
-                ),
-            }
+            status_row_line(
+                file_action_status_label(action),
+                file_action_status_style(action),
+                &action.label,
+                action.path.display().to_string(),
+            )
         }
-        UiRowRef::Diagnostic(index) => {
+        (UiRowRef::FileAction(index), _) => {
+            let action = &model.file_actions[index];
+            field_row_line(
+                file_action_status_label(action),
+                file_action_status_style(action),
+                &action.label,
+                config_key_style(),
+                &action.path.display().to_string(),
+                fg_style(Color::Gray),
+            )
+        }
+        (UiRowRef::Diagnostic(index), _) => {
             let diagnostic = &model.diagnostics[index];
             let style = if diagnostic.blocking {
                 fg_style(Color::Red)
@@ -439,7 +438,7 @@ fn row_line_for_layout(
                 diagnostic.headline.as_str(),
             )
         }
-        UiRowRef::NativeStatus(index) => {
+        (UiRowRef::NativeStatus(index), _) => {
             let status = &model.native_config_statuses[index];
             status_row_line(
                 &status.status,
@@ -466,17 +465,8 @@ fn list_table_row_line(table: &ConfigUiListTable, field: &ConfigUiField) -> Line
         .iter()
         .enumerate()
         .map(|(index, column)| {
-            Span::styled(
-                list_table_cell(
-                    field
-                        .list_cells
-                        .get(index)
-                        .map(String::as_str)
-                        .unwrap_or_default(),
-                    column.width,
-                ),
-                style,
-            )
+            let cell = field.list_cells.get(index).map_or("", String::as_str);
+            Span::styled(list_table_cell(cell, column.width), style)
         })
         .collect()
 }
@@ -1087,6 +1077,25 @@ mod tests {
         line.spans[index].content.chars().count()
     }
 
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    fn set_list_table(model: &mut ConfigUiModel, tab: &str, columns: &[(&str, usize)]) {
+        model.tab_list_tables.insert(
+            tab.to_string(),
+            ConfigUiListTable {
+                columns: columns
+                    .iter()
+                    .map(|(title, width)| ConfigUiListColumn {
+                        title: title.to_string(),
+                        width: *width,
+                    })
+                    .collect(),
+            },
+        );
+    }
+
     fn test_model(state: ConfigUiValueState) -> ConfigUiModel {
         ConfigUiModel {
             active_config_path: PathBuf::from("/home/alex/.config/acme/settings.jsonc"),
@@ -1250,40 +1259,24 @@ mod tests {
         model.fields[0].tab = "keys".to_string();
         model.fields[0].display_label = "ignored label".to_string();
         model.fields[0].current_value = "ignored value".to_string();
-        model.fields[0].list_cells = vec![
-            "editor".to_string(),
-            "Ctrl+x".to_string(),
-            "cut selection".to_string(),
-            "user".to_string(),
-            "settings.toml".to_string(),
-            "ignored extra".to_string(),
-        ];
-        model.tab_list_tables.insert(
-            "keys".to_string(),
-            ConfigUiListTable {
-                columns: vec![
-                    ConfigUiListColumn {
-                        title: "group".to_string(),
-                        width: 10,
-                    },
-                    ConfigUiListColumn {
-                        title: "keys".to_string(),
-                        width: 10,
-                    },
-                    ConfigUiListColumn {
-                        title: "action".to_string(),
-                        width: 18,
-                    },
-                    ConfigUiListColumn {
-                        title: "owner".to_string(),
-                        width: 8,
-                    },
-                    ConfigUiListColumn {
-                        title: "source".to_string(),
-                        width: 14,
-                    },
-                ],
-            },
+        model.fields[0].list_cells = strings(&[
+            "editor",
+            "Ctrl+x",
+            "cut selection",
+            "user",
+            "settings.toml",
+            "ignored extra",
+        ]);
+        set_list_table(
+            &mut model,
+            "keys",
+            &[
+                ("group", 10),
+                ("keys", 10),
+                ("action", 18),
+                ("owner", 8),
+                ("source", 14),
+            ],
         );
 
         let layout = list_layout(&model, 0);
@@ -1301,22 +1294,8 @@ mod tests {
     #[test]
     fn custom_field_table_allows_missing_cells() {
         let mut model = test_model(ConfigUiValueState::Explicit);
-        model.tab_list_tables.insert(
-            "general".to_string(),
-            ConfigUiListTable {
-                columns: vec![
-                    ConfigUiListColumn {
-                        title: "one".to_string(),
-                        width: 8,
-                    },
-                    ConfigUiListColumn {
-                        title: "two".to_string(),
-                        width: 8,
-                    },
-                ],
-            },
-        );
-        model.fields[0].list_cells = vec!["only".to_string()];
+        set_list_table(&mut model, "general", &[("one", 8), ("two", 8)]);
+        model.fields[0].list_cells = strings(&["only"]);
 
         let layout = list_layout(&model, 0);
         assert_eq!(
@@ -1329,22 +1308,8 @@ mod tests {
     #[test]
     fn custom_field_table_honors_narrow_column_widths() {
         let mut model = test_model(ConfigUiValueState::Explicit);
-        model.tab_list_tables.insert(
-            "general".to_string(),
-            ConfigUiListTable {
-                columns: vec![
-                    ConfigUiListColumn {
-                        title: "abcd".to_string(),
-                        width: 2,
-                    },
-                    ConfigUiListColumn {
-                        title: "empty".to_string(),
-                        width: 0,
-                    },
-                ],
-            },
-        );
-        model.fields[0].list_cells = vec!["wxyz".to_string(), "hidden".to_string()];
+        set_list_table(&mut model, "general", &[("abcd", 2), ("empty", 0)]);
+        model.fields[0].list_cells = strings(&["wxyz", "hidden"]);
 
         let layout = list_layout(&model, 0);
         let header = list_header_line(layout);
@@ -1359,15 +1324,7 @@ mod tests {
     fn advanced_tab_ignores_custom_field_table() {
         let mut model = test_model(ConfigUiValueState::Explicit);
         model.tabs = vec!["advanced".to_string()];
-        model.tab_list_tables.insert(
-            "advanced".to_string(),
-            ConfigUiListTable {
-                columns: vec![ConfigUiListColumn {
-                    title: "custom".to_string(),
-                    width: 8,
-                }],
-            },
-        );
+        set_list_table(&mut model, "advanced", &[("custom", 8)]);
 
         assert_eq!(
             rendered_cells(&list_header_line(list_layout(&model, 0))),
