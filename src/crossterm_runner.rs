@@ -42,7 +42,7 @@ impl<HostError: Error + 'static> Error for CrosstermRunnerError<HostError> {
     }
 }
 
-pub fn crossterm_key_to_config_ui_key(key: KeyEvent) -> Option<ConfigUiKey> {
+fn crossterm_key_to_config_ui_key(key: KeyEvent) -> Option<ConfigUiKey> {
     if key.kind == KeyEventKind::Release {
         return None;
     }
@@ -61,18 +61,14 @@ pub fn crossterm_key_to_config_ui_key(key: KeyEvent) -> Option<ConfigUiKey> {
     }
 }
 
-pub fn crossterm_event_to_config_ui_key(event: Event) -> Option<ConfigUiKey> {
+fn crossterm_event_to_config_ui_key(event: Event) -> Option<ConfigUiKey> {
     match event {
         Event::Key(key) => crossterm_key_to_config_ui_key(key),
         _ => None,
     }
 }
 
-pub fn handle_crossterm_key(app: &mut ConfigUiApp, key: KeyEvent) -> ConfigUiIntent {
-    crossterm_key_to_config_ui_key(key).map_or(ConfigUiIntent::None, |key| app.handle_key(key))
-}
-
-pub fn handle_crossterm_event(app: &mut ConfigUiApp, event: Event) -> ConfigUiIntent {
+fn handle_crossterm_event(app: &mut ConfigUiApp, event: Event) -> ConfigUiIntent {
     crossterm_event_to_config_ui_key(event).map_or(ConfigUiIntent::None, |key| app.handle_key(key))
 }
 
@@ -207,7 +203,7 @@ mod tests {
         );
         assert_eq!(app.selected_row, 1);
         assert_eq!(
-            handle_crossterm_key(&mut app, key(KeyCode::Char('e'), KeyModifiers::NONE)),
+            handle_crossterm_event(&mut app, key_event(KeyCode::Char('e'), KeyModifiers::NONE)),
             ConfigUiIntent::BeginEdit {
                 field_index: 1,
                 source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
@@ -217,12 +213,12 @@ mod tests {
 
         app.selected_row = 0;
         assert_eq!(
-            handle_crossterm_key(&mut app, key(KeyCode::Char(' '), KeyModifiers::NONE)),
+            handle_crossterm_event(&mut app, key_event(KeyCode::Char(' '), KeyModifiers::NONE)),
             ConfigUiIntent::None
         );
         assert_eq!(app.edit.as_ref().expect("staged bool").input, "true");
         assert_eq!(
-            handle_crossterm_key(&mut app, key(KeyCode::Enter, KeyModifiers::NONE)),
+            handle_crossterm_event(&mut app, key_event(KeyCode::Enter, KeyModifiers::NONE)),
             ConfigUiIntent::SetField {
                 field_index: 0,
                 source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
