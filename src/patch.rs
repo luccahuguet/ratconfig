@@ -13,7 +13,6 @@ pub fn split_dotted_path(path: &str) -> Option<Vec<String>> {
         .map(|part| {
             let part = part.trim();
             (!part.is_empty()
-                && !part.contains(['[', ']'])
                 && part
                     .chars()
                     .all(|ch| ch.is_ascii_alphanumeric() || ch == '_'))
