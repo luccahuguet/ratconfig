@@ -126,11 +126,12 @@ pub struct ConfigUiField {
 
 impl ConfigUiField {
     pub fn has_default_value(&self) -> bool {
-        self.default_value != NO_DEFAULT_VALUE_LABEL
+        self.default_value != NO_CONFIG_DEFAULT_VALUE_LABEL
     }
 }
 
-const NO_DEFAULT_VALUE_LABEL: &str = "no default";
+/// Display marker for manually constructed fields that do not have a default.
+pub const NO_CONFIG_DEFAULT_VALUE_LABEL: &str = "no default";
 
 #[derive(Debug, Clone)]
 pub struct ConfigUiFieldRowSpec<'a> {
@@ -179,7 +180,7 @@ pub fn build_config_ui_field(spec: ConfigUiFieldRowSpec<'_>) -> ConfigUiField {
         default_value: spec
             .default
             .map(render_json_value)
-            .unwrap_or_else(|| NO_DEFAULT_VALUE_LABEL.to_string()),
+            .unwrap_or_else(|| NO_CONFIG_DEFAULT_VALUE_LABEL.to_string()),
         state,
         description: spec.description,
         allowed_values: spec.allowed_values,
@@ -857,7 +858,7 @@ help = "Theme name"
         let unset = build_config_ui_field(spec(None, None, false));
         assert_eq!(unset.state, ConfigUiValueState::Unset);
         assert_eq!(unset.current_value, "not set");
-        assert_eq!(unset.default_value, "no default");
+        assert_eq!(unset.default_value, NO_CONFIG_DEFAULT_VALUE_LABEL);
         assert!(!unset.has_default_value());
 
         let invalid = build_config_ui_field(spec(Some(&current), Some(&default), true));

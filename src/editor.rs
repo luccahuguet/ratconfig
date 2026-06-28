@@ -992,7 +992,7 @@ mod tests {
             field_with_source("ui", "ui.theme", "string", "\"custom\"", &[]),
             field_with_source("scratch", "scratch.note", "string", "\"custom\"", &[]),
         ];
-        model.fields[1].default_value = "no default".to_string();
+        model.fields[1].default_value = crate::NO_CONFIG_DEFAULT_VALUE_LABEL.to_string();
         let mut app = ConfigUiApp::new(model);
 
         assert_eq!(

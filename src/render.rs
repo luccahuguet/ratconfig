@@ -1118,7 +1118,7 @@ mod tests {
         let mut app = ConfigUiApp::new(test_model(ConfigUiValueState::Explicit));
         assert!(rendered_text(&normal_control_line(&app)).contains("u reset default"));
 
-        app.model.fields[0].default_value = "no default".to_string();
+        app.model.fields[0].default_value = NO_CONFIG_DEFAULT_VALUE_LABEL.to_string();
         assert!(!rendered_text(&normal_control_line(&app)).contains("reset default"));
     }
 }
