@@ -17,7 +17,7 @@ use crate::jsonc::PatchError;
 use crate::migration::{MigrationError, MigrationMutation, MigrationOp};
 use crate::patch::PatchMutation;
 use crate::toml_adapter::{TomlMigrationError, TomlPatchError};
-use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
+use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::collections::BTreeSet;
 
 pub const CONTRACT_STATE_SCHEMA_VERSION: u64 = 1;
@@ -478,31 +478,12 @@ fn optional_string_array(
 }
 
 fn contract_state_to_json(state: &ContractState) -> JsonValue {
-    let mut object = JsonMap::new();
-    object.insert(
-        "schema_version".to_string(),
-        JsonValue::Number(JsonNumber::from(CONTRACT_STATE_SCHEMA_VERSION)),
-    );
-    object.insert(
-        "contract_id".to_string(),
-        JsonValue::String(state.contract_id.clone()),
-    );
-    object.insert(
-        "version".to_string(),
-        JsonValue::Number(JsonNumber::from(state.version)),
-    );
-    object.insert(
-        "applied_change_ids".to_string(),
-        JsonValue::Array(
-            state
-                .applied_change_ids
-                .iter()
-                .cloned()
-                .map(JsonValue::String)
-                .collect(),
-        ),
-    );
-    JsonValue::Object(object)
+    serde_json::json!({
+        "schema_version": CONTRACT_STATE_SCHEMA_VERSION,
+        "contract_id": state.contract_id,
+        "version": state.version,
+        "applied_change_ids": state.applied_change_ids,
+    })
 }
 
 fn new_joined_state(

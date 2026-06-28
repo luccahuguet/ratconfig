@@ -258,13 +258,10 @@ impl ConfigUiApp {
     }
 
     fn handle_edit_key(&mut self, key: ConfigUiKey) -> ConfigUiIntent {
-        if let Some(mode) = self.edit.as_ref().map(|edit| edit.mode) {
-            match mode {
-                ConfigUiEditMode::Choice | ConfigUiEditMode::MultiChoice => {
-                    return self.handle_choice_edit_key(key, mode);
-                }
-                ConfigUiEditMode::Text => {}
-            }
+        if let Some(mode @ (ConfigUiEditMode::Choice | ConfigUiEditMode::MultiChoice)) =
+            self.edit.as_ref().map(|edit| edit.mode)
+        {
+            return self.handle_choice_edit_key(key, mode);
         }
 
         match key {

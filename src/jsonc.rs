@@ -187,13 +187,12 @@ fn cst_input_from_json_value(value: &JsonValue) -> CstInputValue {
         JsonValue::Array(values) => {
             CstInputValue::Array(values.iter().map(cst_input_from_json_value).collect())
         }
-        JsonValue::Object(object) => {
-            let mut properties = Vec::new();
-            for (key, value) in object {
-                properties.push((key.clone(), cst_input_from_json_value(value)));
-            }
-            CstInputValue::Object(properties)
-        }
+        JsonValue::Object(object) => CstInputValue::Object(
+            object
+                .iter()
+                .map(|(key, value)| (key.clone(), cst_input_from_json_value(value)))
+                .collect(),
+        ),
     }
 }
 
