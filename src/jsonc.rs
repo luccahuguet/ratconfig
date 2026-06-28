@@ -5,19 +5,7 @@ use jsonc_parser::ParseOptions;
 use jsonc_parser::cst::{CstInputValue, CstObject, CstRootNode};
 use serde_json::Value as JsonValue;
 
-pub use crate::patch::PatchMutation;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PatchOutcome {
-    pub text: String,
-    pub mutation: PatchMutation,
-}
-
-impl PatchOutcome {
-    pub fn changed(&self) -> bool {
-        self.mutation != PatchMutation::Unchanged
-    }
-}
+pub use crate::patch::{PatchMutation, PatchOutcome};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PatchError {

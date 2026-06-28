@@ -1,8 +1,8 @@
 // Test lane: default
 
 use crate::jsonc::{
-    PatchError, PatchMutation, get_json_path, parse_jsonc_value, set_jsonc_value_text,
-    unset_jsonc_value_text,
+    PatchError, PatchMutation, PatchOutcome, get_json_path, parse_jsonc_value,
+    set_jsonc_value_text, unset_jsonc_value_text,
 };
 use crate::patch::dotted_paths_overlap;
 use serde_json::Value as JsonValue;
@@ -62,28 +62,121 @@ impl From<PatchError> for MigrationError {
     }
 }
 
+pub(crate) struct TextPatchOutcome {
+    pub text: String,
+    pub mutation: PatchMutation,
+}
+
+impl TextPatchOutcome {
+    fn changed(&self) -> bool {
+        self.mutation != PatchMutation::Unchanged
+    }
+}
+
+impl From<PatchOutcome> for TextPatchOutcome {
+    fn from(outcome: PatchOutcome) -> Self {
+        Self {
+            text: outcome.text,
+            mutation: outcome.mutation,
+        }
+    }
+}
+
+pub(crate) trait MigrationErrorKind {
+    fn destination_exists(from: &str, to: &str) -> Self;
+    fn overlapping_paths(from: &str, to: &str) -> Self;
+    fn transform_failed(path: &str, message: String) -> Self;
+}
+
+impl MigrationErrorKind for MigrationError {
+    fn destination_exists(from: &str, to: &str) -> Self {
+        Self::DestinationExists {
+            from: from.into(),
+            to: to.into(),
+        }
+    }
+
+    fn overlapping_paths(from: &str, to: &str) -> Self {
+        Self::OverlappingPaths {
+            from: from.into(),
+            to: to.into(),
+        }
+    }
+
+    fn transform_failed(path: &str, message: String) -> Self {
+        Self::TransformFailed {
+            path: path.into(),
+            message,
+        }
+    }
+}
+
 pub fn apply_migrations_text(
     raw: &str,
     operations: &[MigrationOp],
 ) -> Result<MigrationOutcome, MigrationError> {
+    apply_migrations_text_with(
+        raw,
+        operations,
+        |text| parse_jsonc_value(text).map_err(MigrationError::from),
+        get_json_path,
+        |text, path, value| {
+            set_jsonc_value_text(text, path, value)
+                .map(TextPatchOutcome::from)
+                .map_err(MigrationError::from)
+        },
+        |text, path| {
+            unset_jsonc_value_text(text, path)
+                .map(TextPatchOutcome::from)
+                .map_err(MigrationError::from)
+        },
+    )
+}
+
+pub(crate) fn apply_migrations_text_with<Error: MigrationErrorKind>(
+    raw: &str,
+    operations: &[MigrationOp],
+    parse_value: impl Fn(&str) -> Result<JsonValue, Error>,
+    get_path: impl for<'a> Fn(&'a JsonValue, &str) -> Option<&'a JsonValue>,
+    set_value: impl Fn(&str, &str, &JsonValue) -> Result<TextPatchOutcome, Error>,
+    unset_value: impl Fn(&str, &str) -> Result<TextPatchOutcome, Error>,
+) -> Result<MigrationOutcome, Error> {
     let mut text = raw.to_string();
     let mut mutations = Vec::new();
     for operation in operations {
         match operation {
             MigrationOp::Rename { from, to } => {
-                text = rename_path(&text, from, to, &mut mutations)?;
+                if dotted_paths_overlap(from, to) {
+                    return Err(Error::overlapping_paths(from, to));
+                }
+                let value_tree = parse_value(&text)?;
+                let Some(value) = get_path(&value_tree, from).cloned() else {
+                    continue;
+                };
+                if get_path(&value_tree, to).is_some() {
+                    return Err(Error::destination_exists(from, to));
+                }
+                let set = set_value(&text, to, &value)?;
+                let unset = unset_value(&set.text, from)?;
+                if set.changed() || unset.changed() {
+                    mutations.push(MigrationMutation::Renamed {
+                        from: from.clone(),
+                        to: to.clone(),
+                    });
+                }
+                text = unset.text;
             }
             MigrationOp::Delete { path } => {
-                let outcome = unset_jsonc_value_text(&text, path)?;
+                let outcome = unset_value(&text, path)?;
                 if outcome.mutation == PatchMutation::Removed {
                     mutations.push(MigrationMutation::Deleted { path: path.clone() });
                 }
                 text = outcome.text;
             }
             MigrationOp::AddDefault { path, value } => {
-                let value_tree = parse_jsonc_value(&text)?;
-                if get_json_path(&value_tree, path).is_none() {
-                    let outcome = set_jsonc_value_text(&text, path, value)?;
+                let value_tree = parse_value(&text)?;
+                if get_path(&value_tree, path).is_none() {
+                    let outcome = set_value(&text, path, value)?;
                     if outcome.changed() {
                         mutations.push(MigrationMutation::AddedDefault { path: path.clone() });
                     }
@@ -91,7 +184,23 @@ pub fn apply_migrations_text(
                 }
             }
             MigrationOp::Transform { path, transform } => {
-                text = transform_path(&text, path, *transform, &mut mutations)?;
+                let value_tree = parse_value(&text)?;
+                let Some(value) = get_path(&value_tree, path) else {
+                    continue;
+                };
+                let Some(next) =
+                    transform(value).map_err(|message| Error::transform_failed(path, message))?
+                else {
+                    continue;
+                };
+                if &next == value {
+                    continue;
+                }
+                let outcome = set_value(&text, path, &next)?;
+                if outcome.changed() {
+                    mutations.push(MigrationMutation::Transformed { path: path.clone() });
+                }
+                text = outcome.text;
             }
         }
     }
@@ -113,68 +222,6 @@ pub(crate) fn defaults_to_add_default_ops(defaults: &[(&str, JsonValue)]) -> Vec
             value: value.clone(),
         })
         .collect()
-}
-
-fn rename_path(
-    text: &str,
-    from: &str,
-    to: &str,
-    mutations: &mut Vec<MigrationMutation>,
-) -> Result<String, MigrationError> {
-    if dotted_paths_overlap(from, to) {
-        return Err(MigrationError::OverlappingPaths {
-            from: from.to_string(),
-            to: to.to_string(),
-        });
-    }
-    let value_tree = parse_jsonc_value(text)?;
-    let Some(value) = get_json_path(&value_tree, from).cloned() else {
-        return Ok(text.to_string());
-    };
-    if get_json_path(&value_tree, to).is_some() {
-        return Err(MigrationError::DestinationExists {
-            from: from.to_string(),
-            to: to.to_string(),
-        });
-    }
-    let set = set_jsonc_value_text(text, to, &value)?;
-    let unset = unset_jsonc_value_text(&set.text, from)?;
-    if set.changed() || unset.changed() {
-        mutations.push(MigrationMutation::Renamed {
-            from: from.to_string(),
-            to: to.to_string(),
-        });
-    }
-    Ok(unset.text)
-}
-
-fn transform_path(
-    text: &str,
-    path: &str,
-    transform: ValueTransform,
-    mutations: &mut Vec<MigrationMutation>,
-) -> Result<String, MigrationError> {
-    let value_tree = parse_jsonc_value(text)?;
-    let Some(value) = get_json_path(&value_tree, path) else {
-        return Ok(text.to_string());
-    };
-    let Some(next) = transform(value).map_err(|message| MigrationError::TransformFailed {
-        path: path.to_string(),
-        message,
-    })?
-    else {
-        return Ok(text.to_string());
-    };
-    if &next == value {
-        return Ok(text.to_string());
-    }
-    let outcome = set_jsonc_value_text(text, path, &next)?;
-    if outcome.changed() {
-        mutations.push(MigrationMutation::Transformed {
-            path: path.to_string(),
-        });
-    }
-    Ok(outcome.text)
 }
 
 #[cfg(test)]
