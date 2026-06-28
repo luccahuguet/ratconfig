@@ -383,11 +383,11 @@ pub fn row_line_for_model(model: &ConfigUiModel, row: UiRowRef) -> Line<'static>
                         &truncate(field_display_label(field), FIELD_SETTING_COLUMN_WIDTH),
                         FIELD_SETTING_COLUMN_WIDTH,
                     ),
-                    field_key_style(field),
+                    field_style(field, config_key_style()),
                 ),
                 Span::styled(
                     truncate(&field.current_value, FIELD_VALUE_COLUMN_WIDTH),
-                    field_value_style(field),
+                    field_style(field, Style::default().fg(Color::Gray)),
                 ),
             ])
         }
@@ -452,19 +452,11 @@ fn field_title_lines(field: &ConfigUiField) -> Vec<Line<'static>> {
     lines
 }
 
-fn field_key_style(field: &ConfigUiField) -> Style {
+fn field_style(field: &ConfigUiField, default: Style) -> Style {
     if field.state == ConfigUiValueState::Invalid {
         state_style(field.state)
     } else {
-        config_key_style()
-    }
-}
-
-fn field_value_style(field: &ConfigUiField) -> Style {
-    if field.state == ConfigUiValueState::Invalid {
-        state_style(field.state)
-    } else {
-        Style::default().fg(Color::Gray)
+        default
     }
 }
 
@@ -534,34 +526,12 @@ fn append_single_choice_options(
     for (index, value) in field.allowed_values.iter().enumerate() {
         let highlighted = highlighted_index == Some(index);
         let selected = value == selected_value;
-        let selector_style = if highlighted {
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::Gray)
-        };
-        let marker_style = if selected {
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::Gray)
-        };
-        let value_style = if highlighted {
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD)
-        } else if selected {
-            Style::default().fg(Color::White)
-        } else {
-            Style::default().fg(Color::Gray)
-        };
-        lines.push(Line::from(vec![
-            Span::styled(if highlighted { "> " } else { "  " }, selector_style),
-            Span::styled(if selected { "(x) " } else { "( ) " }, marker_style),
-            Span::styled(value.clone(), value_style),
-        ]));
+        lines.push(choice_option_line(
+            value,
+            highlighted,
+            selected,
+            ("(x) ", "( ) "),
+        ));
     }
 }
 
@@ -584,37 +554,51 @@ pub fn multi_choice_detail_lines(
                 .choice_index
                 .min(field.allowed_values.len().saturating_sub(1));
         let enabled = enabled_set.contains(value);
-        let selector_style = if selected {
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::Gray)
-        };
-        let marker_style = if enabled {
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::Gray)
-        };
-        let value_style = if selected {
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD)
-        } else if enabled {
-            Style::default().fg(Color::White)
-        } else {
-            Style::default().fg(Color::Gray)
-        };
-        lines.push(Line::from(vec![
-            Span::styled(if selected { "> " } else { "  " }, selector_style),
-            Span::styled(if enabled { "[x] " } else { "[ ] " }, marker_style),
-            Span::styled(value.clone(), value_style),
-        ]));
+        lines.push(choice_option_line(
+            value,
+            selected,
+            enabled,
+            ("[x] ", "[ ] "),
+        ));
     }
 
     lines
+}
+
+fn choice_option_line(
+    value: &str,
+    focused: bool,
+    enabled: bool,
+    markers: (&'static str, &'static str),
+) -> Line<'static> {
+    let cursor_style = if focused {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    let marker_style = if enabled {
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    let value_style = if focused {
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    } else if enabled {
+        Style::default().fg(Color::White)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    Line::from(vec![
+        Span::styled(if focused { "> " } else { "  " }, cursor_style),
+        Span::styled(if enabled { markers.0 } else { markers.1 }, marker_style),
+        Span::styled(value.to_string(), value_style),
+    ])
 }
 
 pub fn sidecar_detail_lines(sidecar: &ConfigUiSidecar) -> Vec<Line<'static>> {
@@ -711,17 +695,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect) {
         let status = app
             .notice
             .as_ref()
-            .map(|notice| {
-                let style = if notice.is_error {
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::Green)
-                };
-                Line::from(Span::styled(
-                    truncate(&notice.text, area.width as usize),
-                    style,
-                ))
-            })
+            .map(|notice| notice_line(notice, area.width as usize))
             .unwrap_or_else(|| edit_control_line(field, edit.mode));
         frame.render_widget(Paragraph::new(vec![editing, status]), area);
         return;
@@ -730,17 +704,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect) {
     let notice = app
         .notice
         .as_ref()
-        .map(|notice| {
-            let style = if notice.is_error {
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Green)
-            };
-            Line::from(Span::styled(
-                truncate(&notice.text, area.width as usize),
-                style,
-            ))
-        })
+        .map(|notice| notice_line(notice, area.width as usize))
         .unwrap_or_else(|| normal_control_line(app));
     let search = if app.search_active {
         format!("search: {}_", app.search)
@@ -756,6 +720,15 @@ fn render_footer(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect) {
         Span::styled(search, Style::default().fg(Color::Yellow)),
     ]);
     frame.render_widget(Paragraph::new(vec![notice, controls]), area);
+}
+
+fn notice_line(notice: &ConfigUiNotice, width: usize) -> Line<'static> {
+    let style = if notice.is_error {
+        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Green)
+    };
+    Line::from(Span::styled(truncate(&notice.text, width), style))
 }
 
 fn edit_status_line(field: &ConfigUiField, edit: &ConfigUiEditState) -> Line<'static> {

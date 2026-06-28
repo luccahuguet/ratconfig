@@ -46,6 +46,8 @@ fn crossterm_key_to_config_ui_key(key: KeyEvent) -> Option<ConfigUiKey> {
     if key.kind == KeyEventKind::Release {
         return None;
     }
+    let unsupported =
+        KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META;
     match key.code {
         KeyCode::Esc => Some(ConfigUiKey::Esc),
         KeyCode::Enter => Some(ConfigUiKey::Enter),
@@ -56,20 +58,21 @@ fn crossterm_key_to_config_ui_key(key: KeyEvent) -> Option<ConfigUiKey> {
         KeyCode::Down => Some(ConfigUiKey::Down),
         KeyCode::Left => Some(ConfigUiKey::Left),
         KeyCode::Right => Some(ConfigUiKey::Right),
-        KeyCode::Char(ch) => char_key_to_config_ui_key(ch, key.modifiers),
-        _ => None,
-    }
-}
-
-fn crossterm_event_to_config_ui_key(event: Event) -> Option<ConfigUiKey> {
-    match event {
-        Event::Key(key) => crossterm_key_to_config_ui_key(key),
+        KeyCode::Char(_) if key.modifiers.intersects(unsupported) => None,
+        KeyCode::Char(ch) if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(ConfigUiKey::Ctrl(ch))
+        }
+        KeyCode::Char(ch) => Some(ConfigUiKey::Char(ch)),
         _ => None,
     }
 }
 
 fn handle_crossterm_event(app: &mut ConfigUiApp, event: Event) -> ConfigUiIntent {
-    crossterm_event_to_config_ui_key(event).map_or(ConfigUiIntent::None, |key| app.handle_key(key))
+    match event {
+        Event::Key(key) => crossterm_key_to_config_ui_key(key)
+            .map_or(ConfigUiIntent::None, |key| app.handle_key(key)),
+        _ => ConfigUiIntent::None,
+    }
 }
 
 pub fn run_config_ui<HostError>(
@@ -98,19 +101,6 @@ where
         (Err(error), _) => Err(error),
         (Ok(()), Err(error)) => Err(error.into()),
         (Ok(()), Ok(())) => Ok(()),
-    }
-}
-
-fn char_key_to_config_ui_key(ch: char, modifiers: KeyModifiers) -> Option<ConfigUiKey> {
-    let unsupported =
-        KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META;
-    if modifiers.intersects(unsupported) {
-        return None;
-    }
-    if modifiers.contains(KeyModifiers::CONTROL) {
-        Some(ConfigUiKey::Ctrl(ch))
-    } else {
-        Some(ConfigUiKey::Char(ch))
     }
 }
 

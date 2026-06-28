@@ -242,9 +242,8 @@ impl ConfigUiApp {
                 self.move_up();
                 ConfigUiIntent::None
             }
-            ConfigUiKey::Enter => self.activate_selected_field(),
+            ConfigUiKey::Enter | ConfigUiKey::Char(' ') => self.quick_edit_selected_field(),
             ConfigUiKey::Char('e') => self.begin_edit_selected_field(),
-            ConfigUiKey::Char(' ') => self.quick_edit_selected_field(),
             ConfigUiKey::Char('u') => self.unset_selected_field(),
             ConfigUiKey::Tab | ConfigUiKey::Right | ConfigUiKey::Char('l') => {
                 self.next_tab();
@@ -397,14 +396,6 @@ impl ConfigUiApp {
         };
         if let Some(edit) = &mut self.edit {
             edit.input = next;
-        }
-    }
-
-    fn activate_selected_field(&mut self) -> ConfigUiIntent {
-        if self.selected_field().is_some_and(is_bool_field) {
-            self.quick_edit_selected_field()
-        } else {
-            self.begin_edit_selected_field()
         }
     }
 
