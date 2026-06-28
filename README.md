@@ -104,7 +104,7 @@ Fields with defaults expose a reset-to-default action that emits `ConfigUiIntent
 
 ## String-List Choices
 
-Use `build_string_list_choice_field` for string-list settings whose values must come from a host-defined allowed set. `ConfigUiEditBehavior::Default` keeps edited values in allowed-value order; `ConfigUiEditBehavior::OrderedStringList` preserves the host-provided order and enables reorder controls in the picker
+Use `build_string_list_choice_field` for string-list settings whose values must come from a host-defined allowed set. `ConfigUiEditBehavior::Default` keeps edited values in allowed-value order; `ConfigUiEditBehavior::OrderedStringList` preserves selected-value order and enables reorder controls in the picker
 
 ```rust
 use ratconfig::{
