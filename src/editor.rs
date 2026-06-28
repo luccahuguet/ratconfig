@@ -647,13 +647,17 @@ fn parse_friendly_string_list_input(
     if input.is_empty() || input.eq_ignore_ascii_case("disabled") {
         return Ok(JsonValue::Array(Vec::new()));
     }
+    let strings = input
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    for value in &strings {
+        ensure_allowed_value(field, value)?;
+    }
     Ok(JsonValue::Array(
-        input
-            .split(',')
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(|value| JsonValue::String(value.to_string()))
-            .collect(),
+        strings.into_iter().map(JsonValue::String).collect(),
     ))
 }
 
@@ -1073,6 +1077,14 @@ mod tests {
             json!(["search", "git"])
         );
         assert!(parse_edit_input(&list_field, r#"["unknown"]"#).is_err());
+
+        let mut friendly_list_field = list_field.clone();
+        friendly_list_field.edit_behavior = ConfigUiEditBehavior::FriendlyStringList;
+        assert_eq!(
+            parse_edit_input(&friendly_list_field, "search, git").expect("friendly list"),
+            json!(["search", "git"])
+        );
+        assert!(parse_edit_input(&friendly_list_field, "search, unknown").is_err());
     }
 
     // Defends: bools keep direct choice edits while scalar enums use the single-select picker mode.
