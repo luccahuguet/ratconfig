@@ -66,24 +66,19 @@ pub fn set_jsonc_value_text(
 pub fn unset_jsonc_value_text(raw: &str, path: &str) -> Result<PatchOutcome, PatchError> {
     let parts = split_path(path)?;
     let root = parse_cst(raw)?;
+    let unchanged = || PatchOutcome {
+        text: raw.to_string(),
+        mutation: PatchMutation::Unchanged,
+    };
     let Some(root_object) = root.object_value() else {
-        return Ok(PatchOutcome {
-            text: raw.to_string(),
-            mutation: PatchMutation::Unchanged,
-        });
+        return Ok(unchanged());
     };
     let Some(parent) = parent_object_if_present(root_object, &parts, path)? else {
-        return Ok(PatchOutcome {
-            text: raw.to_string(),
-            mutation: PatchMutation::Unchanged,
-        });
+        return Ok(unchanged());
     };
     let leaf = parts.last().expect("split path guarantees a leaf");
     let Some(prop) = parent.get(leaf) else {
-        return Ok(PatchOutcome {
-            text: raw.to_string(),
-            mutation: PatchMutation::Unchanged,
-        });
+        return Ok(unchanged());
     };
     prop.remove();
     let text = root.to_string();

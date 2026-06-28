@@ -125,18 +125,16 @@ pub fn set_toml_value_text(
 pub fn unset_toml_value_text(raw: &str, path: &str) -> Result<TomlPatchOutcome, TomlPatchError> {
     let parts = split_path(path)?;
     let mut document = parse_document(raw)?;
+    let unchanged = || TomlPatchOutcome {
+        text: raw.to_string(),
+        mutation: PatchMutation::Unchanged,
+    };
     let Some(parent) = parent_table_if_present(document.as_table_mut(), &parts, path)? else {
-        return Ok(TomlPatchOutcome {
-            text: raw.to_string(),
-            mutation: PatchMutation::Unchanged,
-        });
+        return Ok(unchanged());
     };
     let leaf = parts.last().expect("split path guarantees a leaf");
     if parent.remove(leaf).is_none() {
-        return Ok(TomlPatchOutcome {
-            text: raw.to_string(),
-            mutation: PatchMutation::Unchanged,
-        });
+        return Ok(unchanged());
     }
     let text = document.to_string();
     validate_toml(&text)?;

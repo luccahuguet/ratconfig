@@ -141,11 +141,7 @@ impl ConfigUiApp {
     }
 
     pub fn clamp_selection_for_len(&mut self, len: usize) {
-        self.selected_row = if len == 0 {
-            0
-        } else {
-            self.selected_row.min(len - 1)
-        };
+        self.selected_row = self.selected_row.min(len.saturating_sub(1));
     }
 
     pub fn selected_field_index(&self) -> Option<usize> {
@@ -157,8 +153,7 @@ impl ConfigUiApp {
     }
 
     pub fn selected_field(&self) -> Option<&ConfigUiField> {
-        self.selected_field_index()
-            .and_then(|index| self.model.fields.get(index))
+        self.model.fields.get(self.selected_field_index()?)
     }
 
     pub(crate) fn selected_file_action(&self) -> Option<(usize, &ConfigUiFileAction)> {

@@ -97,11 +97,8 @@ where
     let run_result = run_config_ui_terminal(&mut terminal, app, detail_lines, &mut handle_intent);
     let restore_result = ratatui::try_restore();
 
-    match (run_result, restore_result) {
-        (Err(error), _) => Err(error),
-        (Ok(()), Err(error)) => Err(error.into()),
-        (Ok(()), Ok(())) => Ok(()),
-    }
+    run_result?;
+    restore_result.map_err(CrosstermRunnerError::from)
 }
 
 fn run_config_ui_terminal<DetailLines, HandleIntent, HostError>(
