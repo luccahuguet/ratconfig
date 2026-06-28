@@ -953,6 +953,9 @@ mod tests {
             }
         );
         app.begin_edit_field(1);
+        app.edit.as_mut().expect("edit").input = "temporary".to_string();
+        assert_eq!(app.handle_key(ConfigUiKey::Ctrl('U')), ConfigUiIntent::None);
+        assert!(app.edit.as_ref().expect("edit").input.is_empty());
         app.edit.as_mut().expect("edit").input = "dark".to_string();
         assert_eq!(
             app.handle_key(ConfigUiKey::Enter),
@@ -1063,6 +1066,11 @@ mod tests {
         assert_eq!(app.search, "them");
         assert_eq!(app.handle_key(ConfigUiKey::Ctrl('u')), ConfigUiIntent::None);
         assert!(app.search.is_empty());
+        for ch in "theme".chars() {
+            assert_eq!(app.handle_key(ConfigUiKey::Char(ch)), ConfigUiIntent::None);
+        }
+        assert_eq!(app.handle_key(ConfigUiKey::Ctrl('U')), ConfigUiIntent::None);
+        assert!(app.search.is_empty());
         assert_eq!(app.handle_key(ConfigUiKey::Enter), ConfigUiIntent::None);
         assert!(!app.search_active);
     }
@@ -1075,6 +1083,10 @@ mod tests {
         app.begin_edit_field(1);
         assert_eq!(app.edit.as_ref().expect("single edit").choice_index, 0);
         assert_eq!(app.handle_key(ConfigUiKey::Char('j')), ConfigUiIntent::None);
+        assert_eq!(app.edit.as_ref().expect("single edit").choice_index, 1);
+        assert_eq!(app.handle_key(ConfigUiKey::Char('h')), ConfigUiIntent::None);
+        assert_eq!(app.edit.as_ref().expect("single edit").choice_index, 0);
+        assert_eq!(app.handle_key(ConfigUiKey::Char('l')), ConfigUiIntent::None);
         assert_eq!(app.edit.as_ref().expect("single edit").choice_index, 1);
         assert_eq!(app.handle_key(ConfigUiKey::Char(' ')), ConfigUiIntent::None);
         assert_eq!(app.edit.as_ref().expect("single edit").input, "dark");
