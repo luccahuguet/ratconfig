@@ -646,14 +646,7 @@ pub fn sidecar_detail_lines(sidecar: &ConfigUiSidecar) -> Vec<Line<'static>> {
             },
         ),
         detail_line("owner", owner_label(sidecar.owner)),
-        detail_line(
-            "write",
-            if sidecar.read_only {
-                "read-only"
-            } else {
-                "writable or absent"
-            },
-        ),
+        detail_line("write", write_detail_label(sidecar.read_only)),
     ]
 }
 
@@ -668,14 +661,7 @@ pub fn file_action_detail_lines(action: &ConfigUiFileAction) -> Vec<Line<'static
         detail_line("action", &action.action_id),
         detail_line("path", &action.path.display().to_string()),
         detail_line("state", file_action_status_label(action)),
-        detail_line(
-            "write",
-            if action.read_only {
-                "read-only"
-            } else {
-                "writable or absent"
-            },
-        ),
+        detail_line("write", write_detail_label(action.read_only)),
         detail_line(
             "create",
             if action.create_if_missing {
@@ -693,6 +679,14 @@ pub fn file_action_detail_lines(action: &ConfigUiFileAction) -> Vec<Line<'static
         lines.push(Line::from(action.description.clone()));
     }
     lines
+}
+
+fn write_detail_label(read_only: bool) -> &'static str {
+    if read_only {
+        "read-only"
+    } else {
+        "writable or absent"
+    }
 }
 
 pub fn diagnostic_detail_lines(diagnostic: &ConfigUiDiagnostic) -> Vec<Line<'static>> {
