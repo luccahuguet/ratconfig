@@ -208,25 +208,23 @@ fn split_path(path: &str) -> Result<Vec<String>, TomlPatchError> {
 }
 
 fn parent_table_or_create<'a>(
-    table: &'a mut Table,
+    mut table: &'a mut Table,
     parts: &[String],
     path: &str,
 ) -> Result<&'a mut Table, TomlPatchError> {
-    if parts.len() <= 1 {
-        return Ok(table);
+    for part in &parts[..parts.len().saturating_sub(1)] {
+        let item = table.entry(part).or_insert(Item::Table(Table::new()));
+        if item.is_none() {
+            *item = Item::Table(Table::new());
+        }
+        table = item.as_table_mut().ok_or_else(|| {
+            rewrite_required(
+                path,
+                "A parent path exists but is not a TOML table, so ratconfig cannot patch through it safely.",
+            )
+        })?;
     }
-    let part = &parts[0];
-    let item = table.entry(part).or_insert(Item::Table(Table::new()));
-    if item.is_none() {
-        *item = Item::Table(Table::new());
-    }
-    let child = item.as_table_mut().ok_or_else(|| {
-        rewrite_required(
-            path,
-            "A parent path exists but is not a TOML table, so ratconfig cannot patch through it safely.",
-        )
-    })?;
-    parent_table_or_create(child, &parts[1..], path)
+    Ok(table)
 }
 
 fn parent_table_if_present<'a>(

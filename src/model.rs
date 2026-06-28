@@ -249,11 +249,13 @@ pub fn build_string_list_choice_field(
             spec.path
         ));
     }
-    if let Some(values) = spec.current.as_deref() {
-        validate_string_list_choice_values(&spec.path, values, &spec.allowed_values)?;
-    }
-    if let Some(values) = spec.default.as_deref() {
-        validate_string_list_choice_values(&spec.path, values, &spec.allowed_values)?;
+    for values in [spec.current.as_deref(), spec.default.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        for value in values {
+            validate_string_choice_value(&spec.path, value, &spec.allowed_values)?;
+        }
     }
 
     let current = spec.current.as_deref().map(string_list_values_json);
@@ -757,17 +759,6 @@ pub(crate) fn validate_string_choice_value(
         "{path} must be one of: {}.",
         allowed_values.join(", ")
     ))
-}
-
-fn validate_string_list_choice_values(
-    path: &str,
-    values: &[String],
-    allowed_values: &[String],
-) -> Result<(), String> {
-    for value in values {
-        validate_string_choice_value(path, value, allowed_values)?;
-    }
-    Ok(())
 }
 
 fn string_list_values_json(values: &[String]) -> JsonValue {

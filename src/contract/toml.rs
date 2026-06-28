@@ -3,7 +3,7 @@
 use super::{
     AppliedContractChange, ConfigContract, ContractApplyOutcome, ContractError,
     ContractJoinOutcome, ContractState, append_applied_change_ids, apply_contract_with,
-    contract_state_to_json, join_outcome, new_joined_state, validate_contract,
+    contract_state_to_json, new_joined_state, validate_contract,
 };
 use crate::toml_adapter::{
     TomlPatchError, TomlPatchOutcome, apply_toml_migrations_text, get_toml_path, parse_toml_value,
@@ -103,12 +103,12 @@ pub fn reconcile_joined_toml_contract_text(
     state.version = contract.current_version;
     append_applied_change_ids(&mut state, &applied.applied_changes);
     let state_patch = write_toml_contract_state_text(&applied.text, state_path, &state)?;
-    Ok(join_outcome(
-        state_patch.text,
+    Ok(ContractJoinOutcome {
+        text: state_patch.text,
         state,
-        applied.applied_changes,
-        state_patch.mutation,
-    ))
+        applied_changes: applied.applied_changes,
+        state_mutation: state_patch.mutation,
+    })
 }
 
 fn write_toml_joined_state(
@@ -119,12 +119,12 @@ fn write_toml_joined_state(
 ) -> Result<ContractJoinOutcome, ContractError> {
     let state = new_joined_state(contract, &applied_changes);
     let state_patch = write_toml_contract_state_text(raw, state_path, &state)?;
-    Ok(join_outcome(
-        state_patch.text,
+    Ok(ContractJoinOutcome {
+        text: state_patch.text,
         state,
         applied_changes,
-        state_patch.mutation,
-    ))
+        state_mutation: state_patch.mutation,
+    })
 }
 
 #[cfg(test)]
