@@ -518,7 +518,7 @@ pub fn edit_input_for_field(field: &ConfigUiField) -> String {
         if is_bool_field(field) {
             return "false".to_string();
         }
-        if is_scalar_enum_field(field) && !field.allowed_values.is_empty() {
+        if is_scalar_enum_field(field) {
             return field.allowed_values[0].clone();
         }
         return String::new();
@@ -526,7 +526,7 @@ pub fn edit_input_for_field(field: &ConfigUiField) -> String {
     if field.edit_behavior == ConfigUiEditBehavior::FriendlyStringList {
         return friendly_string_list_edit_input(field);
     }
-    if is_string_field(field) || is_scalar_enum_field(field) {
+    if field.kind == "string" {
         return parse_rendered_json_string(&field.current_value)
             .unwrap_or_else(|| field.current_value.clone());
     }
@@ -761,12 +761,8 @@ fn is_direct_choice_field(field: &ConfigUiField) -> bool {
     is_bool_field(field) || is_scalar_enum_field(field)
 }
 
-fn is_string_field(field: &ConfigUiField) -> bool {
-    field.kind == "string"
-}
-
 pub fn is_scalar_enum_field(field: &ConfigUiField) -> bool {
-    is_string_field(field) && !field.allowed_values.is_empty()
+    field.kind == "string" && !field.allowed_values.is_empty()
 }
 
 pub fn is_enum_string_list_field(field: &ConfigUiField) -> bool {
@@ -792,11 +788,7 @@ fn friendly_string_list_edit_input(field: &ConfigUiField) -> String {
 }
 
 pub fn field_bool_value(field: &ConfigUiField) -> Option<bool> {
-    match field.current_value.as_str() {
-        "true" => Some(true),
-        "false" => Some(false),
-        _ => None,
-    }
+    field.current_value.parse().ok()
 }
 
 #[cfg(test)]

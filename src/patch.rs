@@ -9,21 +9,17 @@ pub enum PatchMutation {
 }
 
 pub fn split_dotted_path(path: &str) -> Option<Vec<String>> {
-    let parts = path
-        .split('.')
-        .map(|part| part.trim().to_owned())
-        .collect::<Vec<_>>();
-    if parts.iter().any(|part| {
-        part.is_empty()
-            || part.contains('[')
-            || part.contains(']')
-            || !part
-                .chars()
-                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-    }) {
-        return None;
-    }
-    Some(parts)
+    path.split('.')
+        .map(|part| {
+            let part = part.trim();
+            (!part.is_empty()
+                && !part.contains(['[', ']'])
+                && part
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_'))
+            .then(|| part.to_owned())
+        })
+        .collect()
 }
 
 pub fn dotted_paths_overlap(a: &str, b: &str) -> bool {

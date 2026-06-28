@@ -780,20 +780,16 @@ pub fn render_json_value(value: &JsonValue) -> String {
         JsonValue::Bool(value) => value.to_string(),
         JsonValue::Number(value) => value.to_string(),
         JsonValue::String(value) => format!("{value:?}"),
-        JsonValue::Array(values) => {
-            if values.len() <= 4 {
-                serde_json::to_string(values)
-                    .unwrap_or_else(|_| format!("[{} items]", values.len()))
-            } else {
-                format!("[{} items]", values.len())
-            }
+        JsonValue::Array(values) if values.len() <= 4 => {
+            serde_json::to_string(values).expect("serde_json::Value arrays serialize")
         }
+        JsonValue::Array(values) => format!("[{} items]", values.len()),
         JsonValue::Object(object) => format!("{{{} keys}}", object.len()),
     }
 }
 
 pub fn render_json_edit_value(value: &JsonValue) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| render_json_value(value))
+    serde_json::to_string(value).expect("serde_json::Value serializes")
 }
 
 #[cfg(test)]

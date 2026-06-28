@@ -105,17 +105,12 @@ fn render_header(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect) {
         "ok".to_string()
     };
     let diagnostic_style = if warning_count > 0 {
-        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+        bold_fg_style(Color::Red)
     } else {
-        Style::default().fg(Color::Green)
+        fg_style(Color::Green)
     };
 
-    let title = Line::from(vec![Span::styled(
-        "Config",
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    )]);
+    let title = Line::from(vec![Span::styled("Config", bold_fg_style(Color::Cyan))]);
 
     frame.render_widget(Block::default().borders(Borders::BOTTOM), area);
     let horizontal_padding = HEADER_HORIZONTAL_PADDING.min(area.width / 2);
@@ -245,12 +240,8 @@ fn render_tabs(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect) {
     frame.render_widget(
         Tabs::new(labels)
             .select(app.selected_tab)
-            .style(Style::default().fg(Color::Gray))
-            .highlight_style(
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            .style(fg_style(Color::Gray))
+            .highlight_style(bold_fg_style(Color::Yellow)),
         area,
     );
 }
@@ -375,7 +366,7 @@ fn render_details(
         Some(row) => detail_lines(app, row),
         None => vec![Line::from(Span::styled(
             "No settings match this tab/search.",
-            Style::default().fg(Color::Gray),
+            fg_style(Color::Gray),
         ))],
     };
     frame.render_widget(
@@ -408,7 +399,7 @@ fn row_line_for_layout(model: &ConfigUiModel, row: UiRowRef, layout: ListLayout)
                 ),
                 Span::styled(
                     truncate(&field.current_value, FIELD_VALUE_COLUMN_WIDTH),
-                    field_style(field, Style::default().fg(Color::Gray)),
+                    field_style(field, fg_style(Color::Gray)),
                 ),
             ])
         }
@@ -441,7 +432,7 @@ fn row_line_for_layout(model: &ConfigUiModel, row: UiRowRef, layout: ListLayout)
                     ),
                     Span::styled(
                         truncate(&action.path.display().to_string(), FIELD_VALUE_COLUMN_WIDTH),
-                        Style::default().fg(Color::Gray),
+                        fg_style(Color::Gray),
                     ),
                 ]),
                 ListLayout::Status => status_row_line(
@@ -455,9 +446,9 @@ fn row_line_for_layout(model: &ConfigUiModel, row: UiRowRef, layout: ListLayout)
         UiRowRef::Diagnostic(index) => {
             let diagnostic = &model.diagnostics[index];
             let style = if diagnostic.blocking {
-                Style::default().fg(Color::Red)
+                fg_style(Color::Red)
             } else {
-                Style::default().fg(Color::Yellow)
+                fg_style(Color::Yellow)
             };
             status_row_line(
                 &diagnostic.status,
@@ -493,7 +484,7 @@ fn status_row_line(
             status_column_cell(item, STATUS_ITEM_COLUMN_WIDTH),
             config_key_style(),
         ),
-        Span::styled(detail.into(), Style::default().fg(Color::Gray)),
+        Span::styled(detail.into(), fg_style(Color::Gray)),
     ])
 }
 
@@ -641,27 +632,21 @@ fn choice_option_line(
     markers: (&'static str, &'static str),
 ) -> Line<'static> {
     let cursor_style = if focused {
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
+        bold_fg_style(Color::Yellow)
     } else {
-        Style::default().fg(Color::Gray)
+        fg_style(Color::Gray)
     };
     let marker_style = if enabled {
-        Style::default()
-            .fg(Color::Green)
-            .add_modifier(Modifier::BOLD)
+        bold_fg_style(Color::Green)
     } else {
-        Style::default().fg(Color::Gray)
+        fg_style(Color::Gray)
     };
     let value_style = if focused {
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD)
+        bold_fg_style(Color::White)
     } else if enabled {
-        Style::default().fg(Color::White)
+        fg_style(Color::White)
     } else {
-        Style::default().fg(Color::Gray)
+        fg_style(Color::Gray)
     };
     Line::from(vec![
         Span::styled(if focused { "> " } else { "  " }, cursor_style),
@@ -674,9 +659,7 @@ pub fn sidecar_detail_lines(sidecar: &ConfigUiSidecar) -> Vec<Line<'static>> {
     vec![
         Line::from(Span::styled(
             sidecar.name.clone(),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+            bold_fg_style(Color::Cyan),
         )),
         Line::from(""),
         detail_line("path", &sidecar.path.display().to_string()),
@@ -729,13 +712,11 @@ pub fn diagnostic_detail_lines(diagnostic: &ConfigUiDiagnostic) -> Vec<Line<'sta
     let mut lines = vec![
         Line::from(Span::styled(
             diagnostic.headline.clone(),
-            Style::default()
-                .fg(if diagnostic.blocking {
-                    Color::Red
-                } else {
-                    Color::Yellow
-                })
-                .add_modifier(Modifier::BOLD),
+            bold_fg_style(if diagnostic.blocking {
+                Color::Red
+            } else {
+                Color::Yellow
+            }),
         )),
         Line::from(""),
         detail_line("path", &diagnostic.path),
@@ -753,9 +734,7 @@ pub fn native_status_detail_lines(status: &ConfigUiNativeStatus) -> Vec<Line<'st
     let mut lines = vec![
         Line::from(Span::styled(
             status.label.clone(),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+            bold_fg_style(Color::Cyan),
         )),
         Line::from(""),
         detail_line("surface", &status.surface),
@@ -808,15 +787,15 @@ fn render_footer(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect) {
     let mut controls = raw_line(["q quit  ", "Tab tabs  ", "j/k move  "]);
     controls
         .spans
-        .push(Span::styled(search, Style::default().fg(Color::Yellow)));
+        .push(Span::styled(search, fg_style(Color::Yellow)));
     frame.render_widget(Paragraph::new(vec![notice, controls]), area);
 }
 
 fn notice_line(notice: &ConfigUiNotice, width: usize) -> Line<'static> {
     let style = if notice.is_error {
-        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+        bold_fg_style(Color::Red)
     } else {
-        Style::default().fg(Color::Green)
+        fg_style(Color::Green)
     };
     Line::from(Span::styled(truncate(&notice.text, width), style))
 }
@@ -831,10 +810,10 @@ fn edit_status_line(field: &ConfigUiField, edit: &ConfigUiEditState) -> Line<'st
         ConfigUiEditMode::MultiChoice => multi_choice_status_value(field, edit),
     };
     Line::from(vec![
-        Span::styled("editing: ", Style::default().fg(Color::Yellow)),
+        Span::styled("editing: ", fg_style(Color::Yellow)),
         Span::styled(field.path.clone(), config_key_style()),
         Span::raw(" = "),
-        Span::styled(value, Style::default().fg(Color::White)),
+        Span::styled(value, fg_style(Color::White)),
     ])
 }
 
@@ -905,26 +884,26 @@ pub fn state_label(state: ConfigUiValueState) -> &'static str {
 
 pub fn state_style(state: ConfigUiValueState) -> Style {
     match state {
-        ConfigUiValueState::Explicit => Style::default().fg(Color::Green),
-        ConfigUiValueState::Defaulted => Style::default().fg(Color::Cyan),
-        ConfigUiValueState::Unset => Style::default().fg(Color::Yellow),
-        ConfigUiValueState::Invalid => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ConfigUiValueState::Explicit => fg_style(Color::Green),
+        ConfigUiValueState::Defaulted => fg_style(Color::Cyan),
+        ConfigUiValueState::Unset => fg_style(Color::Yellow),
+        ConfigUiValueState::Invalid => bold_fg_style(Color::Red),
     }
 }
 
 pub fn apply_status_style(status: &ConfigUiApplyStatus) -> Style {
     if status.pending {
-        Style::default().fg(Color::Yellow)
+        fg_style(Color::Yellow)
     } else {
-        Style::default().fg(Color::Green)
+        fg_style(Color::Green)
     }
 }
 
 pub fn sidecar_status_style(present: bool) -> Style {
     if present {
-        Style::default().fg(Color::Green)
+        fg_style(Color::Green)
     } else {
-        Style::default().fg(Color::Gray)
+        fg_style(Color::Gray)
     }
 }
 
@@ -948,37 +927,43 @@ pub fn file_action_status_label(action: &ConfigUiFileAction) -> &'static str {
 
 pub fn file_action_status_style(action: &ConfigUiFileAction) -> Style {
     match file_action_status_label(action) {
-        "error" => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        "existing" => Style::default().fg(Color::Green),
-        _ => Style::default().fg(Color::Yellow),
+        "error" => bold_fg_style(Color::Red),
+        "existing" => fg_style(Color::Green),
+        _ => fg_style(Color::Yellow),
     }
 }
 
 pub fn native_status_style(status: &ConfigUiNativeStatus) -> Style {
     match status.severity.as_str() {
-        "error" => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        "warning" => Style::default().fg(Color::Yellow),
-        "ok" => Style::default().fg(Color::Green),
-        _ => Style::default().fg(Color::Cyan),
+        "error" => bold_fg_style(Color::Red),
+        "warning" => fg_style(Color::Yellow),
+        "ok" => fg_style(Color::Green),
+        _ => fg_style(Color::Cyan),
     }
 }
 
 pub fn column_header_style() -> Style {
-    Style::default()
-        .fg(Color::Yellow)
-        .add_modifier(Modifier::BOLD)
+    bold_fg_style(Color::Yellow)
 }
 
 pub fn metadata_key_style() -> Style {
-    Style::default().fg(Color::LightBlue)
+    fg_style(Color::LightBlue)
 }
 
 pub fn metadata_value_style() -> Style {
-    Style::default().fg(Color::White)
+    fg_style(Color::White)
 }
 
 pub fn config_key_style() -> Style {
-    Style::default().fg(Color::LightCyan)
+    fg_style(Color::LightCyan)
+}
+
+fn fg_style(color: Color) -> Style {
+    Style::default().fg(color)
+}
+
+fn bold_fg_style(color: Color) -> Style {
+    fg_style(color).add_modifier(Modifier::BOLD)
 }
 
 pub fn fixed_label(value: &str, width: usize) -> String {
