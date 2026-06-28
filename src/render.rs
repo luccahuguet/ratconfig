@@ -48,6 +48,9 @@ impl ConfigUiApp {
                 default_field_detail_lines(field)
             }
             UiRowRef::Sidecar(index) => sidecar_detail_lines(&self.model.sidecars[index]),
+            UiRowRef::FileAction(index) => {
+                file_action_detail_lines(&self.model.file_actions[index])
+            }
             UiRowRef::Diagnostic(index) => diagnostic_detail_lines(&self.model.diagnostics[index]),
             UiRowRef::NativeStatus(index) => {
                 native_status_detail_lines(&self.model.native_config_statuses[index])
@@ -406,6 +409,29 @@ pub fn row_line_for_model(model: &ConfigUiModel, row: UiRowRef) -> Line<'static>
                 Span::styled(sidecar.name.clone(), config_key_style()),
             ])
         }
+        UiRowRef::FileAction(index) => {
+            let action = &model.file_actions[index];
+            Line::from(vec![
+                Span::styled(
+                    fixed_label(
+                        file_action_status_label(action),
+                        FIELD_TAKES_EFFECT_COLUMN_WIDTH,
+                    ),
+                    file_action_status_style(action),
+                ),
+                Span::styled(
+                    fixed_label(
+                        &truncate(&action.label, FIELD_SETTING_COLUMN_WIDTH),
+                        FIELD_SETTING_COLUMN_WIDTH,
+                    ),
+                    config_key_style(),
+                ),
+                Span::styled(
+                    truncate(&action.path.display().to_string(), FIELD_VALUE_COLUMN_WIDTH),
+                    Style::default().fg(Color::Gray),
+                ),
+            ])
+        }
         UiRowRef::Diagnostic(index) => {
             let diagnostic = &model.diagnostics[index];
             let style = if diagnostic.blocking {
@@ -631,6 +657,44 @@ pub fn sidecar_detail_lines(sidecar: &ConfigUiSidecar) -> Vec<Line<'static>> {
     ]
 }
 
+pub fn file_action_detail_lines(action: &ConfigUiFileAction) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(Span::styled(
+            action.label.clone(),
+            config_key_style().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        detail_line("source", &action.source_id),
+        detail_line("action", &action.action_id),
+        detail_line("path", &action.path.display().to_string()),
+        detail_line("state", file_action_status_label(action)),
+        detail_line(
+            "write",
+            if action.read_only {
+                "read-only"
+            } else {
+                "writable or absent"
+            },
+        ),
+        detail_line(
+            "create",
+            if action.create_if_missing {
+                "offered when missing"
+            } else {
+                "not offered"
+            },
+        ),
+    ];
+    if let Some(reason) = &action.disabled_reason {
+        lines.push(detail_line("disabled", reason));
+    }
+    if !action.description.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(action.description.clone()));
+    }
+    lines
+}
+
 pub fn diagnostic_detail_lines(diagnostic: &ConfigUiDiagnostic) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::from(Span::styled(
@@ -745,6 +809,13 @@ fn edit_status_line(field: &ConfigUiField, edit: &ConfigUiEditState) -> Line<'st
 }
 
 fn normal_control_line(app: &ConfigUiApp) -> Line<'static> {
+    if let Some(action) = app.selected_file_action() {
+        return if action.disabled_reason.is_some() {
+            Line::from("file action unavailable")
+        } else {
+            Line::from("Enter/e/Space open file")
+        };
+    }
     let Some(field) = app.selected_field() else {
         return Line::from("Select a setting row to edit");
     };
@@ -824,6 +895,30 @@ pub fn sidecar_status_style(present: bool) -> Style {
         Style::default().fg(Color::Green)
     } else {
         Style::default().fg(Color::Yellow)
+    }
+}
+
+pub fn file_action_status_label(action: &ConfigUiFileAction) -> &'static str {
+    if action.disabled_reason.is_some() {
+        "error"
+    } else if action.read_only {
+        "read-only"
+    } else if action.exists {
+        "existing"
+    } else if action.create_if_missing {
+        "missing"
+    } else {
+        "absent"
+    }
+}
+
+pub fn file_action_status_style(action: &ConfigUiFileAction) -> Style {
+    if action.disabled_reason.is_some() {
+        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+    } else if action.read_only || !action.exists {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::Green)
     }
 }
 
@@ -947,6 +1042,7 @@ mod tests {
                 },
                 edit_behavior: ConfigUiEditBehavior::Default,
             }],
+            file_actions: Vec::new(),
             sidecars: Vec::new(),
             native_config_statuses: Vec::new(),
             diagnostics: Vec::new(),
@@ -1111,5 +1207,80 @@ mod tests {
 
         app.model.fields[0].default_value = NO_CONFIG_DEFAULT_VALUE_LABEL.to_string();
         assert!(!rendered_text(&normal_control_line(&app)).contains("reset default"));
+    }
+
+    fn file_action(
+        exists: bool,
+        read_only: bool,
+        create_if_missing: bool,
+        disabled_reason: Option<&str>,
+    ) -> ConfigUiFileAction {
+        ConfigUiFileAction {
+            source_id: "native".to_string(),
+            action_id: "open_native".to_string(),
+            tab: "general".to_string(),
+            label: "Native config".to_string(),
+            description: "Host-owned native config file".to_string(),
+            path: PathBuf::from("/home/alex/.config/acme/native.toml"),
+            exists,
+            read_only,
+            create_if_missing,
+            disabled_reason: disabled_reason.map(str::to_string),
+        }
+    }
+
+    // Defends: file action rows expose missing, existing, read-only, and error states without scalar edit columns.
+    #[test]
+    fn file_action_rows_render_host_file_states() {
+        let mut model = test_model(ConfigUiValueState::Explicit);
+        model.fields.clear();
+        model.file_actions = vec![
+            file_action(true, false, true, None),
+            file_action(false, false, true, None),
+            file_action(true, true, false, None),
+            file_action(false, false, true, Some("Path cannot be resolved")),
+        ];
+
+        assert_eq!(
+            rendered_cells(&row_line_for_model(&model, UiRowRef::FileAction(0))),
+            vec!["existing", "Native config", "/home/alex/.con..."]
+        );
+        assert_eq!(
+            rendered_cells(&row_line_for_model(&model, UiRowRef::FileAction(1))),
+            vec!["missing", "Native config", "/home/alex/.con..."]
+        );
+        assert_eq!(
+            rendered_cells(&row_line_for_model(&model, UiRowRef::FileAction(2))),
+            vec!["read-only", "Native config", "/home/alex/.con..."]
+        );
+        let error_line = row_line_for_model(&model, UiRowRef::FileAction(3));
+        assert_eq!(
+            rendered_cells(&error_line),
+            vec!["error", "Native config", "/home/alex/.con..."]
+        );
+        assert_eq!(
+            error_line.spans[0].style,
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+        );
+    }
+
+    // Defends: file action details show host routing metadata and creation policy.
+    #[test]
+    fn file_action_details_show_host_boundary_metadata() {
+        let action = file_action(false, false, true, Some("Path cannot be resolved"));
+        let details = file_action_detail_lines(&action);
+        let text = details.iter().map(rendered_text).collect::<Vec<_>>();
+
+        assert!(text.iter().any(|line| line.contains("Native config")));
+        assert!(text.iter().any(|line| line.contains("source")));
+        assert!(text.iter().any(|line| line.contains("open_native")));
+        assert!(
+            text.iter()
+                .any(|line| line.contains("offered when missing"))
+        );
+        assert!(
+            text.iter()
+                .any(|line| line.contains("Path cannot be resolved"))
+        );
     }
 }

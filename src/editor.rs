@@ -1,10 +1,12 @@
 // Test lane: default
 
 use super::{
-    ConfigUiEditBehavior, ConfigUiField, ConfigUiModel, UiRowRef, visible_rows_for_tab_search,
+    ConfigUiEditBehavior, ConfigUiField, ConfigUiFileAction, ConfigUiModel, UiRowRef,
+    visible_rows_for_tab_search,
 };
 use serde_json::Value as JsonValue;
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 
 pub struct ConfigUiApp {
     pub model: ConfigUiModel,
@@ -60,6 +62,13 @@ pub enum ConfigUiIntent {
         field_index: usize,
         source_id: String,
         path: String,
+    },
+    OpenFile {
+        file_action_index: usize,
+        source_id: String,
+        action_id: String,
+        path: PathBuf,
+        create_if_missing: bool,
     },
     SetField {
         field_index: usize,
@@ -144,6 +153,19 @@ impl ConfigUiApp {
     pub fn selected_field(&self) -> Option<&ConfigUiField> {
         self.selected_field_index()
             .and_then(|index| self.model.fields.get(index))
+    }
+
+    pub fn selected_file_action_index(&self) -> Option<usize> {
+        let row = self.visible_rows().get(self.selected_row).copied()?;
+        match row {
+            UiRowRef::FileAction(index) => Some(index),
+            _ => None,
+        }
+    }
+
+    pub fn selected_file_action(&self) -> Option<&ConfigUiFileAction> {
+        self.selected_file_action_index()
+            .and_then(|index| self.model.file_actions.get(index))
     }
 
     pub fn notice_info(&mut self, text: impl Into<String>) {
@@ -242,8 +264,8 @@ impl ConfigUiApp {
                 self.move_up();
                 ConfigUiIntent::None
             }
-            ConfigUiKey::Enter | ConfigUiKey::Char(' ') => self.quick_edit_selected_field(),
-            ConfigUiKey::Char('e') => self.begin_edit_selected_field(),
+            ConfigUiKey::Enter | ConfigUiKey::Char(' ') => self.activate_selected_row(),
+            ConfigUiKey::Char('e') => self.edit_or_activate_selected_row(),
             ConfigUiKey::Char('u') => self.return_selected_field_to_default(),
             ConfigUiKey::Tab | ConfigUiKey::Right | ConfigUiKey::Char('l') => {
                 self.next_tab();
@@ -399,6 +421,40 @@ impl ConfigUiApp {
             field_index,
             source_id: field.source_id.clone(),
             path: field.path.clone(),
+        }
+    }
+
+    fn edit_or_activate_selected_row(&mut self) -> ConfigUiIntent {
+        if self.selected_file_action_index().is_some() {
+            return self.activate_selected_file_action();
+        }
+        self.begin_edit_selected_field()
+    }
+
+    fn activate_selected_row(&mut self) -> ConfigUiIntent {
+        if self.selected_file_action_index().is_some() {
+            return self.activate_selected_file_action();
+        }
+        self.quick_edit_selected_field()
+    }
+
+    fn activate_selected_file_action(&mut self) -> ConfigUiIntent {
+        self.notice = None;
+        let Some(file_action_index) = self.selected_file_action_index() else {
+            self.notice_error("Select a file row to open.");
+            return ConfigUiIntent::None;
+        };
+        let action = &self.model.file_actions[file_action_index];
+        if let Some(reason) = &action.disabled_reason {
+            self.notice_error(reason.clone());
+            return ConfigUiIntent::None;
+        }
+        ConfigUiIntent::OpenFile {
+            file_action_index,
+            source_id: action.source_id.clone(),
+            action_id: action.action_id.clone(),
+            path: action.path.clone(),
+            create_if_missing: action.create_if_missing && !action.exists,
         }
     }
 
@@ -830,6 +886,7 @@ mod tests {
                     &["git", "search"],
                 ),
             ],
+            file_actions: Vec::new(),
             sidecars: Vec::new(),
             native_config_statuses: Vec::new(),
             diagnostics: Vec::new(),
@@ -1133,9 +1190,84 @@ mod tests {
                     &["git", "search"],
                 ),
             ],
+            file_actions: Vec::new(),
             sidecars: Vec::new(),
             native_config_statuses: Vec::new(),
             diagnostics: Vec::new(),
         }
+    }
+
+    fn file_action(
+        action_id: &str,
+        path: &str,
+        exists: bool,
+        create_if_missing: bool,
+    ) -> ConfigUiFileAction {
+        ConfigUiFileAction {
+            source_id: "native".to_string(),
+            action_id: action_id.to_string(),
+            tab: "general".to_string(),
+            label: format!("{action_id} config"),
+            description: "Host-owned native config file".to_string(),
+            path: PathBuf::from(path),
+            exists,
+            read_only: false,
+            create_if_missing,
+            disabled_reason: None,
+        }
+    }
+
+    // Defends: file action rows emit stable host-owned open intents for existing and missing files.
+    #[test]
+    fn file_action_rows_emit_open_file_intents() {
+        let mut model = test_model();
+        model.fields.clear();
+        model.file_actions = vec![
+            file_action("existing", "/tmp/acme/existing.toml", true, true),
+            file_action("missing", "/tmp/acme/missing.toml", false, true),
+        ];
+        let mut app = ConfigUiApp::new(model);
+
+        assert_eq!(
+            app.handle_key(ConfigUiKey::Enter),
+            ConfigUiIntent::OpenFile {
+                file_action_index: 0,
+                source_id: "native".to_string(),
+                action_id: "existing".to_string(),
+                path: PathBuf::from("/tmp/acme/existing.toml"),
+                create_if_missing: false,
+            }
+        );
+
+        app.selected_row = 1;
+        assert_eq!(
+            app.handle_key(ConfigUiKey::Char('e')),
+            ConfigUiIntent::OpenFile {
+                file_action_index: 1,
+                source_id: "native".to_string(),
+                action_id: "missing".to_string(),
+                path: PathBuf::from("/tmp/acme/missing.toml"),
+                create_if_missing: true,
+            }
+        );
+    }
+
+    // Defends: disabled file action rows render as actions but do not enter scalar edit flow.
+    #[test]
+    fn disabled_file_action_rows_do_not_emit_edit_or_open_intents() {
+        let mut model = test_model();
+        model.fields.clear();
+        let mut action = file_action("broken", "/tmp/acme/broken.toml", false, true);
+        action.disabled_reason = Some("Native config path is unavailable.".to_string());
+        model.file_actions = vec![action];
+        let mut app = ConfigUiApp::new(model);
+
+        assert_eq!(app.handle_key(ConfigUiKey::Enter), ConfigUiIntent::None);
+        assert_eq!(app.handle_key(ConfigUiKey::Char('e')), ConfigUiIntent::None);
+        assert!(app.edit.is_none());
+        assert_eq!(
+            app.notice.as_ref().map(|notice| notice.text.as_str()),
+            Some("Native config path is unavailable.")
+        );
     }
 }

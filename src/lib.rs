@@ -22,9 +22,10 @@ pub use crossterm_runner::*;
 pub use editor::*;
 pub use model::{
     ConfigUiApplyStatus, ConfigUiContractField, ConfigUiDiagnostic, ConfigUiEditBehavior,
-    ConfigUiField, ConfigUiFieldMetadata, ConfigUiFieldRowSpec, ConfigUiMetadata, ConfigUiModel,
-    ConfigUiNativeStatus, ConfigUiPathOwner, ConfigUiSchemaField, ConfigUiSidecar, ConfigUiSource,
-    ConfigUiValueState, DEFAULT_CONFIG_SOURCE_ID, NO_CONFIG_DEFAULT_VALUE_LABEL,
+    ConfigUiField, ConfigUiFieldMetadata, ConfigUiFieldRowSpec, ConfigUiFileAction,
+    ConfigUiMetadata, ConfigUiModel, ConfigUiNativeStatus, ConfigUiPathOwner, ConfigUiSchemaField,
+    ConfigUiSidecar, ConfigUiSource, ConfigUiValueState, DEFAULT_CONFIG_SOURCE_ID,
+    NO_CONFIG_DEFAULT_VALUE_LABEL,
 };
 pub use model::{
     UiRowRef, build_config_ui_field, collect_config_ui_schema_fields,

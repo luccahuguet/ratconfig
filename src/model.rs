@@ -19,6 +19,7 @@ pub struct ConfigUiModel {
     pub sources: Vec<ConfigUiSource>,
     pub tabs: Vec<String>,
     pub fields: Vec<ConfigUiField>,
+    pub file_actions: Vec<ConfigUiFileAction>,
     pub sidecars: Vec<ConfigUiSidecar>,
     pub native_config_statuses: Vec<ConfigUiNativeStatus>,
     pub diagnostics: Vec<ConfigUiDiagnostic>,
@@ -45,6 +46,7 @@ pub struct ConfigUiSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UiRowRef {
     Field(usize),
+    FileAction(usize),
     Sidecar(usize),
     NativeStatus(usize),
     Diagnostic(usize),
@@ -64,6 +66,7 @@ pub fn visible_rows_for_tab_search(
     if tab == "advanced" {
         return (0..model.diagnostics.len())
             .map(UiRowRef::Diagnostic)
+            .chain(file_action_rows_for_tab(model, tab))
             .chain((0..model.sidecars.len()).map(UiRowRef::Sidecar))
             .chain((0..model.native_config_statuses.len()).map(UiRowRef::NativeStatus))
             .filter(|row| row_matches_search(model, *row, &search))
@@ -73,8 +76,18 @@ pub fn visible_rows_for_tab_search(
     (0..model.fields.len())
         .filter(|index| model.fields[*index].tab == tab)
         .map(UiRowRef::Field)
+        .chain(file_action_rows_for_tab(model, tab))
         .filter(|row| row_matches_search(model, *row, &search))
         .collect()
+}
+
+fn file_action_rows_for_tab<'a>(
+    model: &'a ConfigUiModel,
+    tab: &'a str,
+) -> impl Iterator<Item = UiRowRef> + 'a {
+    (0..model.file_actions.len())
+        .filter(move |index| model.file_actions[*index].tab == tab)
+        .map(UiRowRef::FileAction)
 }
 
 pub fn tab_index(tabs: &[String], tab: &str) -> usize {
@@ -122,6 +135,25 @@ pub struct ConfigUiField {
     pub rebuild_required: bool,
     pub apply_status: ConfigUiApplyStatus,
     pub edit_behavior: ConfigUiEditBehavior,
+}
+
+/// Host-owned config file action row.
+///
+/// Ratconfig renders this row and emits an `OpenFile` intent when activated.
+/// Hosts own path discovery, creation, editor launching, validation, reloads,
+/// and any file IO.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigUiFileAction {
+    pub source_id: String,
+    pub action_id: String,
+    pub tab: String,
+    pub label: String,
+    pub description: String,
+    pub path: PathBuf,
+    pub exists: bool,
+    pub read_only: bool,
+    pub create_if_missing: bool,
+    pub disabled_reason: Option<String>,
 }
 
 impl ConfigUiField {
@@ -530,6 +562,21 @@ fn row_matches_search(model: &ConfigUiModel, row: UiRowRef, search: &str) -> boo
                 ],
             )
         }
+        UiRowRef::FileAction(index) => {
+            let action = &model.file_actions[index];
+            let path = action.path.to_string_lossy();
+            search_matches(
+                search,
+                [
+                    action.source_id.as_str(),
+                    action.action_id.as_str(),
+                    action.label.as_str(),
+                    action.description.as_str(),
+                    path.as_ref(),
+                    action.disabled_reason.as_deref().unwrap_or_default(),
+                ],
+            )
+        }
         UiRowRef::Sidecar(index) => {
             let sidecar = &model.sidecars[index];
             let path = sidecar.path.to_string_lossy();
@@ -692,6 +739,7 @@ mod tests {
                 "advanced".to_string(),
             ],
             fields: Vec::new(),
+            file_actions: Vec::new(),
             sidecars: Vec::new(),
             native_config_statuses: Vec::new(),
             diagnostics: Vec::new(),
@@ -900,5 +948,67 @@ help = "Theme name"
             ConfigUiEditBehavior::FriendlyStringList
         );
         assert_eq!(field.apply_status.summary, "after save");
+    }
+
+    // Defends: host-owned file action rows join tab/search rows without becoming scalar settings.
+    #[test]
+    fn file_action_rows_are_visible_and_searchable_by_host_metadata() {
+        let model = ConfigUiModel {
+            active_config_path: PathBuf::from("/tmp/acme/settings.jsonc"),
+            cursor_config_path: PathBuf::new(),
+            default_cursor_config_path: PathBuf::new(),
+            active_config_exists: true,
+            config_owner: ConfigUiPathOwner::User,
+            config_read_only: false,
+            sources: Vec::new(),
+            tabs: vec!["general".to_string(), "advanced".to_string()],
+            fields: vec![build_config_ui_field(spec(None, None, false))],
+            file_actions: vec![
+                ConfigUiFileAction {
+                    source_id: "native".to_string(),
+                    action_id: "open_prompt".to_string(),
+                    tab: "general".to_string(),
+                    label: "Prompt config".to_string(),
+                    description: "Open the native prompt config".to_string(),
+                    path: PathBuf::from("/home/alex/.config/acme/prompt.toml"),
+                    exists: false,
+                    read_only: false,
+                    create_if_missing: true,
+                    disabled_reason: None,
+                },
+                ConfigUiFileAction {
+                    source_id: "native".to_string(),
+                    action_id: "open_native_logs".to_string(),
+                    tab: "advanced".to_string(),
+                    label: "Native logs".to_string(),
+                    description: "Open the host-owned native log config".to_string(),
+                    path: PathBuf::from("/home/alex/.config/acme/logs.toml"),
+                    exists: true,
+                    read_only: false,
+                    create_if_missing: false,
+                    disabled_reason: None,
+                },
+            ],
+            sidecars: Vec::new(),
+            native_config_statuses: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+
+        assert_eq!(
+            visible_rows_for_tab_search(&model, 0, ""),
+            vec![UiRowRef::Field(0), UiRowRef::FileAction(0)]
+        );
+        assert_eq!(
+            visible_rows_for_tab_search(&model, 0, "prompt"),
+            vec![UiRowRef::FileAction(0)]
+        );
+        assert_eq!(
+            visible_rows_for_tab_search(&model, 1, ""),
+            vec![UiRowRef::FileAction(1)]
+        );
+        assert_eq!(
+            visible_rows_for_tab_search(&model, 1, "logs"),
+            vec![UiRowRef::FileAction(1)]
+        );
     }
 }

@@ -283,6 +283,7 @@ mod tests {
                 field("server.enabled", "bool", "false", &[]),
                 field("ui.theme", "string", "\"light\"", &["light", "dark"]),
             ],
+            file_actions: Vec::new(),
             sidecars: Vec::new(),
             native_config_statuses: Vec::new(),
             diagnostics: Vec::new(),

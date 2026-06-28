@@ -13,6 +13,7 @@ Example host integration in Yazelix: ratconfig owns the reusable tabs, rows, edi
 - generic config document and field model
 - tabs, visible rows, search, selection, notices, and edit state
 - staged bool toggles, scalar editing, single-select, multiselect, and default reset controls
+- host-routed file action rows for native config files
 - generic Ratatui rendering for the model
 - optional host-supplied rich detail rendering callbacks
 - comment-preserving JSONC and TOML set/unset patch primitives
@@ -25,6 +26,7 @@ Example host integration in Yazelix: ratconfig owns the reusable tabs, rows, edi
 - deciding which fields exist and how they are grouped
 - validation and diagnostics
 - file IO and atomic writes
+- native config file creation and editor launching for file action rows
 - mapping ratconfig errors into application-specific errors
 - applying saved settings to a live runtime
 - any product-specific detail text, commands, keybindings, or ownership policy
@@ -75,6 +77,7 @@ fn model() -> ConfigUiModel {
             },
             edit_behavior: ConfigUiEditBehavior::Default,
         }],
+        file_actions: Vec::new(),
         sidecars: Vec::new(),
         native_config_statuses: Vec::new(),
         diagnostics: Vec::new(),
@@ -99,6 +102,8 @@ Use `ConfigUiField::display_label` when row and detail text should be friendlier
 
 Fields with defaults expose a reset-to-default action that emits `ConfigUiIntent::UnsetField`. Hosts decide whether that means unsetting text, writing a default, validation, persistence, reloads, and apply behavior. Use `NO_CONFIG_DEFAULT_VALUE_LABEL` for manually constructed fields that have no default; builder helpers set it automatically
 
+Populate `ConfigUiModel::file_actions` when the UI should show rows for host-owned native config files. Ratconfig renders label, path, missing/read-only/error state, and create-if-missing affordance, then emits `ConfigUiIntent::OpenFile`; hosts still own file discovery, creation, editor launch, validation, reloads, and all file IO
+
 Hosts that want ratconfig to own the crossterm terminal setup, draw loop, event reads, and key conversion can enable the optional runner:
 
 ```toml
@@ -122,6 +127,9 @@ fn run_editor(mut app: ConfigUiApp) -> Result<(), Box<dyn std::error::Error>> {
             ConfigUiIntent::UnsetField { source_id, path, .. } => {
                 host_unset_and_reload(&source_id, &path)?;
             }
+            ConfigUiIntent::OpenFile { path, create_if_missing, .. } => {
+                host_open_file(&path, create_if_missing)?;
+            }
             ConfigUiIntent::None | ConfigUiIntent::Exit => {}
         }
         Ok::<(), Box<dyn std::error::Error>>(())
@@ -140,6 +148,13 @@ fn host_validate_and_write(
 fn host_unset_and_reload(
     _source_id: &str,
     _path: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    Ok(())
+}
+
+fn host_open_file(
+    _path: &std::path::Path,
+    _create_if_missing: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
