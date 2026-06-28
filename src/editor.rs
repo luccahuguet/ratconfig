@@ -118,13 +118,18 @@ impl ConfigUiApp {
 
     pub fn move_down(&mut self) {
         let len = self.visible_rows().len();
+        self.clamp_selection_for_len(len);
         if len > 0 {
-            self.selected_row = (self.selected_row + 1).min(len - 1);
+            self.selected_row = (self.selected_row + 1) % len;
         }
     }
 
     pub fn move_up(&mut self) {
-        self.selected_row = self.selected_row.saturating_sub(1);
+        let len = self.visible_rows().len();
+        self.clamp_selection_for_len(len);
+        if len > 0 {
+            self.selected_row = self.selected_row.checked_sub(1).unwrap_or(len - 1);
+        }
     }
 
     pub fn clamp_selection(&mut self) {
@@ -1121,6 +1126,30 @@ mod tests {
         assert!(app.search.is_empty());
         assert_eq!(app.handle_key(ConfigUiKey::Enter), ConfigUiIntent::None);
         assert!(!app.search_active);
+    }
+
+    // Defends: vertical row navigation wraps within the visible rows and stays stable for empty views.
+    #[test]
+    fn reducer_wraps_vertical_row_navigation() {
+        let mut app = ConfigUiApp::new(test_model());
+        let last_row = app.visible_rows().len() - 1;
+
+        app.move_up();
+        assert_eq!(app.selected_row, last_row);
+        app.move_down();
+        assert_eq!(app.selected_row, 0);
+
+        app.selected_row = last_row;
+        app.move_down();
+        assert_eq!(app.selected_row, 0);
+        app.move_up();
+        assert_eq!(app.selected_row, last_row);
+
+        app.search = "no matching rows".to_string();
+        app.move_down();
+        assert_eq!(app.selected_row, 0);
+        app.move_up();
+        assert_eq!(app.selected_row, 0);
     }
 
     // Defends: single-select and multiselect edit keys are generic reducer behavior.
