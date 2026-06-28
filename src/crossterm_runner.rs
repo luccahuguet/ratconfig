@@ -218,6 +218,11 @@ mod tests {
         app.selected_row = 0;
         assert_eq!(
             handle_crossterm_key(&mut app, key(KeyCode::Char(' '), KeyModifiers::NONE)),
+            ConfigUiIntent::None
+        );
+        assert_eq!(app.edit.as_ref().expect("staged bool").input, "true");
+        assert_eq!(
+            handle_crossterm_key(&mut app, key(KeyCode::Enter, KeyModifiers::NONE)),
             ConfigUiIntent::SetField {
                 field_index: 0,
                 source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),

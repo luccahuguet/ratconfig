@@ -778,7 +778,7 @@ fn edit_status_line(field: &ConfigUiField, edit: &ConfigUiEditState) -> Line<'st
 fn normal_control_line(app: &ConfigUiApp) -> Line<'static> {
     match app.selected_field() {
         Some(field) if is_bool_field(field) => Line::from(vec![
-            Span::raw("Enter/Space toggle  "),
+            Span::raw("Enter/Space stage  "),
             Span::raw("e edit  "),
             Span::raw("u unset"),
         ]),

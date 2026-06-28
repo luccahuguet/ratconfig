@@ -430,12 +430,9 @@ impl ConfigUiApp {
         };
         let field = &self.model.fields[field_index];
         if is_bool_field(field) {
-            ConfigUiIntent::SetField {
-                field_index,
-                source_id: field.source_id.clone(),
-                path: field.path.clone(),
-                value: JsonValue::Bool(!field_bool_value(field).unwrap_or(false)),
-            }
+            self.begin_edit_field(field_index);
+            self.cycle_choice_edit();
+            ConfigUiIntent::None
         } else {
             self.begin_edit_selected_field()
         }
@@ -914,8 +911,15 @@ mod tests {
         );
 
         app.selected_row = 0;
+        assert_eq!(app.handle_key(ConfigUiKey::Char(' ')), ConfigUiIntent::None);
+        assert_eq!(app.edit.as_ref().expect("staged bool").input, "true");
+        assert_eq!(app.handle_key(ConfigUiKey::Esc), ConfigUiIntent::None);
+        assert!(app.edit.is_none());
+
+        assert_eq!(app.handle_key(ConfigUiKey::Enter), ConfigUiIntent::None);
+        assert_eq!(app.edit.as_ref().expect("staged bool").input, "true");
         assert_eq!(
-            app.handle_key(ConfigUiKey::Char(' ')),
+            app.handle_key(ConfigUiKey::Enter),
             ConfigUiIntent::SetField {
                 field_index: 0,
                 source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
@@ -923,6 +927,7 @@ mod tests {
                 value: json!(true),
             }
         );
+        app.finish_successful_write();
         assert_eq!(app.handle_key(ConfigUiKey::Esc), ConfigUiIntent::Exit);
     }
 
@@ -938,8 +943,10 @@ mod tests {
         model.fields[1].display_label = "Window title".to_string();
         let mut app = ConfigUiApp::new(model);
 
+        assert_eq!(app.handle_key(ConfigUiKey::Char(' ')), ConfigUiIntent::None);
+        assert_eq!(app.edit.as_ref().expect("staged bool").input, "true");
         assert_eq!(
-            app.handle_key(ConfigUiKey::Char(' ')),
+            app.handle_key(ConfigUiKey::Enter),
             ConfigUiIntent::SetField {
                 field_index: 0,
                 source_id: "server".to_string(),
@@ -947,6 +954,7 @@ mod tests {
                 value: json!(true),
             }
         );
+        app.finish_successful_write();
 
         app.selected_row = 1;
         assert_eq!(

@@ -12,7 +12,7 @@ Example host integration in Yazelix: ratconfig owns the reusable tabs, rows, edi
 
 - generic config document and field model
 - tabs, visible rows, search, selection, notices, and edit state
-- bool toggles, scalar editing, single-select, and multiselect controls
+- staged bool toggles, scalar editing, single-select, and multiselect controls
 - generic Ratatui rendering for the model
 - optional host-supplied rich detail rendering callbacks
 - comment-preserving JSONC and TOML set/unset patch primitives
