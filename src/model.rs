@@ -491,23 +491,18 @@ fn collect_schema_fields(schema: &JsonValue, path: &str, out: &mut Vec<ConfigUiS
         return;
     }
 
-    if kind == "array"
-        && let Some(items) = schema.get("items")
-        && items.get("type").and_then(JsonValue::as_str) == Some("object")
+    let field_kind = if kind == "array"
+        && schema
+            .get("items")
+            .and_then(|items| items.get("type"))
+            .and_then(JsonValue::as_str)
+            == Some("string")
     {
-        out.push(schema_field(schema, path, kind));
-        return;
-    }
-
-    if kind == "array"
-        && let Some(items) = schema.get("items")
-        && items.get("type").and_then(JsonValue::as_str) == Some("string")
-    {
-        out.push(schema_field(schema, path, "string_list"));
-        return;
-    }
-
-    out.push(schema_field(schema, path, kind));
+        "string_list"
+    } else {
+        kind
+    };
+    out.push(schema_field(schema, path, field_kind));
 }
 
 fn schema_field(schema: &JsonValue, path: &str, kind: &str) -> ConfigUiSchemaField {

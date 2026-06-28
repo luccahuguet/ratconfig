@@ -329,29 +329,17 @@ fn list_layout(app: &ConfigUiApp) -> ListLayout {
 
 fn field_list_header_line() -> Line<'static> {
     Line::from(vec![
-        Span::styled(
-            fixed_label("takes effect", FIELD_TAKES_EFFECT_COLUMN_WIDTH),
-            column_header_style(),
-        ),
-        Span::styled(
-            fixed_label("setting", FIELD_SETTING_COLUMN_WIDTH),
-            column_header_style(),
-        ),
-        Span::styled("value", column_header_style()),
+        column_header(fixed_label("takes effect", FIELD_TAKES_EFFECT_COLUMN_WIDTH)),
+        column_header(fixed_label("setting", FIELD_SETTING_COLUMN_WIDTH)),
+        column_header("value"),
     ])
 }
 
 fn status_list_header_line() -> Line<'static> {
     Line::from(vec![
-        Span::styled(
-            status_column_cell("status", STATUS_COLUMN_WIDTH),
-            column_header_style(),
-        ),
-        Span::styled(
-            status_column_cell("item", STATUS_ITEM_COLUMN_WIDTH),
-            column_header_style(),
-        ),
-        Span::styled("detail", column_header_style()),
+        column_header(status_column_cell("status", STATUS_COLUMN_WIDTH)),
+        column_header(status_column_cell("item", STATUS_ITEM_COLUMN_WIDTH)),
+        column_header("detail"),
     ])
 }
 
@@ -385,23 +373,14 @@ fn row_line_for_layout(model: &ConfigUiModel, row: UiRowRef, layout: ListLayout)
     match row {
         UiRowRef::Field(index) => {
             let field = &model.fields[index];
-            Line::from(vec![
-                Span::styled(
-                    fixed_label(&field.apply_status.summary, FIELD_TAKES_EFFECT_COLUMN_WIDTH),
-                    apply_status_style(&field.apply_status),
-                ),
-                Span::styled(
-                    fixed_label(
-                        &truncate(field_display_label(field), FIELD_SETTING_COLUMN_WIDTH),
-                        FIELD_SETTING_COLUMN_WIDTH,
-                    ),
-                    field_style(field, config_key_style()),
-                ),
-                Span::styled(
-                    truncate(&field.current_value, FIELD_VALUE_COLUMN_WIDTH),
-                    field_style(field, fg_style(Color::Gray)),
-                ),
-            ])
+            field_row_line(
+                &field.apply_status.summary,
+                apply_status_style(&field.apply_status),
+                field_display_label(field),
+                field_style(field, config_key_style()),
+                &field.current_value,
+                field_style(field, fg_style(Color::Gray)),
+            )
         }
         UiRowRef::Sidecar(index) => {
             let sidecar = &model.sidecars[index];
@@ -415,26 +394,14 @@ fn row_line_for_layout(model: &ConfigUiModel, row: UiRowRef, layout: ListLayout)
         UiRowRef::FileAction(index) => {
             let action = &model.file_actions[index];
             match layout {
-                ListLayout::Field => Line::from(vec![
-                    Span::styled(
-                        fixed_label(
-                            file_action_status_label(action),
-                            FIELD_TAKES_EFFECT_COLUMN_WIDTH,
-                        ),
-                        file_action_status_style(action),
-                    ),
-                    Span::styled(
-                        fixed_label(
-                            &truncate(&action.label, FIELD_SETTING_COLUMN_WIDTH),
-                            FIELD_SETTING_COLUMN_WIDTH,
-                        ),
-                        config_key_style(),
-                    ),
-                    Span::styled(
-                        truncate(&action.path.display().to_string(), FIELD_VALUE_COLUMN_WIDTH),
-                        fg_style(Color::Gray),
-                    ),
-                ]),
+                ListLayout::Field => field_row_line(
+                    file_action_status_label(action),
+                    file_action_status_style(action),
+                    &action.label,
+                    config_key_style(),
+                    &action.path.display().to_string(),
+                    fg_style(Color::Gray),
+                ),
                 ListLayout::Status => status_row_line(
                     file_action_status_label(action),
                     file_action_status_style(action),
@@ -467,6 +434,34 @@ fn row_line_for_layout(model: &ConfigUiModel, row: UiRowRef, layout: ListLayout)
             )
         }
     }
+}
+
+fn column_header(value: impl Into<String>) -> Span<'static> {
+    Span::styled(value.into(), column_header_style())
+}
+
+fn field_row_line(
+    status: &str,
+    status_style: Style,
+    setting: &str,
+    setting_style: Style,
+    value: &str,
+    value_style: Style,
+) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            fixed_label(status, FIELD_TAKES_EFFECT_COLUMN_WIDTH),
+            status_style,
+        ),
+        Span::styled(
+            fixed_label(
+                &truncate(setting, FIELD_SETTING_COLUMN_WIDTH),
+                FIELD_SETTING_COLUMN_WIDTH,
+            ),
+            setting_style,
+        ),
+        Span::styled(truncate(value, FIELD_VALUE_COLUMN_WIDTH), value_style),
+    ])
 }
 
 fn status_row_line(
