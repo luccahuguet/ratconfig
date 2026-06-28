@@ -323,12 +323,12 @@ impl ConfigUiApp {
                 self.save_edit()
             }
             ConfigUiKey::Enter => self.save_edit(),
-            ConfigUiKey::Ctrl('k' | 'K') if ordered_string_list => {
+            ConfigUiKey::Char('K') if ordered_string_list => {
                 self.notice = None;
                 self.move_ordered_string_list_edit(-1);
                 ConfigUiIntent::None
             }
-            ConfigUiKey::Ctrl('j' | 'J') if ordered_string_list => {
+            ConfigUiKey::Char('J') if ordered_string_list => {
                 self.notice = None;
                 self.move_ordered_string_list_edit(1);
                 ConfigUiIntent::None
@@ -1227,12 +1227,12 @@ mod tests {
 
         app.begin_edit_field(0);
         assert_eq!(app.edit.as_ref().expect("ordered edit").choice_index, 1);
-        assert_eq!(app.handle_key(ConfigUiKey::Ctrl('j')), ConfigUiIntent::None);
+        assert_eq!(app.handle_key(ConfigUiKey::Char('J')), ConfigUiIntent::None);
         assert_eq!(
             app.edit.as_ref().expect("ordered edit").input,
             r#"["clock","status"]"#
         );
-        assert_eq!(app.handle_key(ConfigUiKey::Ctrl('k')), ConfigUiIntent::None);
+        assert_eq!(app.handle_key(ConfigUiKey::Char('K')), ConfigUiIntent::None);
         assert_eq!(
             app.handle_key(ConfigUiKey::Enter),
             ConfigUiIntent::SetField {

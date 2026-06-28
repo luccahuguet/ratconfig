@@ -149,6 +149,10 @@ mod tests {
         assert_key(KeyCode::Right, ConfigUiKey::Right);
         assert_key(KeyCode::Char('j'), ConfigUiKey::Char('j'));
         assert_eq!(
+            crossterm_key_to_config_ui_key(key(KeyCode::Char('J'), KeyModifiers::SHIFT)),
+            Some(ConfigUiKey::Char('J'))
+        );
+        assert_eq!(
             crossterm_key_to_config_ui_key(key(KeyCode::Char('u'), KeyModifiers::CONTROL)),
             Some(ConfigUiKey::Ctrl('u'))
         );

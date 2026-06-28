@@ -871,7 +871,7 @@ fn edit_control_line(field: &ConfigUiField, mode: ConfigUiEditMode) -> Line<'sta
         ConfigUiEditMode::MultiChoice if is_ordered_string_list_field(field) => raw_line([
             "hjkl/Arrows move  ",
             "Space toggle  ",
-            "Ctrl+j/k reorder  ",
+            "J/K reorder  ",
             "Enter save  ",
             "Esc cancel",
         ]),
@@ -1354,7 +1354,7 @@ mod tests {
         );
         assert!(
             rendered_text(&edit_control_line(field, ConfigUiEditMode::MultiChoice))
-                .contains("Ctrl+j/k reorder")
+                .contains("J/K reorder")
         );
     }
 
