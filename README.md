@@ -102,6 +102,53 @@ Use `ConfigUiField::display_label` when row and detail text should be friendlier
 
 Fields with defaults expose a reset-to-default action that emits `ConfigUiIntent::UnsetField`. Hosts decide whether that means unsetting text, writing a default, validation, persistence, reloads, and apply behavior. Use `NO_CONFIG_DEFAULT_VALUE_LABEL` for manually constructed fields that have no default; builder helpers set it automatically
 
+## String-List Choices
+
+Use `build_string_list_choice_field` for string-list settings whose values must come from a host-defined allowed set. `ConfigUiEditBehavior::Default` keeps edited values in allowed-value order; `ConfigUiEditBehavior::OrderedStringList` preserves the host-provided order and enables reorder controls in the picker
+
+```rust
+use ratconfig::{
+    ConfigUiApplyStatus, ConfigUiEditBehavior, ConfigUiField, ConfigUiStringListChoiceSpec,
+    build_string_list_choice_field,
+    toml_adapter::{TomlPatchError, set_toml_value_text},
+};
+use serde_json::Value;
+
+fn sections_field() -> Result<ConfigUiField, String> {
+    build_string_list_choice_field(ConfigUiStringListChoiceSpec {
+        source_id: "settings".to_string(),
+        path: "layout.sections".to_string(),
+        display_label: "Layout sections".to_string(),
+        tab: "layout".to_string(),
+        current: Some(vec!["left".to_string(), "center".to_string()]),
+        default: Some(vec!["center".to_string()]),
+        description: "Choose visible layout sections".to_string(),
+        allowed_values: vec![
+            "left".to_string(),
+            "center".to_string(),
+            "right".to_string(),
+        ],
+        validation: "known layout section ids only".to_string(),
+        rebuild_required: false,
+        apply_status: ConfigUiApplyStatus {
+            summary: "after save".to_string(),
+            label: "after save".to_string(),
+            detail: "Reload the application to apply this value".to_string(),
+            pending: true,
+        },
+        has_blocking_diagnostic: false,
+        edit_behavior: ConfigUiEditBehavior::OrderedStringList,
+    })
+}
+
+fn patch_sections_toml(raw: &str, value: &Value) -> Result<String, TomlPatchError> {
+    let outcome = set_toml_value_text(raw, "layout.sections", value)?;
+    Ok(outcome.text)
+}
+```
+
+`ConfigUiIntent::SetField` supplies the edited `serde_json::Value`; the host validates that value against its own schema, calls the TOML patcher or its own writer, writes atomically, reloads the model, and applies any runtime policy it owns
+
 Populate `ConfigUiModel::file_actions` when the UI should show rows for host-owned native config files. Ratconfig renders label, path, missing/read-only/error state, and create-if-missing affordance, then emits `ConfigUiIntent::OpenFile`; hosts still own file discovery, creation, editor launch, validation, reloads, and all file IO
 
 Hosts that want ratconfig to own the crossterm terminal setup, draw loop, event reads, and key conversion can enable the optional runner:
