@@ -713,12 +713,10 @@ fn render_footer(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect) {
     } else {
         "Esc clears search".to_string()
     };
-    let controls = Line::from(vec![
-        Span::raw("q quit  "),
-        Span::raw("Tab tabs  "),
-        Span::raw("j/k move  "),
-        Span::styled(search, Style::default().fg(Color::Yellow)),
-    ]);
+    let mut controls = raw_line(["q quit  ", "Tab tabs  ", "j/k move  "]);
+    controls
+        .spans
+        .push(Span::styled(search, Style::default().fg(Color::Yellow)));
     frame.render_widget(Paragraph::new(vec![notice, controls]), area);
 }
 
@@ -749,57 +747,52 @@ fn edit_status_line(field: &ConfigUiField, edit: &ConfigUiEditState) -> Line<'st
 }
 
 fn normal_control_line(app: &ConfigUiApp) -> Line<'static> {
-    match app.selected_field() {
-        Some(field) if is_bool_field(field) => {
-            setting_control_line("Enter/Space stage  e edit", field)
-        }
-        Some(field) if is_scalar_enum_field(field) => {
-            setting_control_line("Enter/e/Space picker", field)
-        }
-        Some(field) if is_enum_string_list_field(field) => {
-            setting_control_line("Enter/e picker", field)
-        }
-        Some(field) if structured_only_edit_notice(field).is_some() => {
-            setting_control_line("structured view only", field)
-        }
-        Some(field) => setting_control_line("Enter/e edit", field),
-        None => Line::from(Span::raw("Select a setting row to edit")),
-    }
+    let Some(field) = app.selected_field() else {
+        return Line::from("Select a setting row to edit");
+    };
+    let primary = if is_bool_field(field) {
+        "Enter/Space stage  e edit"
+    } else if is_scalar_enum_field(field) {
+        "Enter/e/Space picker"
+    } else if is_enum_string_list_field(field) {
+        "Enter/e picker"
+    } else if structured_only_edit_notice(field).is_some() {
+        "structured view only"
+    } else {
+        "Enter/e edit"
+    };
+    setting_control_line(primary, field)
 }
 
 fn setting_control_line(primary: &'static str, field: &ConfigUiField) -> Line<'static> {
-    let mut spans = vec![Span::raw(primary)];
     if field.has_default_value() {
-        spans.push(Span::raw("  u reset default"));
+        raw_line([primary, "  u reset default"])
+    } else {
+        Line::from(primary)
     }
-    Line::from(spans)
 }
 
 fn edit_control_line(field: &ConfigUiField, mode: ConfigUiEditMode) -> Line<'static> {
     match mode {
-        ConfigUiEditMode::Text => Line::from(vec![
-            Span::raw("Enter save  "),
-            Span::raw("Esc cancel  "),
-            Span::raw("Ctrl+u clear"),
+        ConfigUiEditMode::Text => raw_line(["Enter save  ", "Esc cancel  ", "Ctrl+u clear"]),
+        ConfigUiEditMode::Choice if is_scalar_enum_field(field) => raw_line([
+            "hjkl/Arrows move  ",
+            "Space select  ",
+            "Enter save  ",
+            "Esc cancel",
         ]),
-        ConfigUiEditMode::Choice if is_scalar_enum_field(field) => Line::from(vec![
-            Span::raw("hjkl/Arrows move  "),
-            Span::raw("Space select  "),
-            Span::raw("Enter save  "),
-            Span::raw("Esc cancel"),
-        ]),
-        ConfigUiEditMode::Choice => Line::from(vec![
-            Span::raw("Space toggle  "),
-            Span::raw("Enter save  "),
-            Span::raw("Esc cancel"),
-        ]),
-        ConfigUiEditMode::MultiChoice => Line::from(vec![
-            Span::raw("hjkl/Arrows move  "),
-            Span::raw("Space enable/disable  "),
-            Span::raw("Enter save  "),
-            Span::raw("Esc cancel"),
+        ConfigUiEditMode::Choice => raw_line(["Space toggle  ", "Enter save  ", "Esc cancel"]),
+        ConfigUiEditMode::MultiChoice => raw_line([
+            "hjkl/Arrows move  ",
+            "Space enable/disable  ",
+            "Enter save  ",
+            "Esc cancel",
         ]),
     }
+}
+
+fn raw_line<const N: usize>(parts: [&'static str; N]) -> Line<'static> {
+    Line::from(parts.into_iter().map(Span::raw).collect::<Vec<_>>())
 }
 
 pub fn state_label(state: ConfigUiValueState) -> &'static str {

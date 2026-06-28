@@ -214,7 +214,7 @@ impl ConfigUiApp {
             ConfigUiKey::Backspace => {
                 self.search.pop();
             }
-            ConfigUiKey::Ctrl('u') | ConfigUiKey::Ctrl('U') => {
+            ConfigUiKey::Ctrl('u' | 'U') => {
                 self.search.clear();
             }
             ConfigUiKey::Char(ch) => {
@@ -271,9 +271,7 @@ impl ConfigUiApp {
             ConfigUiKey::Esc => self.cancel_edit(),
             ConfigUiKey::Enter => self.save_edit(),
             ConfigUiKey::Backspace => self.update_edit_input(String::pop),
-            ConfigUiKey::Ctrl('u') | ConfigUiKey::Ctrl('U') => {
-                self.update_edit_input(String::clear)
-            }
+            ConfigUiKey::Ctrl('u' | 'U') => self.update_edit_input(String::clear),
             ConfigUiKey::Char(ch) => self.update_edit_input(|input| input.push(ch)),
             _ => ConfigUiIntent::None,
         }
@@ -297,20 +295,14 @@ impl ConfigUiApp {
                 self.save_edit()
             }
             ConfigUiKey::Enter => self.save_edit(),
-            ConfigUiKey::Up
-            | ConfigUiKey::Left
-            | ConfigUiKey::Char('k')
-            | ConfigUiKey::Char('h')
+            ConfigUiKey::Up | ConfigUiKey::Left | ConfigUiKey::Char('k' | 'h')
                 if scalar_enum || multi_choice =>
             {
                 self.notice = None;
                 self.move_choice_edit(-1);
                 ConfigUiIntent::None
             }
-            ConfigUiKey::Down
-            | ConfigUiKey::Right
-            | ConfigUiKey::Char('j')
-            | ConfigUiKey::Char('l')
+            ConfigUiKey::Down | ConfigUiKey::Right | ConfigUiKey::Char('j' | 'l')
                 if scalar_enum || multi_choice =>
             {
                 self.notice = None;

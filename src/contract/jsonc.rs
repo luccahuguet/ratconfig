@@ -1,11 +1,10 @@
 use super::{
     AppliedContractChange, ConfigContract, ContractApplyOutcome, ContractError,
     ContractJoinOutcome, ContractState, append_applied_change_ids, apply_contract_with,
-    contract_state_to_json, new_joined_state, validate_contract,
+    contract_state_to_json, join_outcome, new_joined_state, validate_contract,
 };
 use crate::jsonc::{PatchError, PatchOutcome, parse_jsonc_value, set_jsonc_value_text};
 use crate::migration::apply_migrations_text;
-use crate::patch::PatchMutation;
 use serde_json::Value as JsonValue;
 
 impl From<PatchError> for ContractError {
@@ -126,18 +125,4 @@ fn write_jsonc_joined_state(
         applied_changes,
         state_patch.mutation,
     ))
-}
-
-fn join_outcome(
-    text: String,
-    state: ContractState,
-    applied_changes: Vec<AppliedContractChange>,
-    state_mutation: PatchMutation,
-) -> ContractJoinOutcome {
-    ContractJoinOutcome {
-        text,
-        state,
-        applied_changes,
-        state_mutation,
-    }
 }

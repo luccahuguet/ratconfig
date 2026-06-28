@@ -415,14 +415,14 @@ fn collect_schema_fields(schema: &JsonValue, path: &str, out: &mut Vec<ConfigUiS
         && let Some(items) = schema.get("items")
         && items.get("type").and_then(JsonValue::as_str) == Some("string")
     {
-        out.push(schema_field(schema, path, "string_list".to_string()));
+        out.push(schema_field(schema, path, "string_list"));
         return;
     }
 
     out.push(schema_field(schema, path, kind));
 }
 
-fn schema_field(schema: &JsonValue, path: &str, kind: String) -> ConfigUiSchemaField {
+fn schema_field(schema: &JsonValue, path: &str, kind: &str) -> ConfigUiSchemaField {
     let allowed_values = if kind == "string_list" {
         schema
             .get("items")
@@ -433,17 +433,16 @@ fn schema_field(schema: &JsonValue, path: &str, kind: String) -> ConfigUiSchemaF
     };
     ConfigUiSchemaField {
         path: path.to_string(),
-        kind,
+        kind: kind.to_string(),
         allowed_values,
     }
 }
 
-fn schema_type(schema: &JsonValue) -> String {
+fn schema_type(schema: &JsonValue) -> &str {
     schema
         .get("type")
         .and_then(JsonValue::as_str)
         .unwrap_or("unknown")
-        .to_string()
 }
 
 fn schema_enum_values(schema: &JsonValue) -> Vec<String> {

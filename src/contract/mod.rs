@@ -154,6 +154,20 @@ impl ContractJoinOutcome {
     }
 }
 
+fn join_outcome(
+    text: String,
+    state: ContractState,
+    applied_changes: Vec<AppliedContractChange>,
+    state_mutation: PatchMutation,
+) -> ContractJoinOutcome {
+    ContractJoinOutcome {
+        text,
+        state,
+        applied_changes,
+        state_mutation,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContractError {
     InvalidContract {

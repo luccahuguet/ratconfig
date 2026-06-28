@@ -3,9 +3,8 @@
 use super::{
     AppliedContractChange, ConfigContract, ContractApplyOutcome, ContractError,
     ContractJoinOutcome, ContractState, append_applied_change_ids, apply_contract_with,
-    contract_state_to_json, new_joined_state, validate_contract,
+    contract_state_to_json, join_outcome, new_joined_state, validate_contract,
 };
-use crate::patch::PatchMutation;
 use crate::toml_adapter::{
     TomlPatchError, TomlPatchOutcome, apply_toml_migrations_text, get_toml_path, parse_toml_value,
     set_toml_value_text,
@@ -130,20 +129,6 @@ fn write_toml_joined_state(
         applied_changes,
         state_patch.mutation,
     ))
-}
-
-fn join_outcome(
-    text: String,
-    state: ContractState,
-    applied_changes: Vec<AppliedContractChange>,
-    state_mutation: PatchMutation,
-) -> ContractJoinOutcome {
-    ContractJoinOutcome {
-        text,
-        state,
-        applied_changes,
-        state_mutation,
-    }
 }
 
 #[cfg(test)]
