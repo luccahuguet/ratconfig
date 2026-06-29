@@ -660,11 +660,10 @@ pub fn multi_choice_detail_lines(
     }
     lines.push(Line::from(""));
 
-    for (index, value) in field.allowed_values.iter().enumerate() {
-        let selected = index
-            == edit
-                .choice_index
-                .min(field.allowed_values.len().saturating_sub(1));
+    let choices = string_list_choice_values(field, &edit.input)
+        .unwrap_or_else(|_| field.allowed_values.clone());
+    for (index, value) in choices.iter().enumerate() {
+        let selected = index == edit.choice_index.min(choices.len().saturating_sub(1));
         let enabled = enabled_set.contains(value);
         lines.push(choice_option_line(
             value,
@@ -1499,11 +1498,22 @@ mod tests {
         };
 
         assert!(multi_choice_status_value(field, &edit).contains("order status, clock"));
+        let detail = multi_choice_detail_lines(field, &edit)
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>();
         assert!(
-            multi_choice_detail_lines(field, &edit)
+            detail
                 .iter()
-                .map(rendered_text)
                 .any(|line| line.contains("order") && line.contains("status, clock"))
+        );
+        assert_eq!(
+            detail
+                .iter()
+                .filter(|line| line.contains('['))
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["  [x] status", "> [x] clock", "  [ ] mode"]
         );
         assert!(
             rendered_text(&edit_control_line(field, ConfigUiEditMode::MultiChoice))

@@ -419,19 +419,29 @@ impl ConfigUiApp {
         &mut self,
         next_input: impl FnOnce(&ConfigUiField, &ConfigUiEditState) -> Result<String, String>,
     ) {
-        let next = match self.edit.as_ref().map(|edit| {
-            let field = &self.model.fields[edit.field_index];
-            next_input(field, edit)
-        }) {
-            None => return,
-            Some(Ok(next)) => next,
-            Some(Err(message)) => {
+        let Some(edit) = self.edit.as_ref() else {
+            return;
+        };
+        let field = &self.model.fields[edit.field_index];
+        let selected = if is_ordered_string_list_field(field) {
+            string_list_choice_value(field, &edit.input, edit.choice_index).ok()
+        } else {
+            None
+        };
+        let next = match next_input(field, edit) {
+            Ok(next) => next,
+            Err(message) => {
                 self.notice_error(message);
                 return;
             }
         };
         if let Some(edit) = &mut self.edit {
             edit.input = next;
+            if let Some(value) = selected
+                && let Some(index) = string_list_choice_index(field, &edit.input, &value)
+            {
+                edit.choice_index = index;
+            }
         }
     }
 
@@ -579,12 +589,9 @@ pub fn initial_edit_choice_index(field: &ConfigUiField, input: &str) -> usize {
     }
     if is_enum_string_list_field(field)
         && let Ok(values) = parse_string_list_values(field, input)
-        && let Some(index) = values.first().and_then(|value| {
-            field
-                .allowed_values
-                .iter()
-                .position(|allowed| allowed == value)
-        })
+        && let Some(index) = values
+            .first()
+            .and_then(|value| string_list_choice_index(field, input, value))
     {
         return index;
     }
@@ -729,11 +736,10 @@ pub fn single_choice_status_value(field: &ConfigUiField, edit: &ConfigUiEditStat
 pub fn multi_choice_status_value(field: &ConfigUiField, edit: &ConfigUiEditState) -> String {
     let values = parse_string_list_values(field, &edit.input).unwrap_or_default();
     let enabled = values.len();
-    let selected = field
-        .allowed_values
-        .get(edit.choice_index)
-        .map(String::as_str)
-        .unwrap_or("none");
+    let selected = string_list_choice_values(field, &edit.input)
+        .ok()
+        .and_then(|choices| choices.get(edit.choice_index).cloned())
+        .unwrap_or_else(|| "none".to_string());
     if is_ordered_string_list_field(field) {
         return format!(
             "{enabled}/{} enabled, selected {selected}, order {}",
@@ -760,15 +766,12 @@ pub fn toggled_string_list_input(
     input: &str,
     choice_index: usize,
 ) -> Result<String, String> {
-    let target = field
-        .allowed_values
-        .get(choice_index)
-        .ok_or_else(|| format!("{} has no value selected.", field.path))?;
+    let target = string_list_choice_value(field, input, choice_index)?;
     let mut values = parse_string_list_values(field, input)?;
-    if values.iter().any(|value| value == target) {
-        values.retain(|value| value != target);
+    if values.iter().any(|value| value == &target) {
+        values.retain(|value| value != &target);
     } else {
-        values.push(target.clone());
+        values.push(target);
     }
     if !is_ordered_string_list_field(field) {
         values = ordered_string_list_values(field, &values);
@@ -782,12 +785,9 @@ fn moved_ordered_string_list_input(
     choice_index: usize,
     delta: isize,
 ) -> Result<String, String> {
-    let target = field
-        .allowed_values
-        .get(choice_index)
-        .ok_or_else(|| format!("{} has no value selected.", field.path))?;
+    let target = string_list_choice_value(field, input, choice_index)?;
     let mut values = parse_string_list_values(field, input)?;
-    let Some(index) = values.iter().position(|value| value == target) else {
+    let Some(index) = values.iter().position(|value| value == &target) else {
         return render_string_list_input(field, &values);
     };
     let next = if delta < 0 {
@@ -800,6 +800,43 @@ fn moved_ordered_string_list_input(
     };
     values.swap(index, next);
     render_string_list_input(field, &values)
+}
+
+fn string_list_choice_value(
+    field: &ConfigUiField,
+    input: &str,
+    choice_index: usize,
+) -> Result<String, String> {
+    string_list_choice_values(field, input)?
+        .get(choice_index)
+        .cloned()
+        .ok_or_else(|| format!("{} has no value selected.", field.path))
+}
+
+fn string_list_choice_index(field: &ConfigUiField, input: &str, value: &str) -> Option<usize> {
+    string_list_choice_values(field, input)
+        .ok()?
+        .iter()
+        .position(|choice| choice == value)
+}
+
+pub(crate) fn string_list_choice_values(
+    field: &ConfigUiField,
+    input: &str,
+) -> Result<Vec<String>, String> {
+    if !is_ordered_string_list_field(field) {
+        return Ok(field.allowed_values.clone());
+    }
+    let mut values = parse_string_list_values(field, input)?;
+    let enabled = values.iter().cloned().collect::<BTreeSet<_>>();
+    values.extend(
+        field
+            .allowed_values
+            .iter()
+            .filter(|value| !enabled.contains(*value))
+            .cloned(),
+    );
+    Ok(values)
 }
 
 fn render_string_list_input(field: &ConfigUiField, values: &[String]) -> Result<String, String> {
@@ -1196,7 +1233,7 @@ mod tests {
             r#"["status","clock","mode"]"#
         );
         assert_eq!(
-            toggled_string_list_input(&field, r#"["status","clock","mode"]"#, 0)
+            toggled_string_list_input(&field, r#"["status","clock","mode"]"#, 1)
                 .expect("remove clock"),
             r#"["status","mode"]"#
         );
@@ -1216,13 +1253,15 @@ mod tests {
         let mut app = ConfigUiApp::new(model);
 
         app.begin_edit_field(0);
-        assert_eq!(app.edit.as_ref().expect("ordered edit").choice_index, 1);
+        assert_eq!(app.edit.as_ref().expect("ordered edit").choice_index, 0);
         assert_eq!(app.handle_key(ConfigUiKey::Char('J')), ConfigUiIntent::None);
         assert_eq!(
             app.edit.as_ref().expect("ordered edit").input,
             r#"["clock","status"]"#
         );
+        assert_eq!(app.edit.as_ref().expect("ordered edit").choice_index, 1);
         assert_eq!(app.handle_key(ConfigUiKey::Char('K')), ConfigUiIntent::None);
+        assert_eq!(app.edit.as_ref().expect("ordered edit").choice_index, 0);
         assert_eq!(
             app.handle_key(ConfigUiKey::Enter),
             ConfigUiIntent::SetField {
