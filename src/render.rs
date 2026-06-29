@@ -459,16 +459,28 @@ fn list_table_header_line(table: &ConfigUiListTable) -> Line<'static> {
 }
 
 fn list_table_row_line(table: &ConfigUiListTable, field: &ConfigUiField) -> Line<'static> {
-    let style = field_style(field, metadata_value_style());
     table
         .columns
         .iter()
         .enumerate()
         .map(|(index, column)| {
             let cell = field.list_cells.get(index).map_or("", String::as_str);
-            Span::styled(list_table_cell(cell, column.width), style)
+            Span::styled(
+                list_table_cell(cell, column.width),
+                list_table_cell_style(field, index),
+            )
         })
         .collect()
+}
+
+fn list_table_cell_style(field: &ConfigUiField, column_index: usize) -> Style {
+    let default = match column_index {
+        0 => apply_status_style(&field.apply_status),
+        1 => config_key_style(),
+        2 => metadata_value_style(),
+        _ => fg_style(Color::Gray),
+    };
+    field_style(field, default)
 }
 
 fn list_table_cell(value: &str, width: usize) -> String {
@@ -1284,10 +1296,18 @@ mod tests {
             rendered_cells(&list_header_line(layout)),
             vec!["group", "keys", "action", "owner", "source"]
         );
+        let row = row_line_for_layout(&model, UiRowRef::Field(0), layout);
         assert_eq!(
-            rendered_cells(&row_line_for_layout(&model, UiRowRef::Field(0), layout)),
+            rendered_cells(&row),
             vec!["editor", "Ctrl+x", "cut selection", "user", "settings.toml"]
         );
+        assert_eq!(
+            row.spans[0].style,
+            apply_status_style(&model.fields[0].apply_status)
+        );
+        assert_eq!(row.spans[1].style, config_key_style());
+        assert_eq!(row.spans[2].style, metadata_value_style());
+        assert_eq!(row.spans[3].style, fg_style(Color::Gray));
     }
 
     // Defends: missing custom table cells render as blanks instead of panicking.
