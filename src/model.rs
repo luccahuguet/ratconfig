@@ -1199,15 +1199,11 @@ pub fn render_json_edit_value(value: &JsonValue) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::apply_status;
     use serde_json::json;
 
     fn status() -> ConfigUiApplyStatus {
-        ConfigUiApplyStatus {
-            summary: "after save".to_string(),
-            label: "after save".to_string(),
-            detail: "Host applies this after saving.".to_string(),
-            pending: true,
-        }
+        apply_status("after save", "Host applies this after saving.")
     }
 
     fn toml_document_rows(

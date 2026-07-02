@@ -126,11 +126,10 @@ where
 mod tests {
     use super::*;
     use crate::{
-        ConfigUiApplyStatus, ConfigUiEditBehavior, ConfigUiField, ConfigUiModel, ConfigUiPathOwner,
-        ConfigUiValueState, DEFAULT_CONFIG_SOURCE_ID,
+        ConfigUiModel, DEFAULT_CONFIG_SOURCE_ID,
+        test_support::{field, model_with_fields},
     };
     use serde_json::json;
-    use std::path::PathBuf;
 
     // Defends: crossterm input conversion preserves ratconfig's project-agnostic key vocabulary.
     #[test]
@@ -245,51 +244,10 @@ mod tests {
         Event::Key(key(code, modifiers))
     }
 
-    fn field(path: &str, kind: &str, value: &str, allowed: &[&str]) -> ConfigUiField {
-        ConfigUiField {
-            source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
-            path: path.to_string(),
-            display_label: String::new(),
-            list_cells: Vec::new(),
-            tab: "general".to_string(),
-            kind: kind.to_string(),
-            current_value: value.to_string(),
-            edit_value: value.to_string(),
-            default_value: value.to_string(),
-            state: ConfigUiValueState::Explicit,
-            description: String::new(),
-            allowed_values: allowed.iter().map(|value| (*value).to_string()).collect(),
-            validation: String::new(),
-            rebuild_required: false,
-            apply_status: ConfigUiApplyStatus {
-                summary: "after save".to_string(),
-                label: "after save".to_string(),
-                detail: "The host application applies this field after saving.".to_string(),
-                pending: true,
-            },
-            edit_behavior: ConfigUiEditBehavior::Default,
-        }
-    }
-
     fn test_model() -> ConfigUiModel {
-        ConfigUiModel {
-            active_config_path: PathBuf::from("/tmp/acme/settings.jsonc"),
-            cursor_config_path: PathBuf::from("/tmp/acme/cursors.jsonc"),
-            default_cursor_config_path: PathBuf::from("/tmp/acme/default_cursors.jsonc"),
-            active_config_exists: true,
-            config_owner: ConfigUiPathOwner::User,
-            config_read_only: false,
-            sources: Vec::new(),
-            tabs: vec!["general".to_string()],
-            tab_list_tables: std::collections::BTreeMap::new(),
-            fields: vec![
-                field("server.enabled", "bool", "false", &[]),
-                field("ui.theme", "string", "\"light\"", &["light", "dark"]),
-            ],
-            file_actions: Vec::new(),
-            sidecars: Vec::new(),
-            native_config_statuses: Vec::new(),
-            diagnostics: Vec::new(),
-        }
+        model_with_fields(vec![
+            field("server.enabled", "bool", "false", &[]),
+            field("ui.theme", "string", "\"light\"", &["light", "dark"]),
+        ])
     }
 }

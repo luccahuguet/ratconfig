@@ -14,6 +14,8 @@ pub mod model;
 pub mod patch;
 #[cfg(feature = "ui")]
 pub mod render;
+#[cfg(test)]
+mod test_support;
 pub mod toml_adapter;
 
 pub use contract::*;

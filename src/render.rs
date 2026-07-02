@@ -1068,6 +1068,7 @@ pub fn truncate_start(value: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{apply_status, field, model_with_fields};
     use std::path::PathBuf;
 
     fn rendered_cells(line: &Line<'_>) -> Vec<String> {
@@ -1116,44 +1117,14 @@ mod tests {
     }
 
     fn test_model(state: ConfigUiValueState) -> ConfigUiModel {
-        ConfigUiModel {
-            active_config_path: PathBuf::from("/home/alex/.config/acme/settings.jsonc"),
-            cursor_config_path: PathBuf::from("/home/alex/.config/acme/cursors.jsonc"),
-            default_cursor_config_path: PathBuf::from("/runtime/acme/default_cursors.jsonc"),
-            active_config_exists: true,
-            config_owner: ConfigUiPathOwner::User,
-            config_read_only: false,
-            sources: Vec::new(),
-            tabs: vec!["general".to_string()],
-            tab_list_tables: std::collections::BTreeMap::new(),
-            fields: vec![ConfigUiField {
-                source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
-                path: "core.debug_mode".to_string(),
-                display_label: String::new(),
-                list_cells: Vec::new(),
-                tab: "general".to_string(),
-                kind: "bool".to_string(),
-                current_value: "false".to_string(),
-                edit_value: "false".to_string(),
-                default_value: "false".to_string(),
-                state,
-                description: String::new(),
-                allowed_values: Vec::new(),
-                validation: String::new(),
-                rebuild_required: false,
-                apply_status: ConfigUiApplyStatus {
-                    summary: "after app restart".to_string(),
-                    label: "after app restart".to_string(),
-                    detail: "Restart the app after saving".to_string(),
-                    pending: true,
-                },
-                edit_behavior: ConfigUiEditBehavior::Default,
-            }],
-            file_actions: Vec::new(),
-            sidecars: Vec::new(),
-            native_config_statuses: Vec::new(),
-            diagnostics: Vec::new(),
-        }
+        let mut field = field("core.debug_mode", "bool", "false", &[]);
+        field.state = state;
+        field.apply_status = apply_status("after app restart", "Restart the app after saving");
+        let mut model = model_with_fields(vec![field]);
+        model.active_config_path = PathBuf::from("/home/alex/.config/acme/settings.jsonc");
+        model.cursor_config_path = PathBuf::from("/home/alex/.config/acme/cursors.jsonc");
+        model.default_cursor_config_path = PathBuf::from("/runtime/acme/default_cursors.jsonc");
+        model
     }
 
     fn source(
@@ -1362,12 +1333,7 @@ name = "rust"
             default_toml: None,
             validation: "",
             rebuild_required: false,
-            apply_status: ConfigUiApplyStatus {
-                summary: "after save".to_string(),
-                label: "after save".to_string(),
-                detail: "Host applies this after saving.".to_string(),
-                pending: true,
-            },
+            apply_status: apply_status("after save", "Host applies this after saving."),
         })
         .expect("toml document");
         let mut model = test_model(ConfigUiValueState::Explicit);

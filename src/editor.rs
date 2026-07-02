@@ -905,77 +905,17 @@ mod tests {
     #[cfg(feature = "ui")]
     use crate::row_line_for_model;
     use crate::{
-        ConfigUiApplyStatus, ConfigUiPathOwner, ConfigUiTomlDocumentSpec, ConfigUiValueState,
-        DEFAULT_CONFIG_SOURCE_ID, build_toml_document_fields,
+        ConfigUiTomlDocumentSpec, DEFAULT_CONFIG_SOURCE_ID, build_toml_document_fields,
+        test_support::{after_save_status, field, field_with_source, model_with_fields},
     };
     use serde_json::json;
     use std::path::PathBuf;
-
-    fn field(path: &str, kind: &str, value: &str, allowed: &[&str]) -> ConfigUiField {
-        field_with_source(DEFAULT_CONFIG_SOURCE_ID, path, kind, value, allowed)
-    }
-
-    fn field_with_source(
-        source_id: &str,
-        path: &str,
-        kind: &str,
-        value: &str,
-        allowed: &[&str],
-    ) -> ConfigUiField {
-        ConfigUiField {
-            source_id: source_id.to_string(),
-            path: path.to_string(),
-            display_label: String::new(),
-            list_cells: Vec::new(),
-            tab: "general".to_string(),
-            kind: kind.to_string(),
-            current_value: value.to_string(),
-            edit_value: value.to_string(),
-            default_value: value.to_string(),
-            state: ConfigUiValueState::Explicit,
-            description: String::new(),
-            allowed_values: allowed.iter().map(|value| (*value).to_string()).collect(),
-            validation: String::new(),
-            rebuild_required: false,
-            apply_status: ConfigUiApplyStatus {
-                summary: "after save".to_string(),
-                label: "after save".to_string(),
-                detail: "The host application applies this field after saving.".to_string(),
-                pending: true,
-            },
-            edit_behavior: ConfigUiEditBehavior::Default,
-        }
-    }
 
     // Defends: the reusable ratconfig layer can drive a non-Yazelix config fixture with bool, select, multiselect, rendering, and JSONC patching.
     #[cfg(feature = "ui")]
     #[test]
     fn non_yazelix_fixture_uses_generic_model_editor_render_and_jsonc_patch() {
-        let model = ConfigUiModel {
-            active_config_path: PathBuf::from("/tmp/acme/settings.jsonc"),
-            cursor_config_path: PathBuf::from("/tmp/acme/cursors.jsonc"),
-            default_cursor_config_path: PathBuf::from("/tmp/acme/default_cursors.jsonc"),
-            active_config_exists: true,
-            config_owner: ConfigUiPathOwner::User,
-            config_read_only: false,
-            sources: Vec::new(),
-            tabs: vec!["general".to_string()],
-            tab_list_tables: std::collections::BTreeMap::new(),
-            fields: vec![
-                field("server.enabled", "bool", "false", &[]),
-                field("ui.theme", "string", "\"light\"", &["light", "dark"]),
-                field(
-                    "plugins.enabled",
-                    "string_list",
-                    r#"["git"]"#,
-                    &["git", "search"],
-                ),
-            ],
-            file_actions: Vec::new(),
-            sidecars: Vec::new(),
-            native_config_statuses: Vec::new(),
-            diagnostics: Vec::new(),
-        };
+        let model = test_model();
         let app = ConfigUiApp::new(model);
 
         assert_eq!(app.visible_rows().len(), 3);
@@ -1131,12 +1071,7 @@ line-number = "relative"
             default_toml: None,
             validation: "",
             rebuild_required: false,
-            apply_status: ConfigUiApplyStatus {
-                summary: "after save".to_string(),
-                label: "after save".to_string(),
-                detail: "The host application applies this field after saving.".to_string(),
-                pending: true,
-            },
+            apply_status: after_save_status(),
         })
         .expect("toml document");
         let mut model = test_model();
@@ -1421,31 +1356,16 @@ line-number = "relative"
     }
 
     fn test_model() -> ConfigUiModel {
-        ConfigUiModel {
-            active_config_path: PathBuf::from("/tmp/acme/settings.jsonc"),
-            cursor_config_path: PathBuf::from("/tmp/acme/cursors.jsonc"),
-            default_cursor_config_path: PathBuf::from("/tmp/acme/default_cursors.jsonc"),
-            active_config_exists: true,
-            config_owner: ConfigUiPathOwner::User,
-            config_read_only: false,
-            sources: Vec::new(),
-            tabs: vec!["general".to_string()],
-            tab_list_tables: std::collections::BTreeMap::new(),
-            fields: vec![
-                field("server.enabled", "bool", "false", &[]),
-                field("ui.theme", "string", "\"light\"", &["light", "dark"]),
-                field(
-                    "plugins.enabled",
-                    "string_list",
-                    r#"["git"]"#,
-                    &["git", "search"],
-                ),
-            ],
-            file_actions: Vec::new(),
-            sidecars: Vec::new(),
-            native_config_statuses: Vec::new(),
-            diagnostics: Vec::new(),
-        }
+        model_with_fields(vec![
+            field("server.enabled", "bool", "false", &[]),
+            field("ui.theme", "string", "\"light\"", &["light", "dark"]),
+            field(
+                "plugins.enabled",
+                "string_list",
+                r#"["git"]"#,
+                &["git", "search"],
+            ),
+        ])
     }
 
     fn file_action(
