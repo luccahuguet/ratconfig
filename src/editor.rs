@@ -905,7 +905,8 @@ mod tests {
     #[cfg(feature = "ui")]
     use crate::row_line_for_model;
     use crate::{
-        ConfigUiApplyStatus, ConfigUiPathOwner, ConfigUiValueState, DEFAULT_CONFIG_SOURCE_ID,
+        ConfigUiApplyStatus, ConfigUiPathOwner, ConfigUiTomlDocumentSpec, ConfigUiValueState,
+        DEFAULT_CONFIG_SOURCE_ID, build_toml_document_fields,
     };
     use serde_json::json;
     use std::path::PathBuf;
@@ -1113,6 +1114,61 @@ mod tests {
                 field_index: 1,
                 source_id: "ui".to_string(),
                 path: "ui.title".to_string(),
+            }
+        );
+    }
+
+    // Defends: generic TOML document rows reuse the normal structured edit intent route.
+    #[test]
+    fn toml_document_scalar_rows_emit_standard_set_field_intents() {
+        let document = build_toml_document_fields(ConfigUiTomlDocumentSpec {
+            source_id: "helix",
+            tab: "native",
+            current_toml: r#"
+[editor]
+line-number = "relative"
+"#,
+            default_toml: None,
+            validation: "",
+            rebuild_required: false,
+            apply_status: ConfigUiApplyStatus {
+                summary: "after save".to_string(),
+                label: "after save".to_string(),
+                detail: "The host application applies this field after saving.".to_string(),
+                pending: true,
+            },
+        })
+        .expect("toml document");
+        let mut model = test_model();
+        model.tabs = vec!["native".to_string()];
+        model.fields = document.fields;
+        model
+            .tab_list_tables
+            .insert("native".to_string(), document.list_table);
+        let field_index = model
+            .fields
+            .iter()
+            .position(|field| field.path == "editor.line-number")
+            .expect("line number");
+        let mut app = ConfigUiApp::new(model);
+        app.selected_row = field_index;
+
+        assert_eq!(
+            app.handle_key(ConfigUiKey::Enter),
+            ConfigUiIntent::BeginEdit {
+                field_index,
+                source_id: "helix".to_string(),
+                path: "editor.line-number".to_string(),
+            }
+        );
+        app.begin_edit_field(field_index);
+        assert_eq!(
+            app.handle_key(ConfigUiKey::Enter),
+            ConfigUiIntent::SetField {
+                field_index,
+                source_id: "helix".to_string(),
+                path: "editor.line-number".to_string(),
+                value: json!("relative"),
             }
         );
     }

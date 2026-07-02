@@ -15,7 +15,7 @@ pub fn split_dotted_path(path: &str) -> Option<Vec<String>> {
             (!part.is_empty()
                 && part
                     .chars()
-                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_'))
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'))
             .then(|| part.to_owned())
         })
         .collect()

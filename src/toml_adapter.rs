@@ -350,6 +350,24 @@ mod tests {
         );
     }
 
+    // Defends: native TOML bare keys with hyphens remain patchable through ratconfig dotted paths.
+    #[test]
+    fn set_toml_value_supports_hyphenated_bare_keys() {
+        let raw = r#"[editor]
+line-number = "relative"
+"#;
+
+        let outcome = set_toml_value_text(raw, "editor.line-number", &json!("absolute"))
+            .expect("hyphenated bare key patch");
+        let value = parse_toml_value(&outcome.text).expect("toml");
+
+        assert_eq!(outcome.mutation, PatchMutation::Replaced);
+        assert_eq!(
+            get_toml_path(&value, "editor.line-number"),
+            Some(&json!("absolute"))
+        );
+    }
+
     // Defends: TOML migration operations match the JSONC migration contract for safe changes.
     #[test]
     fn toml_migrations_rename_delete_add_default_and_transform() {

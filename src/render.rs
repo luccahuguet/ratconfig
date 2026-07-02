@@ -1107,6 +1107,14 @@ mod tests {
         );
     }
 
+    fn field_index(model: &ConfigUiModel, path: &str) -> usize {
+        model
+            .fields
+            .iter()
+            .position(|field| field.path == path)
+            .unwrap_or_else(|| panic!("missing field {path}"))
+    }
+
     fn test_model(state: ConfigUiValueState) -> ConfigUiModel {
         ConfigUiModel {
             active_config_path: PathBuf::from("/home/alex/.config/acme/settings.jsonc"),
@@ -1336,6 +1344,66 @@ mod tests {
 
         assert_eq!(rendered_cells(&header), vec!["..", ""]);
         assert_eq!(rendered_cells(&row), vec!["..", ""]);
+    }
+
+    // Defends: arbitrary TOML document rows render complex tables and arrays through the generic table layout.
+    #[test]
+    fn toml_document_rows_render_complex_values_as_read_only_table_cells() {
+        let document = build_toml_document_fields(ConfigUiTomlDocumentSpec {
+            source_id: "native",
+            tab: "native",
+            current_toml: r#"
+[editor]
+rulers = [80, 100]
+
+[[language]]
+name = "rust"
+"#,
+            default_toml: None,
+            validation: "",
+            rebuild_required: false,
+            apply_status: ConfigUiApplyStatus {
+                summary: "after save".to_string(),
+                label: "after save".to_string(),
+                detail: "Host applies this after saving.".to_string(),
+                pending: true,
+            },
+        })
+        .expect("toml document");
+        let mut model = test_model(ConfigUiValueState::Explicit);
+        model.tabs = vec!["native".to_string()];
+        model.fields = document.fields;
+        model
+            .tab_list_tables
+            .insert("native".to_string(), document.list_table);
+        let layout = list_layout(&model, 0);
+
+        assert_eq!(
+            rendered_cells(&row_line_for_layout(
+                &model,
+                UiRowRef::Field(field_index(&model, "editor")),
+                layout
+            )),
+            vec!["", "[editor]", "table", "explicit", "{1 keys}", "-"]
+        );
+
+        assert_eq!(
+            rendered_cells(&row_line_for_layout(
+                &model,
+                UiRowRef::Field(field_index(&model, "editor.rulers")),
+                layout
+            )),
+            vec!["editor", "rulers", "array", "explicit", "[2 items]", "-"]
+        );
+
+        assert_eq!(
+            rendered_cells(&row_line_for_layout(
+                &model,
+                UiRowRef::Field(field_index(&model, "language")),
+                layout
+            )),
+            vec!["", "language", "array", "explicit", "[1 tables]", "-"]
+        );
     }
 
     // Defends: the reserved advanced tab keeps status columns even if a host table profile exists.

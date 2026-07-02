@@ -155,6 +155,50 @@ fn patch_sections_toml(raw: &str, value: &Value) -> Result<String, TomlPatchErro
 
 `ConfigUiIntent::SetField` supplies the edited `serde_json::Value`; the host validates that value against its own schema, calls the TOML patcher or its own writer, writes atomically, reloads the model, and applies any runtime policy it owns
 
+## Arbitrary TOML Documents
+
+Use `build_toml_document_fields` when a host-owned TOML file should be inspectable without declaring every field in a schema. The helper parses the current TOML text, optionally parses default TOML text, and returns ordinary `ConfigUiField` rows plus a `ConfigUiListTable` profile for the tab
+
+```rust
+use ratconfig::{
+    ConfigUiApplyStatus, ConfigUiModel, ConfigUiTomlDocumentSpec,
+    build_toml_document_fields,
+    toml_adapter::{TomlPatchError, set_toml_value_text},
+};
+use serde_json::Value;
+
+fn add_native_toml_rows(model: &mut ConfigUiModel, raw: &str, default_raw: &str) -> Result<(), String> {
+    let document = build_toml_document_fields(ConfigUiTomlDocumentSpec {
+        source_id: "helix-config",
+        tab: "helix",
+        current_toml: raw,
+        default_toml: Some(default_raw),
+        validation: "host validates before writing",
+        rebuild_required: false,
+        apply_status: ConfigUiApplyStatus {
+            summary: "after save".to_string(),
+            label: "after save".to_string(),
+            detail: "Reload the application to apply this file".to_string(),
+            pending: true,
+        },
+    })?;
+    model.tab_list_tables.insert("helix".to_string(), document.list_table);
+    model.fields.extend(document.fields);
+    Ok(())
+}
+
+fn patch_native_toml(raw: &str, path: &str, value: &Value) -> Result<String, TomlPatchError> {
+    let outcome = set_toml_value_text(raw, path, value)?;
+    Ok(outcome.text)
+}
+```
+
+The generated rows include tables, scalar leaves, arrays, current/default state, and deterministic table/key ordering. Strings, booleans, integers, floats, and simple string arrays use the normal editable field path when the TOML key path can be represented as dotted bare keys such as `editor.line-number` and the current document can be patched safely through that path
+
+Complex tables, complex arrays, datetimes, quoted keys with dots, and other paths that cannot be safely represented as dotted patch paths are rendered as structured read-only rows. Hosts can pair these rows with a normal file action when users need full TOML editing
+
+Ratconfig still does not infer product labels, schema validation, file layering, atomic writes, reloads, or apply policy for arbitrary TOML documents
+
 Populate `ConfigUiModel::file_actions` when the UI should show rows for host-owned native config files. Ratconfig renders label, path, missing/read-only/error state, and create-if-missing affordance, then emits `ConfigUiIntent::OpenFile`; hosts still own file discovery, creation, editor launch, validation, reloads, and all file IO
 
 Hosts that want ratconfig to own the crossterm terminal setup, draw loop, event reads, and key conversion can enable the optional runner:

@@ -5,6 +5,7 @@ use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use toml::Value as TomlValue;
+use toml_edit::{DocumentMut as TomlEditDocument, Table as TomlEditTable};
 
 pub const DEFAULT_CONFIG_SOURCE_ID: &str = "config";
 
@@ -215,6 +216,23 @@ pub struct ConfigUiStringListChoiceSpec {
     pub edit_behavior: ConfigUiEditBehavior,
 }
 
+#[derive(Debug, Clone)]
+pub struct ConfigUiTomlDocumentSpec<'a> {
+    pub source_id: &'a str,
+    pub tab: &'a str,
+    pub current_toml: &'a str,
+    pub default_toml: Option<&'a str>,
+    pub validation: &'a str,
+    pub rebuild_required: bool,
+    pub apply_status: ConfigUiApplyStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigUiTomlDocumentRows {
+    pub list_table: ConfigUiListTable,
+    pub fields: Vec<ConfigUiField>,
+}
+
 pub fn build_config_ui_field(spec: ConfigUiFieldRowSpec<'_>) -> ConfigUiField {
     let state = if spec.has_blocking_diagnostic {
         ConfigUiValueState::Invalid
@@ -293,6 +311,68 @@ pub fn build_string_list_choice_field(
         has_blocking_diagnostic: spec.has_blocking_diagnostic,
         edit_behavior: spec.edit_behavior,
     }))
+}
+
+fn toml_document_list_table() -> ConfigUiListTable {
+    ConfigUiListTable {
+        columns: vec![
+            ConfigUiListColumn {
+                title: "table".to_string(),
+                width: 24,
+            },
+            ConfigUiListColumn {
+                title: "key".to_string(),
+                width: 28,
+            },
+            ConfigUiListColumn {
+                title: "type".to_string(),
+                width: 12,
+            },
+            ConfigUiListColumn {
+                title: "state".to_string(),
+                width: 10,
+            },
+            ConfigUiListColumn {
+                title: "value".to_string(),
+                width: 28,
+            },
+            ConfigUiListColumn {
+                title: "default".to_string(),
+                width: 20,
+            },
+        ],
+    }
+}
+
+pub fn build_toml_document_fields(
+    spec: ConfigUiTomlDocumentSpec<'_>,
+) -> Result<ConfigUiTomlDocumentRows, String> {
+    let current = parse_toml_document(spec.current_toml, "current TOML document")?;
+    let current_edit = parse_toml_edit_document(spec.current_toml, "current TOML document")?;
+    let default = spec
+        .default_toml
+        .map(|raw| parse_toml_document(raw, "default TOML document"))
+        .transpose()?;
+    let mut entries = BTreeMap::<String, TomlDocumentEntry>::new();
+    collect_toml_document_entries(
+        &current,
+        Vec::new(),
+        TomlDocumentSide::Current,
+        &mut entries,
+    );
+    if let Some(default) = &default {
+        collect_toml_document_entries(default, Vec::new(), TomlDocumentSide::Default, &mut entries);
+    }
+
+    let fields = entries
+        .into_values()
+        .map(|entry| toml_document_entry_field(&spec, &current_edit, entry))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(ConfigUiTomlDocumentRows {
+        list_table: toml_document_list_table(),
+        fields,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -607,6 +687,326 @@ fn toml_number_as_f64(value: &TomlValue) -> Option<f64> {
         .or_else(|| value.as_integer().map(|value| value as f64))
 }
 
+#[derive(Debug, Clone)]
+struct TomlDocumentEntry {
+    segments: Vec<String>,
+    current: Option<TomlValue>,
+    default: Option<TomlValue>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TomlDocumentSide {
+    Current,
+    Default,
+}
+
+fn parse_toml_document(raw: &str, label: &str) -> Result<TomlValue, String> {
+    let table = raw
+        .parse::<toml::Table>()
+        .map_err(|source| format!("{label} is invalid TOML: {source}"))?;
+    Ok(TomlValue::Table(table))
+}
+
+fn parse_toml_edit_document(raw: &str, label: &str) -> Result<TomlEditDocument, String> {
+    raw.parse::<TomlEditDocument>()
+        .map_err(|source| format!("{label} is invalid TOML: {source}"))
+}
+
+fn collect_toml_document_entries(
+    value: &TomlValue,
+    segments: Vec<String>,
+    side: TomlDocumentSide,
+    entries: &mut BTreeMap<String, TomlDocumentEntry>,
+) {
+    if !segments.is_empty() {
+        let display_path = toml_document_display_path(&segments);
+        let entry = entries
+            .entry(display_path)
+            .or_insert_with(|| TomlDocumentEntry {
+                segments: segments.clone(),
+                current: None,
+                default: None,
+            });
+        match side {
+            TomlDocumentSide::Current => entry.current = Some(value.clone()),
+            TomlDocumentSide::Default => entry.default = Some(value.clone()),
+        }
+    }
+
+    let TomlValue::Table(table) = value else {
+        return;
+    };
+    for (key, child) in table {
+        let mut child_segments = segments.clone();
+        child_segments.push(key.clone());
+        collect_toml_document_entries(child, child_segments, side, entries);
+    }
+}
+
+fn toml_document_entry_field(
+    spec: &ConfigUiTomlDocumentSpec<'_>,
+    current: &TomlEditDocument,
+    entry: TomlDocumentEntry,
+) -> Result<ConfigUiField, String> {
+    let display_path = toml_document_display_path(&entry.segments);
+    let patch_path = toml_document_patch_path(current.as_table(), &entry.segments);
+    let field_path = patch_path.as_deref().unwrap_or(&display_path).to_string();
+    let effective = entry.current.as_ref().or(entry.default.as_ref());
+    let kind = effective.map_or("unknown", toml_document_field_kind);
+    let type_label = effective.map_or("unknown", toml_document_type_label);
+    let editable = patch_path.is_some() && effective.is_some_and(toml_document_value_is_editable);
+    let state = if entry.current.is_some() {
+        ConfigUiValueState::Explicit
+    } else if entry.default.is_some() {
+        ConfigUiValueState::Defaulted
+    } else {
+        ConfigUiValueState::Unset
+    };
+    let current_value = effective
+        .map(toml_document_render_value)
+        .unwrap_or_else(|| "not set".to_string());
+    let edit_value = if editable {
+        effective
+            .map(toml_value_to_json)
+            .transpose()?
+            .map(|value| render_json_edit_value(&value))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let default_value = match (&entry.default, editable) {
+        (Some(value), true) => toml_document_render_value(value),
+        _ => NO_CONFIG_DEFAULT_VALUE_LABEL.to_string(),
+    };
+    let default_cell = entry
+        .default
+        .as_ref()
+        .map(toml_document_render_value)
+        .unwrap_or_else(|| "-".to_string());
+    let validation = if !editable || spec.validation.trim().is_empty() {
+        toml_document_validation_label(type_label, editable).to_string()
+    } else {
+        spec.validation.to_string()
+    };
+
+    Ok(ConfigUiField {
+        source_id: spec.source_id.to_string(),
+        path: field_path,
+        display_label: display_path.clone(),
+        list_cells: vec![
+            toml_document_parent_label(&entry.segments),
+            toml_document_key_label(&entry.segments, type_label),
+            type_label.to_string(),
+            state_label_text(state).to_string(),
+            current_value.clone(),
+            default_cell,
+        ],
+        tab: spec.tab.to_string(),
+        kind: kind.to_string(),
+        current_value,
+        edit_value,
+        default_value,
+        state,
+        description: toml_document_description(
+            &display_path,
+            type_label,
+            editable,
+            patch_path.is_some(),
+        ),
+        allowed_values: Vec::new(),
+        validation,
+        rebuild_required: spec.rebuild_required,
+        apply_status: spec.apply_status.clone(),
+        edit_behavior: if editable {
+            ConfigUiEditBehavior::Default
+        } else {
+            ConfigUiEditBehavior::StructuredOnly {
+                notice: toml_document_read_only_notice(patch_path.is_some()),
+            }
+        },
+    })
+}
+
+fn toml_document_patch_path(root: &TomlEditTable, segments: &[String]) -> Option<String> {
+    if segments.is_empty()
+        || !segments
+            .iter()
+            .all(|segment| is_toml_document_bare_key(segment))
+    {
+        return None;
+    }
+    toml_document_parent_path_is_patchable(root, segments).then(|| segments.join("."))
+}
+
+fn is_toml_document_bare_key(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+}
+
+fn toml_document_parent_path_is_patchable(root: &TomlEditTable, segments: &[String]) -> bool {
+    let mut current = root;
+    for segment in &segments[..segments.len().saturating_sub(1)] {
+        let Some(next) = current.get(segment) else {
+            return true;
+        };
+        let Some(next) = next.as_table() else {
+            return false;
+        };
+        current = next;
+    }
+    true
+}
+
+fn toml_document_display_path(segments: &[String]) -> String {
+    segments
+        .iter()
+        .map(|segment| {
+            if is_toml_document_bare_key(segment) {
+                segment.clone()
+            } else {
+                serde_json::to_string(segment).expect("strings serialize")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+fn toml_document_parent_label(segments: &[String]) -> String {
+    if segments.len() <= 1 {
+        String::new()
+    } else {
+        toml_document_display_path(&segments[..segments.len() - 1])
+    }
+}
+
+fn toml_document_key_label(segments: &[String], type_label: &str) -> String {
+    let key = segments
+        .last()
+        .map(|segment| toml_document_display_path(std::slice::from_ref(segment)))
+        .unwrap_or_default();
+    if type_label == "table" {
+        format!("[{key}]")
+    } else {
+        key
+    }
+}
+
+fn toml_document_value_is_editable(value: &TomlValue) -> bool {
+    matches!(
+        value,
+        TomlValue::String(_) | TomlValue::Integer(_) | TomlValue::Float(_) | TomlValue::Boolean(_)
+    ) || toml_document_string_list(value)
+}
+
+fn toml_document_string_list(value: &TomlValue) -> bool {
+    matches!(value, TomlValue::Array(values) if values.iter().all(|value| matches!(value, TomlValue::String(_))))
+}
+
+fn toml_document_field_kind(value: &TomlValue) -> &'static str {
+    match value {
+        TomlValue::String(_) => "string",
+        TomlValue::Integer(_) => "int",
+        TomlValue::Float(_) => "float",
+        TomlValue::Boolean(_) => "bool",
+        TomlValue::Array(_) if toml_document_string_list(value) => "string_list",
+        TomlValue::Array(_) => "array",
+        TomlValue::Table(_) => "object",
+        TomlValue::Datetime(_) => "datetime",
+    }
+}
+
+fn toml_document_type_label(value: &TomlValue) -> &'static str {
+    match value {
+        TomlValue::String(_) => "string",
+        TomlValue::Integer(_) => "integer",
+        TomlValue::Float(_) => "float",
+        TomlValue::Boolean(_) => "boolean",
+        TomlValue::Array(_) if toml_document_string_list(value) => "string list",
+        TomlValue::Array(_) => "array",
+        TomlValue::Table(_) => "table",
+        TomlValue::Datetime(_) => "datetime",
+    }
+}
+
+fn toml_document_render_value(value: &TomlValue) -> String {
+    match value {
+        TomlValue::Table(table) => format!("{{{} keys}}", table.len()),
+        TomlValue::Array(values)
+            if !values.is_empty()
+                && values
+                    .iter()
+                    .all(|value| matches!(value, TomlValue::Table(_))) =>
+        {
+            format!("[{} tables]", values.len())
+        }
+        TomlValue::Array(values) if !toml_document_string_list(value) => {
+            format!("[{} items]", values.len())
+        }
+        TomlValue::Datetime(value) => value.to_string(),
+        _ => toml_value_to_json(value)
+            .map(|value| render_json_value(&value))
+            .unwrap_or_else(|source| format!("unsupported: {source}")),
+    }
+}
+
+fn toml_document_validation_label(type_label: &str, editable: bool) -> &'static str {
+    if editable {
+        match type_label {
+            "string list" => "TOML array of strings",
+            "boolean" => "TOML boolean",
+            "integer" => "TOML integer",
+            "float" => "TOML float",
+            "string" => "TOML string",
+            _ => "TOML value",
+        }
+    } else {
+        "read-only in generic TOML document view"
+    }
+}
+
+fn toml_document_description(
+    display_path: &str,
+    type_label: &str,
+    editable: bool,
+    path_is_patchable: bool,
+) -> String {
+    if editable {
+        return format!(
+            "Generic TOML {type_label} value at {display_path}. Hosts validate, write, reload, and apply this source."
+        );
+    }
+    if path_is_patchable {
+        format!(
+            "Generic TOML {type_label} value at {display_path}. Complex TOML values are shown for inspection; edit the source file for structured changes."
+        )
+    } else {
+        format!(
+            "Generic TOML {type_label} value at {display_path}. This path cannot be represented as a safe dotted TOML patch path; edit the source file directly."
+        )
+    }
+}
+
+fn toml_document_read_only_notice(path_is_patchable: bool) -> String {
+    if path_is_patchable {
+        "Complex TOML values are read-only in this generic view; edit the source file directly."
+            .to_string()
+    } else {
+        "This TOML path cannot be edited safely through dotted path patching; edit the source file directly."
+            .to_string()
+    }
+}
+
+fn state_label_text(state: ConfigUiValueState) -> &'static str {
+    match state {
+        ConfigUiValueState::Explicit => "explicit",
+        ConfigUiValueState::Defaulted => "default",
+        ConfigUiValueState::Unset => "unset",
+        ConfigUiValueState::Invalid => "invalid",
+    }
+}
+
 pub fn owner_label(owner: ConfigUiPathOwner) -> &'static str {
     match owner {
         ConfigUiPathOwner::Default => "default",
@@ -808,6 +1208,29 @@ mod tests {
             detail: "Host applies this after saving.".to_string(),
             pending: true,
         }
+    }
+
+    fn toml_document_rows(
+        current_toml: &str,
+        default_toml: Option<&str>,
+    ) -> ConfigUiTomlDocumentRows {
+        build_toml_document_fields(ConfigUiTomlDocumentSpec {
+            source_id: "native",
+            tab: "native",
+            current_toml,
+            default_toml,
+            validation: "",
+            rebuild_required: false,
+            apply_status: status(),
+        })
+        .expect("toml document rows")
+    }
+
+    fn toml_field<'a>(rows: &'a ConfigUiTomlDocumentRows, path: &str) -> &'a ConfigUiField {
+        rows.fields
+            .iter()
+            .find(|field| field.path == path)
+            .unwrap_or_else(|| panic!("missing TOML document field {path}"))
     }
 
     // Defends: source metadata is selected by host tab while operational tabs can keep the legacy fallback.
@@ -1143,6 +1566,240 @@ help = "Theme name"
         .expect_err("missing choices");
 
         assert!(error.contains("must define at least one allowed string-list value"));
+    }
+
+    // Defends: arbitrary TOML document rows are deterministic and expose table grouping without host-declared fields.
+    #[test]
+    fn toml_document_helper_builds_stable_grouped_rows() {
+        let rows = toml_document_rows(
+            r#"
+theme = "dark"
+
+[editor]
+line-number = "relative"
+plugins = ["git", "theme"]
+rulers = [80, 100]
+
+[editor.cursor-shape]
+insert = "bar"
+"#,
+            Some(
+                r#"
+theme = "light"
+
+[editor]
+line-number = "absolute"
+plugins = ["git"]
+true-color = true
+
+[editor.cursor-shape]
+normal = "block"
+"#,
+            ),
+        );
+
+        assert_eq!(
+            rows.fields
+                .iter()
+                .map(|field| field.path.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "editor",
+                "editor.cursor-shape",
+                "editor.cursor-shape.insert",
+                "editor.cursor-shape.normal",
+                "editor.line-number",
+                "editor.plugins",
+                "editor.rulers",
+                "editor.true-color",
+                "theme",
+            ]
+        );
+        assert_eq!(
+            rows.list_table
+                .columns
+                .iter()
+                .map(|column| column.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["table", "key", "type", "state", "value", "default"]
+        );
+
+        let table = &rows.fields[0];
+        assert_eq!(
+            table.list_cells,
+            vec!["", "[editor]", "table", "explicit", "{4 keys}", "{4 keys}"]
+        );
+        assert_eq!(
+            table.edit_behavior,
+            ConfigUiEditBehavior::StructuredOnly {
+                notice: "Complex TOML values are read-only in this generic view; edit the source file directly.".to_string(),
+            }
+        );
+
+        let line_number = toml_field(&rows, "editor.line-number");
+        assert_eq!(line_number.kind, "string");
+        assert_eq!(
+            line_number.list_cells,
+            vec![
+                "editor",
+                "line-number",
+                "string",
+                "explicit",
+                "\"relative\"",
+                "\"absolute\""
+            ]
+        );
+        assert_eq!(line_number.current_value, "\"relative\"");
+        assert_eq!(line_number.edit_value, "\"relative\"");
+        assert_eq!(line_number.default_value, "\"absolute\"");
+        assert_eq!(line_number.edit_behavior, ConfigUiEditBehavior::Default);
+    }
+
+    // Defends: default TOML documents can supply defaulted rows without a host schema.
+    #[test]
+    fn toml_document_helper_marks_defaulted_and_unsupported_rows() {
+        let rows = toml_document_rows(
+            r#"
+[editor]
+rulers = [80, 100]
+"#,
+            Some(
+                r#"
+[editor]
+line-number = "relative"
+rulers = [80]
+"#,
+            ),
+        );
+
+        let line_number = toml_field(&rows, "editor.line-number");
+        assert_eq!(line_number.state, ConfigUiValueState::Defaulted);
+        assert_eq!(line_number.current_value, "\"relative\"");
+        assert_eq!(line_number.default_value, "\"relative\"");
+        assert_eq!(
+            line_number.list_cells,
+            vec![
+                "editor",
+                "line-number",
+                "string",
+                "default",
+                "\"relative\"",
+                "\"relative\""
+            ]
+        );
+
+        let rulers = toml_field(&rows, "editor.rulers");
+        assert_eq!(rulers.kind, "array");
+        assert_eq!(rulers.current_value, "[2 items]");
+        assert_eq!(rulers.default_value, NO_CONFIG_DEFAULT_VALUE_LABEL);
+        assert_eq!(rulers.list_cells[5], "[1 items]");
+        assert_eq!(rulers.validation, "read-only in generic TOML document view");
+        assert!(matches!(
+            rulers.edit_behavior,
+            ConfigUiEditBehavior::StructuredOnly { .. }
+        ));
+    }
+
+    // Defends: host validation text applies to editable TOML document rows without hiding read-only complex-row limits.
+    #[test]
+    fn toml_document_helper_preserves_read_only_validation_for_complex_rows() {
+        let rows = build_toml_document_fields(ConfigUiTomlDocumentSpec {
+            source_id: "native",
+            tab: "native",
+            current_toml: r#"
+[editor]
+line-number = "relative"
+rulers = [80, 100]
+"#,
+            default_toml: None,
+            validation: "host validates before writing",
+            rebuild_required: false,
+            apply_status: status(),
+        })
+        .expect("toml document rows");
+
+        let line_number = toml_field(&rows, "editor.line-number");
+        assert_eq!(line_number.validation, "host validates before writing");
+
+        let rulers = toml_field(&rows, "editor.rulers");
+        assert_eq!(rulers.validation, "read-only in generic TOML document view");
+    }
+
+    // Defends: quoted or otherwise non-dotted TOML paths remain inspectable instead of becoming unsafe edit routes.
+    #[test]
+    fn toml_document_helper_renders_unpatchable_paths_as_read_only() {
+        let rows = toml_document_rows(
+            r#"
+"weird.key" = "value"
+"#,
+            Some(
+                r#"
+"weird.key" = "default"
+"#,
+            ),
+        );
+        let field = rows.fields.first().expect("quoted key");
+
+        assert_eq!(field.path, "\"weird.key\"");
+        assert_eq!(field.display_label, "\"weird.key\"");
+        assert_eq!(field.default_value, NO_CONFIG_DEFAULT_VALUE_LABEL);
+        assert_eq!(
+            field.list_cells,
+            vec![
+                "",
+                "\"weird.key\"",
+                "string",
+                "explicit",
+                "\"value\"",
+                "\"default\""
+            ]
+        );
+        assert!(matches!(
+            field.edit_behavior,
+            ConfigUiEditBehavior::StructuredOnly { .. }
+        ));
+    }
+
+    // Defends: inline table children are not advertised as editable when the TOML patcher cannot patch through the parent.
+    #[test]
+    fn toml_document_helper_keeps_inline_table_children_read_only() {
+        let rows = toml_document_rows(
+            r#"
+package = { name = "ratconfig", enabled = true }
+"#,
+            None,
+        );
+
+        let name = toml_field(&rows, "package.name");
+        assert_eq!(name.kind, "string");
+        assert_eq!(name.current_value, "\"ratconfig\"");
+        assert_eq!(name.edit_value, "");
+        assert_eq!(name.default_value, NO_CONFIG_DEFAULT_VALUE_LABEL);
+        assert_eq!(name.validation, "read-only in generic TOML document view");
+        assert_eq!(
+            name.edit_behavior,
+            ConfigUiEditBehavior::StructuredOnly {
+                notice: "This TOML path cannot be edited safely through dotted path patching; edit the source file directly.".to_string(),
+            }
+        );
+    }
+
+    // Defends: simple arbitrary TOML string lists reuse the existing editable string-list field semantics.
+    #[test]
+    fn toml_document_helper_builds_editable_simple_string_lists() {
+        let rows = toml_document_rows(
+            r#"
+[shell]
+plugins = ["git", "status"]
+"#,
+            None,
+        );
+        let plugins = toml_field(&rows, "shell.plugins");
+
+        assert_eq!(plugins.kind, "string_list");
+        assert_eq!(plugins.current_value, r#"["git","status"]"#);
+        assert_eq!(plugins.edit_value, r#"["git","status"]"#);
+        assert_eq!(plugins.edit_behavior, ConfigUiEditBehavior::Default);
     }
 
     // Defends: host-owned file action rows join tab/search rows without becoming scalar settings.
