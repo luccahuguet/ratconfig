@@ -203,6 +203,8 @@ Populate `ConfigUiModel::file_actions` when the UI should show rows for host-own
 
 While a text field is being edited, `Ctrl+e` emits `ConfigUiIntent::EditTextExternally`. The intent carries the field index, source id, path, and staged input buffer. Hosts can write that input to a temporary file, open the user's editor, read the edited text back, apply any host-owned newline or multiline policy, then call `ConfigUiApp::apply_external_text_edit`. Ratconfig does not spawn editors, create temporary files, or save automatically; `Enter` still emits `SetField` and `Esc` still cancels the staged edit
 
+When using the optional crossterm runner, the callback is invoked while the runner's terminal session is active; hosts that launch a full-screen editor must own any terminal restore/re-entry policy themselves, or use the lower-level editor/render APIs and own the event loop
+
 Hosts that want ratconfig to own the crossterm terminal setup, draw loop, event reads, and key conversion can enable the optional runner:
 
 ```toml
