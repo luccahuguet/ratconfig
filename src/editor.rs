@@ -226,7 +226,7 @@ impl ConfigUiApp {
         field_index: usize,
         input: impl Into<String>,
     ) -> Result<(), String> {
-        let Some(edit) = self.edit.as_ref() else {
+        let Some(edit) = &mut self.edit else {
             return Err("No text edit is active.".to_string());
         };
         if edit.field_index != field_index {
@@ -239,9 +239,7 @@ impl ConfigUiApp {
             return Err("External editor text can only replace text edit buffers.".to_string());
         }
 
-        if let Some(edit) = &mut self.edit {
-            edit.input = input.into();
-        }
+        edit.input = input.into();
         self.notice = None;
         Ok(())
     }
