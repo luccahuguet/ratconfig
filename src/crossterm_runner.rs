@@ -153,6 +153,10 @@ mod tests {
             Some(ConfigUiKey::Ctrl('u'))
         );
         assert_eq!(
+            crossterm_key_to_config_ui_key(key(KeyCode::Char('e'), KeyModifiers::CONTROL)),
+            Some(ConfigUiKey::Ctrl('e'))
+        );
+        assert_eq!(
             crossterm_key_to_config_ui_key(key(
                 KeyCode::Char('U'),
                 KeyModifiers::SHIFT | KeyModifiers::CONTROL

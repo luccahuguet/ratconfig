@@ -201,6 +201,8 @@ Ratconfig still does not infer product labels, schema validation, file layering,
 
 Populate `ConfigUiModel::file_actions` when the UI should show rows for host-owned native config files. Ratconfig renders label, path, missing/read-only/error state, and create-if-missing affordance, then emits `ConfigUiIntent::OpenFile`; hosts still own file discovery, creation, editor launch, validation, reloads, and all file IO
 
+While a text field is being edited, `Ctrl+e` emits `ConfigUiIntent::EditTextExternally`. The intent carries the field index, source id, path, and staged input buffer. Hosts can write that input to a temporary file, open the user's editor, read the edited text back, apply any host-owned newline or multiline policy, then call `ConfigUiApp::apply_external_text_edit`. Ratconfig does not spawn editors, create temporary files, or save automatically; `Enter` still emits `SetField` and `Esc` still cancels the staged edit
+
 Hosts that want ratconfig to own the crossterm terminal setup, draw loop, event reads, and key conversion can enable the optional runner:
 
 ```toml
@@ -223,6 +225,12 @@ fn run_editor(mut app: ConfigUiApp) -> Result<(), Box<dyn std::error::Error>> {
             }
             ConfigUiIntent::UnsetField { source_id, path, .. } => {
                 host_unset_and_reload(&source_id, &path)?;
+            }
+            ConfigUiIntent::EditTextExternally { field_index, input, .. } => {
+                let edited = host_edit_text_buffer(&input)?;
+                if let Err(message) = app.apply_external_text_edit(field_index, edited) {
+                    app.notice_error(message);
+                }
             }
             ConfigUiIntent::OpenFile { path, create_if_missing, .. } => {
                 host_open_file(&path, create_if_missing)?;
@@ -247,6 +255,10 @@ fn host_unset_and_reload(
     _path: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
+}
+
+fn host_edit_text_buffer(input: &str) -> Result<String, Box<dyn std::error::Error>> {
+    Ok(input.to_string())
 }
 
 fn host_open_file(

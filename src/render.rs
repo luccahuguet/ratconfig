@@ -903,7 +903,12 @@ fn setting_control_line(primary: &'static str, field: &ConfigUiField) -> Line<'s
 
 fn edit_control_line(field: &ConfigUiField, mode: ConfigUiEditMode) -> Line<'static> {
     match mode {
-        ConfigUiEditMode::Text => raw_line(["Enter save  ", "Esc cancel  ", "Ctrl+u clear"]),
+        ConfigUiEditMode::Text => raw_line([
+            "Ctrl+e editor  ",
+            "Enter save  ",
+            "Esc cancel  ",
+            "Ctrl+u clear",
+        ]),
         ConfigUiEditMode::Choice if is_scalar_enum_field(field) => raw_line([
             "hjkl/Arrows move  ",
             "Space select  ",
@@ -1552,6 +1557,22 @@ name = "rust"
         assert!(
             rendered_text(&edit_control_line(field, ConfigUiEditMode::MultiChoice))
                 .contains("J/K reorder")
+        );
+    }
+
+    // Defends: text edit controls expose the host-owned external editor path without changing picker controls.
+    #[test]
+    fn text_edit_controls_show_external_editor_key() {
+        let model = test_model(ConfigUiValueState::Explicit);
+        let field = &model.fields[0];
+
+        let text_controls = rendered_text(&edit_control_line(field, ConfigUiEditMode::Text));
+        assert!(text_controls.contains("Ctrl+e editor"));
+        assert!(text_controls.contains("Enter save"));
+        assert!(text_controls.contains("Ctrl+u clear"));
+
+        assert!(
+            !rendered_text(&edit_control_line(field, ConfigUiEditMode::Choice)).contains("editor")
         );
     }
 

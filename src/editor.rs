@@ -71,6 +71,12 @@ pub enum ConfigUiIntent {
         path: PathBuf,
         create_if_missing: bool,
     },
+    EditTextExternally {
+        field_index: usize,
+        source_id: String,
+        path: String,
+        input: String,
+    },
     SetField {
         field_index: usize,
         source_id: String,
@@ -215,6 +221,31 @@ impl ConfigUiApp {
         self.edit = None;
     }
 
+    pub fn apply_external_text_edit(
+        &mut self,
+        field_index: usize,
+        input: impl Into<String>,
+    ) -> Result<(), String> {
+        let Some(edit) = self.edit.as_ref() else {
+            return Err("No text edit is active.".to_string());
+        };
+        if edit.field_index != field_index {
+            return Err(format!(
+                "Returned text is for field index {field_index}, but the active edit is for field index {}.",
+                edit.field_index
+            ));
+        }
+        if edit.mode != ConfigUiEditMode::Text {
+            return Err("External editor text can only replace text edit buffers.".to_string());
+        }
+
+        if let Some(edit) = &mut self.edit {
+            edit.input = input.into();
+        }
+        self.notice = None;
+        Ok(())
+    }
+
     fn cancel_edit(&mut self) -> ConfigUiIntent {
         self.edit = None;
         self.notice_info("Edit canceled.");
@@ -288,6 +319,7 @@ impl ConfigUiApp {
         match key {
             ConfigUiKey::Esc => self.cancel_edit(),
             ConfigUiKey::Enter => self.save_edit(),
+            ConfigUiKey::Ctrl('e' | 'E') => self.edit_text_externally(),
             ConfigUiKey::Backspace => self.update_edit_input(String::pop),
             ConfigUiKey::Ctrl('u' | 'U') => self.update_edit_input(String::clear),
             ConfigUiKey::Char(ch) => self.update_edit_input(|input| input.push(ch)),
@@ -486,6 +518,30 @@ impl ConfigUiApp {
             action_id: action.action_id.clone(),
             path: action.path.clone(),
             create_if_missing: action.create_if_missing && !action.exists,
+        }
+    }
+
+    fn edit_text_externally(&mut self) -> ConfigUiIntent {
+        let Some(edit) = self.edit.as_ref() else {
+            return ConfigUiIntent::None;
+        };
+        if edit.mode != ConfigUiEditMode::Text {
+            return ConfigUiIntent::None;
+        }
+        let field_index = edit.field_index;
+        let input = edit.input.clone();
+        let Some(field) = self.model.fields.get(field_index) else {
+            self.notice_error("Active edit field is unavailable.");
+            return ConfigUiIntent::None;
+        };
+        let source_id = field.source_id.clone();
+        let path = field.path.clone();
+        self.notice = None;
+        ConfigUiIntent::EditTextExternally {
+            field_index,
+            source_id,
+            path,
+            input,
         }
     }
 
@@ -1054,6 +1110,65 @@ mod tests {
                 field_index: 1,
                 source_id: "ui".to_string(),
                 path: "ui.title".to_string(),
+            }
+        );
+    }
+
+    // Defends: text edit mode can delegate the staged buffer to a host-owned editor without making Ratconfig launch one.
+    #[test]
+    fn text_edit_mode_emits_external_editor_intent_with_staged_input() {
+        let mut model = test_model();
+        model.fields = vec![
+            field_with_source("ui", "ui.title", "string", "\"light\"", &[]),
+            field_with_source("server", "server.enabled", "bool", "false", &[]),
+        ];
+        let mut app = ConfigUiApp::new(model);
+
+        assert_eq!(app.handle_key(ConfigUiKey::Ctrl('e')), ConfigUiIntent::None);
+
+        app.begin_edit_field(1);
+        assert_eq!(app.handle_key(ConfigUiKey::Ctrl('e')), ConfigUiIntent::None);
+
+        app.begin_edit_field(0);
+        app.edit.as_mut().expect("text edit").input = "temporary title".to_string();
+        assert_eq!(
+            app.handle_key(ConfigUiKey::Ctrl('e')),
+            ConfigUiIntent::EditTextExternally {
+                field_index: 0,
+                source_id: "ui".to_string(),
+                path: "ui.title".to_string(),
+                input: "temporary title".to_string(),
+            }
+        );
+        assert!(app.edit.is_some());
+    }
+
+    // Defends: returned host-editor text updates only the active staged buffer and still saves through normal parsing.
+    #[test]
+    fn external_editor_text_is_staged_until_normal_save() {
+        let mut model = test_model();
+        model.fields = vec![
+            field_with_source("ui", "ui.title", "string", "\"light\"", &[]),
+            field_with_source("server", "server.enabled", "bool", "false", &[]),
+        ];
+        let mut app = ConfigUiApp::new(model);
+
+        assert!(app.apply_external_text_edit(0, "ignored").is_err());
+
+        app.begin_edit_field(0);
+        assert!(app.apply_external_text_edit(1, "wrong field").is_err());
+        assert_eq!(app.edit.as_ref().expect("text edit").input, "light");
+
+        app.apply_external_text_edit(0, "edited title")
+            .expect("apply returned text");
+        assert_eq!(app.edit.as_ref().expect("text edit").input, "edited title");
+        assert_eq!(
+            app.handle_key(ConfigUiKey::Enter),
+            ConfigUiIntent::SetField {
+                field_index: 0,
+                source_id: "ui".to_string(),
+                path: "ui.title".to_string(),
+                value: json!("edited title"),
             }
         );
     }
