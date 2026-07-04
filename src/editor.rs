@@ -1,16 +1,19 @@
 // Test lane: default
 
 use super::{
-    ConfigUiEditBehavior, ConfigUiField, ConfigUiFileAction, ConfigUiModel, UiRowRef,
-    visible_rows_for_tab_search,
+    ConfigUiEditBehavior, ConfigUiField, ConfigUiFileAction, ConfigUiModel, ConfigUiTheme,
+    UiRowRef, visible_rows_for_tab_search,
 };
-use crate::model::{string_list_values_from_json, validate_string_choice_value};
+use crate::model::{
+    config_ui_theme_from_model, string_list_values_from_json, validate_string_choice_value,
+};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 pub struct ConfigUiApp {
     pub model: ConfigUiModel,
+    pub active_theme: ConfigUiTheme,
     pub selected_tab: usize,
     pub selected_row: usize,
     pub search: String,
@@ -92,8 +95,10 @@ pub enum ConfigUiIntent {
 
 impl ConfigUiApp {
     pub fn new(model: ConfigUiModel) -> Self {
+        let active_theme = config_ui_theme_from_model(&model);
         Self {
             model,
+            active_theme,
             selected_tab: 0,
             selected_row: 0,
             search: String::new(),
@@ -218,7 +223,53 @@ impl ConfigUiApp {
     }
 
     pub fn finish_successful_write(&mut self) {
-        self.edit = None;
+        let Some(edit) = self.edit.take() else {
+            return;
+        };
+        if let Some(field) = self.model.fields.get(edit.field_index)
+            && let Ok(value) = parse_edit_input(field, &edit.input)
+        {
+            self.switch_theme_for_field_value(edit.field_index, &value);
+        }
+    }
+
+    pub fn finish_successful_set_field(&mut self, field_index: usize, value: &JsonValue) {
+        self.switch_theme_for_field_value(field_index, value);
+        self.clear_edit_for_field(field_index);
+    }
+
+    pub fn finish_successful_unset_field(&mut self, field_index: usize) {
+        if let Some(value) = self
+            .model
+            .fields
+            .get(field_index)
+            .and_then(default_field_value)
+        {
+            self.switch_theme_for_field_value(field_index, &value);
+        }
+        self.clear_edit_for_field(field_index);
+    }
+
+    fn switch_theme_for_field_value(&mut self, field_index: usize, value: &JsonValue) {
+        let Some(switcher) = self.model.theme_switcher.as_ref() else {
+            return;
+        };
+        let Some(field) = self.model.fields.get(field_index) else {
+            return;
+        };
+        if let Some(theme) = switcher.theme_for_field_value(field, value) {
+            self.active_theme = theme;
+        }
+    }
+
+    fn clear_edit_for_field(&mut self, field_index: usize) {
+        if self
+            .edit
+            .as_ref()
+            .is_some_and(|edit| edit.field_index == field_index)
+        {
+            self.edit = None;
+        }
     }
 
     pub fn apply_external_text_edit(
@@ -770,6 +821,14 @@ pub fn parse_rendered_json_string(value: &str) -> Option<String> {
     serde_json::from_str::<String>(value).ok()
 }
 
+fn default_field_value(field: &ConfigUiField) -> Option<JsonValue> {
+    if field.has_default_value() {
+        serde_json::from_str(&field.default_value).ok()
+    } else {
+        None
+    }
+}
+
 fn ensure_allowed_value(field: &ConfigUiField, value: &str) -> Result<(), String> {
     validate_string_choice_value(&field.path, value, &field.allowed_values)
 }
@@ -959,7 +1018,8 @@ mod tests {
     #[cfg(feature = "ui")]
     use crate::row_line_for_model;
     use crate::{
-        ConfigUiTomlDocumentSpec, DEFAULT_CONFIG_SOURCE_ID, build_toml_document_fields,
+        ConfigUiTheme, ConfigUiThemeMapping, ConfigUiThemeSwitcher, ConfigUiTomlDocumentSpec,
+        DEFAULT_CONFIG_SOURCE_ID, build_toml_document_fields,
         test_support::{after_save_status, field, field_with_source, model_with_fields},
     };
     use serde_json::json;
@@ -1110,6 +1170,91 @@ mod tests {
                 path: "ui.title".to_string(),
             }
         );
+    }
+
+    // Defends: a host-declared theme switcher resolves the initial theme from committed model fields.
+    #[test]
+    fn model_theme_switcher_resolves_initial_theme() {
+        let mut model = test_model();
+        model.theme_switcher = Some(theme_switcher());
+        assert_eq!(ConfigUiApp::new(model).active_theme, ConfigUiTheme::Light);
+    }
+
+    // Defends: theme changes are applied only after the host reports a successful write.
+    #[test]
+    fn successful_theme_field_save_switches_theme() {
+        let mut model = test_model();
+        model.fields[1] = field("ui.theme", "string", "\"dark\"", &["light", "dark"]);
+        model.theme_switcher = Some(theme_switcher());
+        let mut app = ConfigUiApp::new(model);
+        app.selected_row = 1;
+
+        assert_eq!(app.active_theme, ConfigUiTheme::Dark);
+        app.begin_edit_field(1);
+        app.edit.as_mut().expect("theme edit").choice_index = 0;
+        assert_eq!(
+            app.handle_key(ConfigUiKey::Enter),
+            ConfigUiIntent::SetField {
+                field_index: 1,
+                source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
+                path: "ui.theme".to_string(),
+                value: json!("light"),
+            }
+        );
+        assert_eq!(app.active_theme, ConfigUiTheme::Dark);
+
+        app.finish_successful_set_field(1, &json!("light"));
+
+        assert_eq!(app.active_theme, ConfigUiTheme::Light);
+        assert!(app.edit.is_none());
+    }
+
+    // Defends: successful reset-to-default writes can switch a theme field without an active edit.
+    #[test]
+    fn successful_theme_field_unset_switches_to_default_theme() {
+        let mut model = test_model();
+        model.fields[1] = field("ui.theme", "string", "\"dark\"", &["light", "dark"]);
+        model.fields[1].default_value = "\"light\"".to_string();
+        model.theme_switcher = Some(theme_switcher());
+        let mut app = ConfigUiApp::new(model);
+        app.selected_row = 1;
+
+        assert_eq!(app.active_theme, ConfigUiTheme::Dark);
+        assert_eq!(
+            app.handle_key(ConfigUiKey::Char('u')),
+            ConfigUiIntent::UnsetField {
+                field_index: 1,
+                source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
+                path: "ui.theme".to_string(),
+            }
+        );
+        assert_eq!(app.active_theme, ConfigUiTheme::Dark);
+
+        app.finish_successful_unset_field(1);
+
+        assert_eq!(app.active_theme, ConfigUiTheme::Light);
+        assert!(app.edit.is_none());
+    }
+
+    // Defends: failed validation/writeback leaves the existing theme unchanged while the edit stays staged.
+    #[test]
+    fn failed_theme_field_save_does_not_switch_theme() {
+        let mut model = test_model();
+        model.fields[1] = field("ui.theme", "string", "\"dark\"", &["light", "dark"]);
+        model.theme_switcher = Some(theme_switcher());
+        let mut app = ConfigUiApp::new(model);
+        app.selected_row = 1;
+        app.begin_edit_field(1);
+        app.edit.as_mut().expect("theme edit").choice_index = 0;
+
+        assert!(matches!(
+            app.handle_key(ConfigUiKey::Enter),
+            ConfigUiIntent::SetField { .. }
+        ));
+        app.notice_error("Host rejected the write.");
+
+        assert_eq!(app.active_theme, ConfigUiTheme::Dark);
+        assert!(app.edit.is_some());
     }
 
     // Defends: text edit mode can delegate the staged buffer to a host-owned editor without making Ratconfig launch one.
@@ -1479,6 +1624,23 @@ line-number = "relative"
                 &["git", "search"],
             ),
         ])
+    }
+
+    fn theme_switcher() -> ConfigUiThemeSwitcher {
+        ConfigUiThemeSwitcher {
+            source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
+            field_path: "ui.theme".to_string(),
+            mappings: vec![
+                ConfigUiThemeMapping {
+                    value: json!("dark"),
+                    theme: ConfigUiTheme::Dark,
+                },
+                ConfigUiThemeMapping {
+                    value: json!("light"),
+                    theme: ConfigUiTheme::Light,
+                },
+            ],
+        }
     }
 
     fn file_action(

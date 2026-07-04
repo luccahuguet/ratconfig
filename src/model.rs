@@ -25,6 +25,7 @@ pub struct ConfigUiModel {
     pub sidecars: Vec<ConfigUiSidecar>,
     pub native_config_statuses: Vec<ConfigUiNativeStatus>,
     pub diagnostics: Vec<ConfigUiDiagnostic>,
+    pub theme_switcher: Option<ConfigUiThemeSwitcher>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +55,25 @@ pub struct ConfigUiListTable {
 pub struct ConfigUiListColumn {
     pub title: String,
     pub width: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigUiTheme {
+    Dark,
+    Light,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigUiThemeSwitcher {
+    pub source_id: String,
+    pub field_path: String,
+    pub mappings: Vec<ConfigUiThemeMapping>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigUiThemeMapping {
+    pub value: JsonValue,
+    pub theme: ConfigUiTheme,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +141,48 @@ pub fn selected_config_source(
         .sources
         .iter()
         .find(|source| source.tab == tab.as_str())
+}
+
+pub(crate) fn config_ui_theme_from_model(model: &ConfigUiModel) -> ConfigUiTheme {
+    model
+        .theme_switcher
+        .as_ref()
+        .and_then(|switcher| switcher.resolve(&model.fields))
+        .unwrap_or(ConfigUiTheme::Dark)
+}
+
+impl ConfigUiThemeSwitcher {
+    pub fn resolve(&self, fields: &[ConfigUiField]) -> Option<ConfigUiTheme> {
+        let field = fields
+            .iter()
+            .find(|field| field.source_id == self.source_id && field.path == self.field_path)?;
+        let value = committed_field_value(field)?;
+        self.theme_for_field_value(field, &value)
+    }
+
+    pub(crate) fn theme_for_field_value(
+        &self,
+        field: &ConfigUiField,
+        value: &JsonValue,
+    ) -> Option<ConfigUiTheme> {
+        if field.source_id != self.source_id || field.path != self.field_path {
+            return None;
+        }
+        self.theme_for_value(value)
+    }
+
+    pub fn theme_for_value(&self, value: &JsonValue) -> Option<ConfigUiTheme> {
+        self.mappings
+            .iter()
+            .find(|mapping| mapping.value == *value)
+            .map(|mapping| mapping.theme)
+    }
+}
+
+fn committed_field_value(field: &ConfigUiField) -> Option<JsonValue> {
+    serde_json::from_str(&field.edit_value)
+        .or_else(|_| serde_json::from_str(&field.current_value))
+        .ok()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1264,6 +1326,7 @@ mod tests {
             sidecars: Vec::new(),
             native_config_statuses: Vec::new(),
             diagnostics: Vec::new(),
+            theme_switcher: None,
         };
 
         assert_eq!(
@@ -1834,6 +1897,7 @@ plugins = ["git", "status"]
             sidecars: Vec::new(),
             native_config_statuses: Vec::new(),
             diagnostics: Vec::new(),
+            theme_switcher: None,
         };
 
         assert_eq!(

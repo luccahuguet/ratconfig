@@ -68,5 +68,6 @@ pub(crate) fn model_with_fields(fields: Vec<ConfigUiField>) -> ConfigUiModel {
         sidecars: Vec::new(),
         native_config_statuses: Vec::new(),
         diagnostics: Vec::new(),
+        theme_switcher: None,
     }
 }

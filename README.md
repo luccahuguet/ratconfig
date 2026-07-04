@@ -15,6 +15,7 @@ Example host integration in Yazelix: ratconfig owns the reusable tabs, rows, edi
 - optional host-supplied list table profiles for structured field tabs
 - staged bool toggles, scalar editing, single-select, multiselect, and default reset controls
 - host-routed file action rows for native config files
+- built-in dark/light UI palettes and optional model-driven theme switching
 - generic Ratatui rendering for the model
 - optional host-supplied rich detail rendering callbacks
 - comment-preserving JSONC and TOML set/unset patch primitives
@@ -84,6 +85,7 @@ fn model() -> ConfigUiModel {
         sidecars: Vec::new(),
         native_config_statuses: Vec::new(),
         diagnostics: Vec::new(),
+        theme_switcher: None,
     }
 }
 
@@ -106,6 +108,8 @@ Use `ConfigUiField::display_label` when row and detail text should be friendlier
 Populate `ConfigUiModel::tab_list_tables` and matching `ConfigUiField::list_cells` when a tab should render a structured display table instead of the default `takes effect | setting | value` field list. This is presentation-only data; Ratconfig does not parse labels, values, paths, or host-specific concepts to build those cells
 
 Fields with defaults expose a reset-to-default action that emits `ConfigUiIntent::UnsetField`. Hosts decide whether that means unsetting text, writing a default, validation, persistence, reloads, and apply behavior. Use `NO_CONFIG_DEFAULT_VALUE_LABEL` for manually constructed fields that have no default; builder helpers set it automatically
+
+Populate `ConfigUiModel::theme_switcher` when a committed field value should select a built-in Ratconfig theme. The switcher names one source id, one field path, and `serde_json::Value` mappings to `ConfigUiTheme::Dark` or `ConfigUiTheme::Light`; Ratconfig resolves the initial theme from model fields and switches after `ConfigUiApp::finish_successful_set_field()` or `ConfigUiApp::finish_successful_unset_field()` confirms a successful write of that field. Failed host validation/writeback should not call those methods, so staged edits stay active and the theme does not change
 
 ## String-List Choices
 
@@ -221,12 +225,13 @@ fn run_editor(mut app: ConfigUiApp) -> Result<(), Box<dyn std::error::Error>> {
             ConfigUiIntent::BeginEdit { field_index, .. } => {
                 app.begin_edit_field(field_index);
             }
-            ConfigUiIntent::SetField { source_id, path, value, .. } => {
+            ConfigUiIntent::SetField { field_index, source_id, path, value } => {
                 host_validate_and_write(&source_id, &path, &value)?;
-                app.finish_successful_write();
+                app.finish_successful_set_field(field_index, &value);
             }
-            ConfigUiIntent::UnsetField { source_id, path, .. } => {
+            ConfigUiIntent::UnsetField { field_index, source_id, path } => {
                 host_unset_and_reload(&source_id, &path)?;
+                app.finish_successful_unset_field(field_index);
             }
             ConfigUiIntent::EditTextExternally { field_index, input, .. } => {
                 let edited = host_edit_text_buffer(&input)?;

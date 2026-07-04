@@ -27,8 +27,9 @@ pub use model::{
     ConfigUiField, ConfigUiFieldMetadata, ConfigUiFieldRowSpec, ConfigUiFileAction,
     ConfigUiListColumn, ConfigUiListTable, ConfigUiMetadata, ConfigUiModel, ConfigUiNativeStatus,
     ConfigUiPathOwner, ConfigUiSchemaField, ConfigUiSidecar, ConfigUiSource,
-    ConfigUiStringListChoiceSpec, ConfigUiTomlDocumentRows, ConfigUiTomlDocumentSpec,
-    ConfigUiValueState, DEFAULT_CONFIG_SOURCE_ID, NO_CONFIG_DEFAULT_VALUE_LABEL,
+    ConfigUiStringListChoiceSpec, ConfigUiTheme, ConfigUiThemeMapping, ConfigUiThemeSwitcher,
+    ConfigUiTomlDocumentRows, ConfigUiTomlDocumentSpec, ConfigUiValueState,
+    DEFAULT_CONFIG_SOURCE_ID, NO_CONFIG_DEFAULT_VALUE_LABEL,
 };
 pub use model::{
     UiRowRef, build_config_ui_field, build_string_list_choice_field, build_toml_document_fields,

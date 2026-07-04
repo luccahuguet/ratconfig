@@ -18,6 +18,49 @@ const STATUS_COLUMN_WIDTH: usize = 10;
 const STATUS_ITEM_COLUMN_WIDTH: usize = 24;
 
 #[derive(Clone, Copy)]
+struct ConfigUiThemePalette {
+    text: Color,
+    muted: Color,
+    title: Color,
+    accent: Color,
+    success: Color,
+    error: Color,
+    metadata_key: Color,
+    config_key: Color,
+    border: Color,
+    selected_bg: Color,
+}
+
+fn config_ui_theme_palette(theme: ConfigUiTheme) -> ConfigUiThemePalette {
+    match theme {
+        ConfigUiTheme::Dark => ConfigUiThemePalette {
+            text: Color::White,
+            muted: Color::Gray,
+            title: Color::Cyan,
+            accent: Color::Yellow,
+            success: Color::Green,
+            error: Color::Red,
+            metadata_key: Color::LightBlue,
+            config_key: Color::LightCyan,
+            border: Color::Gray,
+            selected_bg: Color::DarkGray,
+        },
+        ConfigUiTheme::Light => ConfigUiThemePalette {
+            text: Color::Black,
+            muted: Color::DarkGray,
+            title: Color::Rgb(0, 88, 132),
+            accent: Color::Rgb(96, 64, 128),
+            success: Color::Rgb(0, 100, 56),
+            error: Color::Rgb(160, 32, 32),
+            metadata_key: Color::Rgb(32, 76, 132),
+            config_key: Color::Rgb(0, 92, 120),
+            border: Color::Gray,
+            selected_bg: Color::Rgb(214, 224, 238),
+        },
+    }
+}
+
+#[derive(Clone, Copy)]
 enum ListLayout<'a> {
     Field,
     Status,
@@ -93,6 +136,7 @@ pub fn draw_config_ui_with_details(
 }
 
 fn render_header(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect) {
+    let theme = app.active_theme;
     let metadata = header_metadata(&app.model, app.selected_tab);
     let warning_count = app
         .model
@@ -113,7 +157,12 @@ fn render_header(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect) {
 
     let title = Line::from(vec![Span::styled("Config", bold_fg_style(Color::Cyan))]);
 
-    frame.render_widget(Block::default().borders(Borders::BOTTOM), area);
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::BOTTOM)
+            .border_style(border_style(theme)),
+        area,
+    );
     let horizontal_padding = HEADER_HORIZONTAL_PADDING.min(area.width / 2);
     let content = Rect {
         x: area.x + horizontal_padding,
@@ -138,16 +187,19 @@ fn render_header(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect) {
         height: 1,
     };
 
-    frame.render_widget(Paragraph::new(title).alignment(Alignment::Left), title_area);
+    frame.render_widget(
+        Paragraph::new(themed_line(title, theme)).alignment(Alignment::Left),
+        title_area,
+    );
     if metadata_area.width > 0 {
+        let metadata_line = header_metadata_line(
+            &metadata,
+            &diagnostic_text,
+            diagnostic_style,
+            metadata_area.width as usize,
+        );
         frame.render_widget(
-            Paragraph::new(header_metadata_line(
-                &metadata,
-                &diagnostic_text,
-                diagnostic_style,
-                metadata_area.width as usize,
-            ))
-            .alignment(Alignment::Right),
+            Paragraph::new(themed_line(metadata_line, theme)).alignment(Alignment::Right),
             metadata_area,
         );
     }
@@ -241,8 +293,8 @@ fn render_tabs(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect) {
     frame.render_widget(
         Tabs::new(labels)
             .select(app.selected_tab)
-            .style(fg_style(Color::Gray))
-            .highlight_style(bold_fg_style(Color::Yellow)),
+            .style(themed_style(fg_style(Color::Gray), app.active_theme))
+            .highlight_style(themed_style(bold_fg_style(Color::Yellow), app.active_theme)),
         area,
     );
 }
@@ -273,7 +325,12 @@ fn render_list(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect, rows: &[UiR
     let layout = list_layout(&app.model, app.selected_tab);
     let items = rows
         .iter()
-        .map(|row| ListItem::new(row_line_for_layout(&app.model, *row, layout)))
+        .map(|row| {
+            ListItem::new(themed_line(
+                row_line_for_layout(&app.model, *row, layout),
+                app.active_theme,
+            ))
+        })
         .collect::<Vec<_>>();
     let mut state = ListState::default();
     if !items.is_empty() {
@@ -284,7 +341,10 @@ fn render_list(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect, rows: &[UiR
     } else {
         format!("settings filtered by {}", app.search)
     };
-    let block = Block::default().title(title).borders(Borders::ALL);
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(border_style(app.active_theme));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height == 0 {
@@ -296,7 +356,8 @@ fn render_list(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect, rows: &[UiR
         .constraints([Constraint::Length(1), Constraint::Min(0)])
         .split(inner);
     frame.render_widget(
-        Paragraph::new(list_header_line(layout)).alignment(Alignment::Left),
+        Paragraph::new(themed_line(list_header_line(layout), app.active_theme))
+            .alignment(Alignment::Left),
         list_chunks[0],
     );
     if list_chunks[1].height == 0 {
@@ -304,11 +365,12 @@ fn render_list(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect, rows: &[UiR
     }
 
     frame.render_stateful_widget(
-        List::new(items).highlight_style(
+        List::new(items).highlight_style(themed_style(
             Style::default()
                 .bg(Color::DarkGray)
                 .add_modifier(Modifier::BOLD),
-        ),
+            app.active_theme,
+        )),
         list_chunks[1],
         &mut state,
     );
@@ -364,8 +426,13 @@ fn render_details(
         ))],
     };
     frame.render_widget(
-        Paragraph::new(lines)
-            .block(Block::default().title("details").borders(Borders::ALL))
+        Paragraph::new(themed_lines(lines, app.active_theme))
+            .block(
+                Block::default()
+                    .title("details")
+                    .borders(Borders::ALL)
+                    .border_style(border_style(app.active_theme)),
+            )
             .wrap(Wrap { trim: false }),
         area,
     );
@@ -820,7 +887,10 @@ fn render_footer(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect) {
             || edit_control_line(field, edit.mode),
             |notice| notice_line(notice, area.width as usize),
         );
-        frame.render_widget(Paragraph::new(vec![editing, status]), area);
+        frame.render_widget(
+            Paragraph::new(themed_lines(vec![editing, status], app.active_theme)),
+            area,
+        );
         return;
     }
 
@@ -839,7 +909,10 @@ fn render_footer(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect) {
     controls
         .spans
         .push(Span::styled(search, fg_style(Color::Yellow)));
-    frame.render_widget(Paragraph::new(vec![notice, controls]), area);
+    frame.render_widget(
+        Paragraph::new(themed_lines(vec![notice, controls], app.active_theme)),
+        area,
+    );
 }
 
 fn notice_line(notice: &ConfigUiNotice, width: usize) -> Line<'static> {
@@ -934,6 +1007,65 @@ fn edit_control_line(field: &ConfigUiField, mode: ConfigUiEditMode) -> Line<'sta
 
 fn raw_line<const N: usize>(parts: [&'static str; N]) -> Line<'static> {
     parts.into_iter().map(Span::raw).collect()
+}
+
+fn themed_lines(lines: Vec<Line<'static>>, theme: ConfigUiTheme) -> Vec<Line<'static>> {
+    lines
+        .into_iter()
+        .map(|line| themed_line(line, theme))
+        .collect()
+}
+
+fn themed_line(mut line: Line<'static>, theme: ConfigUiTheme) -> Line<'static> {
+    line.style = themed_style(line.style, theme);
+    line.spans = line
+        .spans
+        .into_iter()
+        .map(|mut span| {
+            span.style = themed_style(span.style, theme);
+            span
+        })
+        .collect();
+    line
+}
+
+fn themed_style(mut style: Style, theme: ConfigUiTheme) -> Style {
+    if theme == ConfigUiTheme::Dark {
+        return style;
+    }
+    let palette = config_ui_theme_palette(theme);
+    style.fg = Some(style.fg.map_or(palette.text, |color| {
+        light_foreground_for_dark_role(color, palette)
+    }));
+    style.bg = style
+        .bg
+        .map(|color| light_background_for_dark_role(color, palette));
+    style
+}
+
+fn light_foreground_for_dark_role(color: Color, palette: ConfigUiThemePalette) -> Color {
+    match color {
+        Color::White | Color::Black => palette.text,
+        Color::Gray | Color::DarkGray => palette.muted,
+        Color::Cyan => palette.title,
+        Color::LightBlue => palette.metadata_key,
+        Color::LightCyan => palette.config_key,
+        Color::Yellow => palette.accent,
+        Color::Green => palette.success,
+        Color::Red => palette.error,
+        _ => color,
+    }
+}
+
+fn light_background_for_dark_role(color: Color, palette: ConfigUiThemePalette) -> Color {
+    match color {
+        Color::DarkGray => palette.selected_bg,
+        _ => color,
+    }
+}
+
+fn border_style(theme: ConfigUiTheme) -> Style {
+    fg_style(config_ui_theme_palette(theme).border)
 }
 
 pub fn state_label(state: ConfigUiValueState) -> &'static str {
@@ -1423,6 +1555,20 @@ name = "rust"
             line.spans[2].style,
             state_style(ConfigUiValueState::Invalid)
         );
+    }
+
+    // Defends: light mode maps default text and selected rows to dark-on-light contrast.
+    #[test]
+    fn light_theme_maps_text_and_selection_for_readability() {
+        let palette = config_ui_theme_palette(ConfigUiTheme::Light);
+        let line = themed_line(Line::from("plain"), ConfigUiTheme::Light);
+        let selected = themed_style(Style::default().bg(Color::DarkGray), ConfigUiTheme::Light);
+
+        assert_eq!(line.spans[0].style.fg, Some(palette.text));
+        assert_eq!(selected.fg, Some(palette.text));
+        assert_eq!(selected.bg, Some(palette.selected_bg));
+        assert_ne!(palette.text, Color::White);
+        assert_ne!(palette.muted, Color::White);
     }
 
     // Defends: absent advanced status rows stay neutral instead of warning-colored.
