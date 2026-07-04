@@ -212,7 +212,7 @@ When using the optional crossterm runner, the callback is invoked while the runn
 Hosts that want ratconfig to own the crossterm terminal setup, draw loop, event reads, and key conversion can enable the optional runner:
 
 ```toml
-ratconfig = { version = "0.1", features = ["crossterm-runner"] }
+ratconfig = { version = "1", features = ["crossterm-runner"] }
 ```
 
 ```rust,no_run
@@ -417,6 +417,36 @@ The split is to keep ratconfig's semantic contract rules in ratconfig, while usi
 JSONC remains the first text adapter because it is the current Yazelix config format and ratconfig already has comment-preserving JSONC patch primitives. TOML is also supported for projects that prefer a more common Rust and CLI configuration format.
 
 The split-brain rule is simple: storage adapters may differ, contract semantics may not. JSONC and TOML both execute the same rename, delete, add-default, transform, join, reconcile, manual-blocker, and contract-id checks. Format-specific limits are adapter errors, not alternate migration behavior. For example, TOML rejects JSON `null` because TOML has no null value, and parent paths must be TOML tables before ratconfig patches through them.
+
+## Versioning And Releases
+
+Ratconfig's stable crate contract begins at `1.0.0`. The crate follows SemVer for changes to the public host-facing contract. Crate versions are separate from host config contract versions such as `ConfigContract::current_version`; hosts own those config contract numbers and may advance them independently of Ratconfig releases
+
+The public Ratconfig contract includes:
+
+- public Rust API exported by the crate and its documented modules
+- default features, optional feature names, and feature-gated public API
+- the MSRV declared by `rust-version` in `Cargo.toml`
+- documented model, editor, intent, renderer, and theme-switching semantics
+- JSONC and TOML set/unset patch behavior
+- migration and config contract semantics for join, reconcile, automatic changes, manual blockers, and contract state validation
+- documented host integration responsibilities for schema loading, validation, file IO, atomic writes, editor launch, model reloads, and runtime apply policy
+
+Patch releases preserve that contract. Examples include renderer bug fixes, clearer docs, internal refactors, test changes, and behavior-preserving cleanup
+
+Minor releases add to that contract without breaking existing hosts. Examples include a new helper, an additive model field with a backwards-compatible default, a new optional feature flag, or additive documented behavior that keeps existing intents and patch semantics valid
+
+Major releases break or remove part of that contract. Examples include removing or renaming a public type, function, field, enum variant, or feature flag; changing `ConfigUiIntent` payload or reducer semantics in a way hosts can observe; changing JSONC/TOML patch output semantics; changing migration/contract reconciliation rules; or raising the MSRV
+
+Before cutting a release:
+
+- inspect the commit range since the previous release and classify host-facing changes as patch, minor, or major
+- update `Cargo.toml`, `Cargo.lock`, dependency examples, and release notes to the same crate version
+- run `cargo fmt --all -- --check`
+- run `cargo test`
+- run feature checks when feature-gated behavior changes, such as `cargo test --no-default-features` and `cargo test --features crossterm-runner`
+- tag the release as `vX.Y.Z` after the version commit is ready
+- update downstream pinned-git consumers such as main Yazelix after the Ratconfig commit or tag is pushed
 
 ## Status
 
