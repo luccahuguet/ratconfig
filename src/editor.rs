@@ -229,37 +229,60 @@ impl ConfigUiApp {
         if let Some(field) = self.model.fields.get(edit.field_index)
             && let Ok(value) = parse_edit_input(field, &edit.input)
         {
-            self.switch_theme_for_field_value(edit.field_index, &value);
+            let source_id = field.source_id.clone();
+            let path = field.path.clone();
+            self.switch_theme_for_field_value(&source_id, &path, &value);
         }
     }
 
     pub fn finish_successful_set_field(&mut self, field_index: usize, value: &JsonValue) {
-        self.switch_theme_for_field_value(field_index, value);
+        if let Some((source_id, path)) = self.field_source_path(field_index) {
+            self.switch_theme_for_field_value(&source_id, &path, value);
+        }
         self.clear_edit_for_field(field_index);
+    }
+
+    pub fn finish_successful_set_field_by_path(
+        &mut self,
+        source_id: &str,
+        path: &str,
+        value: &JsonValue,
+    ) {
+        self.switch_theme_for_field_value(source_id, path, value);
+        self.edit = None;
     }
 
     pub fn finish_successful_unset_field(&mut self, field_index: usize) {
-        if let Some(value) = self
-            .model
-            .fields
-            .get(field_index)
-            .and_then(default_field_value)
-        {
-            self.switch_theme_for_field_value(field_index, &value);
+        if let Some(field) = self.model.fields.get(field_index) {
+            let source_id = field.source_id.clone();
+            let path = field.path.clone();
+            if let Some(value) = default_field_value(field) {
+                self.switch_theme_for_field_value(&source_id, &path, &value);
+            }
         }
         self.clear_edit_for_field(field_index);
     }
 
-    fn switch_theme_for_field_value(&mut self, field_index: usize, value: &JsonValue) {
-        let Some(switcher) = self.model.theme_switcher.as_ref() else {
-            return;
-        };
-        let Some(field) = self.model.fields.get(field_index) else {
-            return;
-        };
-        if let Some(theme) = switcher.theme_for_field_value(field, value) {
-            self.active_theme = theme;
+    pub fn finish_successful_unset_field_by_path(&mut self, source_id: &str, path: &str) {
+        if let Some(value) = self.default_field_value_by_path(source_id, path) {
+            self.switch_theme_for_field_value(source_id, path, &value);
         }
+        self.edit = None;
+    }
+
+    fn default_field_value_by_path(&self, source_id: &str, path: &str) -> Option<JsonValue> {
+        self.model
+            .fields
+            .iter()
+            .find(|field| field.source_id == source_id && field.path == path)
+            .and_then(default_field_value)
+    }
+
+    fn field_source_path(&self, field_index: usize) -> Option<(String, String)> {
+        self.model
+            .fields
+            .get(field_index)
+            .map(|field| (field.source_id.clone(), field.path.clone()))
     }
 
     fn clear_edit_for_field(&mut self, field_index: usize) {
@@ -269,6 +292,18 @@ impl ConfigUiApp {
             .is_some_and(|edit| edit.field_index == field_index)
         {
             self.edit = None;
+        }
+    }
+
+    fn switch_theme_for_field_value(&mut self, source_id: &str, path: &str, value: &JsonValue) {
+        let Some(switcher) = self.model.theme_switcher.as_ref() else {
+            return;
+        };
+        if switcher.source_id != source_id || switcher.field_path != path {
+            return;
+        }
+        if let Some(theme) = switcher.theme_for_value(value) {
+            self.active_theme = theme;
         }
     }
 
@@ -649,6 +684,14 @@ impl ConfigUiApp {
     }
 }
 
+fn default_field_value(field: &ConfigUiField) -> Option<JsonValue> {
+    if field.has_default_value() {
+        serde_json::from_str(&field.default_value).ok()
+    } else {
+        None
+    }
+}
+
 pub fn edit_input_for_field(field: &ConfigUiField) -> String {
     if field.current_value == "not set" {
         if is_bool_field(field) {
@@ -819,14 +862,6 @@ fn parse_string_input(input: &str) -> Result<String, String> {
 
 pub fn parse_rendered_json_string(value: &str) -> Option<String> {
     serde_json::from_str::<String>(value).ok()
-}
-
-fn default_field_value(field: &ConfigUiField) -> Option<JsonValue> {
-    if field.has_default_value() {
-        serde_json::from_str(&field.default_value).ok()
-    } else {
-        None
-    }
 }
 
 fn ensure_allowed_value(field: &ConfigUiField, value: &str) -> Result<(), String> {
@@ -1192,21 +1227,48 @@ mod tests {
         assert_eq!(app.active_theme, ConfigUiTheme::Dark);
         app.begin_edit_field(1);
         app.edit.as_mut().expect("theme edit").choice_index = 0;
-        assert_eq!(
-            app.handle_key(ConfigUiKey::Enter),
-            ConfigUiIntent::SetField {
-                field_index: 1,
-                source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
-                path: "ui.theme".to_string(),
-                value: json!("light"),
-            }
-        );
+        let ConfigUiIntent::SetField {
+            field_index,
+            source_id,
+            path,
+            value,
+        } = app.handle_key(ConfigUiKey::Enter)
+        else {
+            panic!("expected theme SetField intent");
+        };
+        assert_eq!(field_index, 1);
+        assert_eq!(source_id, DEFAULT_CONFIG_SOURCE_ID);
+        assert_eq!(path, "ui.theme");
+        assert_eq!(value, json!("light"));
         assert_eq!(app.active_theme, ConfigUiTheme::Dark);
 
-        app.finish_successful_set_field(1, &json!("light"));
+        app.model.fields.swap(0, 1);
+        app.finish_successful_set_field_by_path(&source_id, &path, &value);
 
         assert_eq!(app.active_theme, ConfigUiTheme::Light);
         assert!(app.edit.is_none());
+    }
+
+    // Defends: the already-published index completion methods keep switching themes for current model fields.
+    #[test]
+    fn successful_theme_completion_by_index_switches_theme() {
+        let mut model = test_model();
+        model.fields[1] = field("ui.theme", "string", "\"dark\"", &["light", "dark"]);
+        model.fields[1].default_value = "\"light\"".to_string();
+        model.theme_switcher = Some(theme_switcher());
+        let mut app = ConfigUiApp::new(model);
+
+        assert_eq!(app.active_theme, ConfigUiTheme::Dark);
+        let value = json!("light");
+        app.finish_successful_set_field(1, &value);
+        assert_eq!(app.active_theme, ConfigUiTheme::Light);
+
+        let value = json!("dark");
+        app.finish_successful_set_field(1, &value);
+        assert_eq!(app.active_theme, ConfigUiTheme::Dark);
+
+        app.finish_successful_unset_field(1);
+        assert_eq!(app.active_theme, ConfigUiTheme::Light);
     }
 
     // Defends: successful reset-to-default writes can switch a theme field without an active edit.
@@ -1220,17 +1282,21 @@ mod tests {
         app.selected_row = 1;
 
         assert_eq!(app.active_theme, ConfigUiTheme::Dark);
-        assert_eq!(
-            app.handle_key(ConfigUiKey::Char('u')),
-            ConfigUiIntent::UnsetField {
-                field_index: 1,
-                source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
-                path: "ui.theme".to_string(),
-            }
-        );
+        let ConfigUiIntent::UnsetField {
+            field_index,
+            source_id,
+            path,
+        } = app.handle_key(ConfigUiKey::Char('u'))
+        else {
+            panic!("expected theme UnsetField intent");
+        };
+        assert_eq!(field_index, 1);
+        assert_eq!(source_id, DEFAULT_CONFIG_SOURCE_ID);
+        assert_eq!(path, "ui.theme");
         assert_eq!(app.active_theme, ConfigUiTheme::Dark);
 
-        app.finish_successful_unset_field(1);
+        app.model.fields.swap(0, 1);
+        app.finish_successful_unset_field_by_path(&source_id, &path);
 
         assert_eq!(app.active_theme, ConfigUiTheme::Light);
         assert!(app.edit.is_none());

@@ -109,7 +109,7 @@ Populate `ConfigUiModel::tab_list_tables` and matching `ConfigUiField::list_cell
 
 Fields with defaults expose a reset-to-default action that emits `ConfigUiIntent::UnsetField`. Hosts decide whether that means unsetting text, writing a default, validation, persistence, reloads, and apply behavior. Use `NO_CONFIG_DEFAULT_VALUE_LABEL` for manually constructed fields that have no default; builder helpers set it automatically
 
-Populate `ConfigUiModel::theme_switcher` when a committed field value should select a built-in Ratconfig theme. The switcher names one source id, one field path, and `serde_json::Value` mappings to `ConfigUiTheme::Dark` or `ConfigUiTheme::Light`; Ratconfig resolves the initial theme from model fields and switches after `ConfigUiApp::finish_successful_set_field()` or `ConfigUiApp::finish_successful_unset_field()` confirms a successful write of that field. Failed host validation/writeback should not call those methods, so staged edits stay active and the theme does not change
+Populate `ConfigUiModel::theme_switcher` when a committed field value should select a built-in Ratconfig theme. The switcher names one source id, one field path, and `serde_json::Value` mappings to `ConfigUiTheme::Dark` or `ConfigUiTheme::Light`; Ratconfig resolves the initial theme from model fields and switches after `ConfigUiApp::finish_successful_set_field_by_path()` or `ConfigUiApp::finish_successful_unset_field_by_path()` confirms a successful write of that source/path after any host reload. Failed host validation/writeback should not call those methods, so staged edits stay active and the theme does not change
 
 ## String-List Choices
 
@@ -225,13 +225,13 @@ fn run_editor(mut app: ConfigUiApp) -> Result<(), Box<dyn std::error::Error>> {
             ConfigUiIntent::BeginEdit { field_index, .. } => {
                 app.begin_edit_field(field_index);
             }
-            ConfigUiIntent::SetField { field_index, source_id, path, value } => {
+            ConfigUiIntent::SetField { source_id, path, value, .. } => {
                 host_validate_and_write(&source_id, &path, &value)?;
-                app.finish_successful_set_field(field_index, &value);
+                app.finish_successful_set_field_by_path(&source_id, &path, &value);
             }
-            ConfigUiIntent::UnsetField { field_index, source_id, path } => {
+            ConfigUiIntent::UnsetField { source_id, path, .. } => {
                 host_unset_and_reload(&source_id, &path)?;
-                app.finish_successful_unset_field(field_index);
+                app.finish_successful_unset_field_by_path(&source_id, &path);
             }
             ConfigUiIntent::EditTextExternally { field_index, input, .. } => {
                 let edited = host_edit_text_buffer(&input)?;

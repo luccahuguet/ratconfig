@@ -157,18 +157,7 @@ impl ConfigUiThemeSwitcher {
             .iter()
             .find(|field| field.source_id == self.source_id && field.path == self.field_path)?;
         let value = committed_field_value(field)?;
-        self.theme_for_field_value(field, &value)
-    }
-
-    pub(crate) fn theme_for_field_value(
-        &self,
-        field: &ConfigUiField,
-        value: &JsonValue,
-    ) -> Option<ConfigUiTheme> {
-        if field.source_id != self.source_id || field.path != self.field_path {
-            return None;
-        }
-        self.theme_for_value(value)
+        self.theme_for_value(&value)
     }
 
     pub fn theme_for_value(&self, value: &JsonValue) -> Option<ConfigUiTheme> {
