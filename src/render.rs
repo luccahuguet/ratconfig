@@ -613,11 +613,15 @@ fn field_display_label(field: &ConfigUiField) -> &str {
     }
 }
 
+fn styled_line(text: impl Into<String>, style: Style) -> Line<'static> {
+    Line::from(Span::styled(text.into(), style))
+}
+
 fn field_title_lines(field: &ConfigUiField) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(Span::styled(
+    let mut lines = vec![styled_line(
         field_display_label(field).to_string(),
         config_key_style().add_modifier(Modifier::BOLD),
-    ))];
+    )];
     if !field.display_label.is_empty() && field.display_label != field.path {
         lines.push(detail_line("path", &field.path));
     }
@@ -775,10 +779,7 @@ fn choice_option_line(
 
 pub fn sidecar_detail_lines(sidecar: &ConfigUiSidecar) -> Vec<Line<'static>> {
     vec![
-        Line::from(Span::styled(
-            sidecar.name.clone(),
-            bold_fg_style(Color::Cyan),
-        )),
+        styled_line(sidecar.name.clone(), bold_fg_style(Color::Cyan)),
         Line::from(""),
         detail_line("path", &sidecar.path.display().to_string()),
         detail_line("state", sidecar_status_label(sidecar.present)),
@@ -789,10 +790,10 @@ pub fn sidecar_detail_lines(sidecar: &ConfigUiSidecar) -> Vec<Line<'static>> {
 
 pub fn file_action_detail_lines(action: &ConfigUiFileAction) -> Vec<Line<'static>> {
     let mut lines = vec![
-        Line::from(Span::styled(
+        styled_line(
             action.label.clone(),
             config_key_style().add_modifier(Modifier::BOLD),
-        )),
+        ),
         Line::from(""),
         detail_line("source", &action.source_id),
         detail_line("action", &action.action_id),
@@ -828,14 +829,14 @@ fn write_detail_label(read_only: bool) -> &'static str {
 
 pub fn diagnostic_detail_lines(diagnostic: &ConfigUiDiagnostic) -> Vec<Line<'static>> {
     let mut lines = vec![
-        Line::from(Span::styled(
+        styled_line(
             diagnostic.headline.clone(),
             bold_fg_style(if diagnostic.blocking {
                 Color::Red
             } else {
                 Color::Yellow
             }),
-        )),
+        ),
         Line::from(""),
         detail_line("path", &diagnostic.path),
         detail_line("status", &diagnostic.status),
@@ -850,10 +851,7 @@ pub fn diagnostic_detail_lines(diagnostic: &ConfigUiDiagnostic) -> Vec<Line<'sta
 
 pub fn native_status_detail_lines(status: &ConfigUiNativeStatus) -> Vec<Line<'static>> {
     let mut lines = vec![
-        Line::from(Span::styled(
-            status.label.clone(),
-            bold_fg_style(Color::Cyan),
-        )),
+        styled_line(status.label.clone(), bold_fg_style(Color::Cyan)),
         Line::from(""),
         detail_line("surface", &status.surface),
         detail_line("tool", &status.tool),

@@ -366,32 +366,20 @@ pub fn build_string_list_choice_field(
 
 fn toml_document_list_table() -> ConfigUiListTable {
     ConfigUiListTable {
-        columns: vec![
-            ConfigUiListColumn {
-                title: "table".to_string(),
-                width: 24,
-            },
-            ConfigUiListColumn {
-                title: "key".to_string(),
-                width: 28,
-            },
-            ConfigUiListColumn {
-                title: "type".to_string(),
-                width: 12,
-            },
-            ConfigUiListColumn {
-                title: "state".to_string(),
-                width: 10,
-            },
-            ConfigUiListColumn {
-                title: "value".to_string(),
-                width: 28,
-            },
-            ConfigUiListColumn {
-                title: "default".to_string(),
-                width: 20,
-            },
-        ],
+        columns: [
+            ("table", 24),
+            ("key", 28),
+            ("type", 12),
+            ("state", 10),
+            ("value", 28),
+            ("default", 20),
+        ]
+        .into_iter()
+        .map(|(title, width)| ConfigUiListColumn {
+            title: title.to_string(),
+            width,
+        })
+        .collect(),
     }
 }
 
@@ -872,7 +860,7 @@ fn toml_document_entry_field(
             ConfigUiEditBehavior::Default
         } else {
             ConfigUiEditBehavior::StructuredOnly {
-                notice: toml_document_read_only_notice(patch_path.is_some()),
+                notice: toml_document_read_only_notice(patch_path.is_some()).to_string(),
             }
         },
     })
@@ -1039,13 +1027,11 @@ fn toml_document_description(
     }
 }
 
-fn toml_document_read_only_notice(path_is_patchable: bool) -> String {
+fn toml_document_read_only_notice(path_is_patchable: bool) -> &'static str {
     if path_is_patchable {
         "Complex TOML values are read-only in this generic view; edit the source file directly."
-            .to_string()
     } else {
         "This TOML path cannot be edited safely through dotted path patching; edit the source file directly."
-            .to_string()
     }
 }
 
