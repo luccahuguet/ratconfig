@@ -735,7 +735,7 @@ pub fn file_action_detail_lines(action: &ConfigUiFileAction) -> Vec<Line<'static
         detail_line(
             "create",
             if action.create_if_missing {
-                "offered when missing"
+                "offered when absent"
             } else {
                 "not offered"
             },
@@ -981,8 +981,6 @@ pub fn file_action_status_label(action: &ConfigUiFileAction) -> &'static str {
         "read-only"
     } else if action.exists {
         "existing"
-    } else if action.create_if_missing {
-        "missing"
     } else {
         "absent"
     }
@@ -992,6 +990,7 @@ pub fn file_action_status_style(action: &ConfigUiFileAction) -> Style {
     match file_action_status_label(action) {
         "error" => bold_fg_style(Color::Red),
         "existing" => fg_style(Color::Green),
+        "absent" => fg_style(Color::Gray),
         _ => fg_style(Color::Yellow),
     }
 }
@@ -1596,7 +1595,7 @@ name = "rust"
         }
     }
 
-    // Defends: file action rows expose missing, existing, read-only, and error states without scalar edit columns.
+    // Defends: file action rows expose neutral absent states without weakening existing, read-only, or error states.
     #[test]
     fn file_action_rows_render_host_file_states() {
         let mut model = test_model(ConfigUiValueState::Explicit);
@@ -1604,24 +1603,31 @@ name = "rust"
         model.file_actions = vec![
             file_action(true, false, true, None),
             file_action(false, false, true, None),
+            file_action(false, false, false, None),
             file_action(true, true, false, None),
             file_action(false, false, true, Some("Path cannot be resolved")),
         ];
 
-        for (index, status) in ["existing", "missing", "read-only", "error"]
-            .into_iter()
-            .enumerate()
+        for (index, (status, style)) in [
+            ("existing", Style::default().fg(Color::Green)),
+            ("absent", Style::default().fg(Color::Gray)),
+            ("absent", Style::default().fg(Color::Gray)),
+            ("read-only", Style::default().fg(Color::Yellow)),
+            (
+                "error",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
         {
+            let line = row_line_for_model(&model, UiRowRef::FileAction(index));
             assert_eq!(
-                rendered_cells(&row_line_for_model(&model, UiRowRef::FileAction(index))),
+                rendered_cells(&line),
                 vec![status, "Native config", "/home/alex/.config/acme/n..."]
             );
+            assert_eq!(line.spans[0].style, style);
         }
-        let error_line = row_line_for_model(&model, UiRowRef::FileAction(3));
-        assert_eq!(
-            error_line.spans[0].style,
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-        );
     }
 
     // Defends: file action details show host routing metadata and creation policy.
@@ -1634,10 +1640,7 @@ name = "rust"
         assert!(text.iter().any(|line| line.contains("Native config")));
         assert!(text.iter().any(|line| line.contains("source")));
         assert!(text.iter().any(|line| line.contains("open_native")));
-        assert!(
-            text.iter()
-                .any(|line| line.contains("offered when missing"))
-        );
+        assert!(text.iter().any(|line| line.contains("offered when absent")));
         assert!(
             text.iter()
                 .any(|line| line.contains("Path cannot be resolved"))
