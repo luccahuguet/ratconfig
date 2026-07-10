@@ -207,6 +207,15 @@ mod tests {
 
         app.selected_row = 0;
         assert_eq!(
+            handle_crossterm_event(&mut app, key_event(KeyCode::Enter, KeyModifiers::NONE)),
+            ConfigUiIntent::None
+        );
+        assert!(app.edit.is_none());
+        assert_eq!(
+            app.notice.as_ref().map(|notice| notice.text.as_str()),
+            Some("Press Space to stage this change, then Enter to save.")
+        );
+        assert_eq!(
             handle_crossterm_event(&mut app, key_event(KeyCode::Char(' '), KeyModifiers::NONE)),
             ConfigUiIntent::None
         );

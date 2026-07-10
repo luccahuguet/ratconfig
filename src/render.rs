@@ -995,7 +995,7 @@ fn normal_control_line(app: &ConfigUiApp) -> Line<'static> {
         return Line::from("Select a setting row to edit");
     };
     let primary = if is_bool_field(field) {
-        "Enter/Space stage  e edit"
+        "Space stage  e edit"
     } else if is_scalar_enum_field(field) {
         "Enter/e/Space picker"
     } else if is_enum_string_list_field(field) {
@@ -1787,6 +1787,22 @@ name = "rust"
 
         app.model.fields[0].default_value = NO_CONFIG_DEFAULT_VALUE_LABEL.to_string();
         assert!(!rendered_text(&normal_control_line(&app)).contains("reset default"));
+    }
+
+    // Defends: boolean controls distinguish normal-mode staging from edit-mode persistence.
+    #[test]
+    fn boolean_controls_show_space_to_stage_and_enter_to_save() {
+        let app = ConfigUiApp::new(test_model(ConfigUiValueState::Explicit));
+        let field = app.selected_field().expect("boolean field");
+
+        let normal = rendered_text(&normal_control_line(&app));
+        assert!(normal.contains("Space stage"));
+        assert!(!normal.contains("Enter/Space stage"));
+
+        let editing = rendered_text(&edit_control_line(field, ConfigUiEditMode::Choice));
+        assert!(editing.contains("Space toggle"));
+        assert!(editing.contains("Enter save"));
+        assert!(editing.contains("Esc cancel"));
     }
 
     // Defends: ordered string-list editing exposes selected order and the generic reorder command.

@@ -378,6 +378,10 @@ impl ConfigUiApp {
                 self.move_up();
                 ConfigUiIntent::None
             }
+            ConfigUiKey::Enter if self.selected_field().is_some_and(is_bool_field) => {
+                self.notice_info("Press Space to stage this change, then Enter to save.");
+                ConfigUiIntent::None
+            }
             ConfigUiKey::Enter | ConfigUiKey::Char(' ') => self.activate_selected_row(),
             ConfigUiKey::Char('e') => self.edit_or_activate_selected_row(),
             ConfigUiKey::Char('u') => self.return_selected_field_to_default(),
@@ -1132,6 +1136,14 @@ mod tests {
         assert!(app.edit.is_none());
 
         assert_eq!(app.handle_key(ConfigUiKey::Enter), ConfigUiIntent::None);
+        assert!(app.edit.is_none());
+        assert_eq!(app.model.fields[0].current_value, "false");
+        assert_eq!(
+            app.notice.as_ref().map(|notice| notice.text.as_str()),
+            Some("Press Space to stage this change, then Enter to save.")
+        );
+
+        assert_eq!(app.handle_key(ConfigUiKey::Char(' ')), ConfigUiIntent::None);
         assert_eq!(app.edit.as_ref().expect("staged bool").input, "true");
         assert_eq!(
             app.handle_key(ConfigUiKey::Enter),
@@ -1205,6 +1217,22 @@ mod tests {
                 path: "ui.title".to_string(),
             }
         );
+    }
+
+    // Defends: normal Enter and Space retain their existing edit activation for non-boolean fields.
+    #[test]
+    fn non_boolean_fields_keep_enter_and_space_activation() {
+        let mut app = ConfigUiApp::new(test_model());
+        app.selected_row = 1;
+
+        let expected = ConfigUiIntent::BeginEdit {
+            field_index: 1,
+            source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
+            path: "ui.theme".to_string(),
+        };
+        assert_eq!(app.handle_key(ConfigUiKey::Enter), expected);
+        assert_eq!(app.handle_key(ConfigUiKey::Char(' ')), expected);
+        assert!(app.edit.is_none());
     }
 
     // Defends: a host-declared theme switcher resolves the initial theme from committed model fields.
@@ -1785,7 +1813,7 @@ line-number = "relative"
 
         app.selected_row = 1;
         assert_eq!(
-            app.handle_key(ConfigUiKey::Char('e')),
+            app.handle_key(ConfigUiKey::Char(' ')),
             open_file_intent(1, "missing", "/tmp/acme/missing.toml", true)
         );
     }
