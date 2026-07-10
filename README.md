@@ -62,6 +62,7 @@ fn model() -> ConfigUiModel {
             source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
             path: "core.debug".to_string(),
             display_label: String::new(),
+            section_label: String::new(),
             list_cells: Vec::new(),
             tab: "general".to_string(),
             kind: "bool".to_string(),
@@ -105,6 +106,8 @@ Populate `ConfigUiModel::sources` when tabs represent separate host-owned config
 
 Use `ConfigUiField::display_label` when row and detail text should be friendlier than the stable field path. Ratconfig still uses `path` for edit intents and host write routing
 
+Use `ConfigUiField::section_label` to place consecutive fields under host-defined, non-selectable headings within a tab. Ratconfig derives headings from the visible filtered rows, so empty sections disappear during search while selection and edit intents continue to address only real fields. Leave it empty to preserve the unsectioned layout
+
 Populate `ConfigUiModel::tab_list_tables` and matching `ConfigUiField::list_cells` when a tab should render a structured display table instead of the default `takes effect | setting | value` field list. This is presentation-only data; Ratconfig does not parse labels, values, paths, or host-specific concepts to build those cells
 
 Fields with defaults expose a reset-to-default action that emits `ConfigUiIntent::UnsetField`. Hosts decide whether that means unsetting text, writing a default, validation, persistence, reloads, and apply behavior. Use `NO_CONFIG_DEFAULT_VALUE_LABEL` for manually constructed fields that have no default; builder helpers set it automatically
@@ -128,6 +131,7 @@ fn sections_field() -> Result<ConfigUiField, String> {
         source_id: "settings".to_string(),
         path: "layout.sections".to_string(),
         display_label: "Layout sections".to_string(),
+        section_label: "Visible content".to_string(),
         list_cells: Vec::new(),
         tab: "layout".to_string(),
         current: Some(vec!["left".to_string(), "center".to_string()]),
@@ -175,6 +179,7 @@ fn add_native_toml_rows(model: &mut ConfigUiModel, raw: &str, default_raw: &str)
     let document = build_toml_document_fields(ConfigUiTomlDocumentSpec {
         source_id: "helix-config",
         tab: "helix",
+        section_label: "Editor settings",
         current_toml: raw,
         default_toml: Some(default_raw),
         validation: "host validates before writing",

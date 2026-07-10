@@ -1388,6 +1388,7 @@ mod tests {
         let document = build_toml_document_fields(ConfigUiTomlDocumentSpec {
             source_id: "helix",
             tab: "native",
+            section_label: "",
             current_toml: r#"
 [editor]
 line-number = "relative"
@@ -1636,6 +1637,28 @@ line-number = "relative"
         assert_eq!(app.selected_row, 0);
         app.move_up();
         assert_eq!(app.selected_row, 0);
+    }
+
+    // Defends: section headings remain render-only and cannot alter keyboard selection or edit-intent routing.
+    #[test]
+    fn section_labels_do_not_enter_editor_row_navigation() {
+        let mut model = test_model();
+        model.fields[0].section_label = "Runtime".to_string();
+        model.fields[1].section_label = "Appearance".to_string();
+        model.fields[2].section_label = "Extensions".to_string();
+        let mut app = ConfigUiApp::new(model);
+
+        assert_eq!(app.visible_rows().len(), 3);
+        assert_eq!(app.handle_key(ConfigUiKey::Char('j')), ConfigUiIntent::None);
+        assert_eq!(app.selected_row, 1);
+        assert_eq!(
+            app.handle_key(ConfigUiKey::Char('e')),
+            ConfigUiIntent::BeginEdit {
+                field_index: 1,
+                source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
+                path: "ui.theme".to_string(),
+            }
+        );
     }
 
     // Defends: single-select and multiselect edit keys are generic reducer behavior.

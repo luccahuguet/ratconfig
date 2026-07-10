@@ -36,6 +36,7 @@ pub(crate) fn field_with_source(
         source_id: source_id.to_string(),
         path: path.to_string(),
         display_label: String::new(),
+        section_label: String::new(),
         list_cells: Vec::new(),
         tab: "general".to_string(),
         kind: kind.to_string(),

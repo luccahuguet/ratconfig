@@ -187,6 +187,7 @@ pub struct ConfigUiField {
     pub source_id: String,
     pub path: String,
     pub display_label: String,
+    pub section_label: String,
     pub list_cells: Vec<String>,
     pub tab: String,
     pub kind: String,
@@ -235,6 +236,7 @@ pub struct ConfigUiFieldRowSpec<'a> {
     pub source_id: &'a str,
     pub path: &'a str,
     pub display_label: String,
+    pub section_label: String,
     pub list_cells: Vec<String>,
     pub tab: &'a str,
     pub kind: &'a str,
@@ -254,6 +256,7 @@ pub struct ConfigUiStringListChoiceSpec {
     pub source_id: String,
     pub path: String,
     pub display_label: String,
+    pub section_label: String,
     pub list_cells: Vec<String>,
     pub tab: String,
     pub current: Option<Vec<String>>,
@@ -271,6 +274,7 @@ pub struct ConfigUiStringListChoiceSpec {
 pub struct ConfigUiTomlDocumentSpec<'a> {
     pub source_id: &'a str,
     pub tab: &'a str,
+    pub section_label: &'a str,
     pub current_toml: &'a str,
     pub default_toml: Option<&'a str>,
     pub validation: &'a str,
@@ -298,6 +302,7 @@ pub fn build_config_ui_field(spec: ConfigUiFieldRowSpec<'_>) -> ConfigUiField {
         source_id: spec.source_id.to_string(),
         path: spec.path.to_string(),
         display_label: spec.display_label,
+        section_label: spec.section_label,
         list_cells: spec.list_cells,
         tab: spec.tab.to_string(),
         kind: spec.kind.to_string(),
@@ -349,6 +354,7 @@ pub fn build_string_list_choice_field(
         source_id: &spec.source_id,
         path: &spec.path,
         display_label: spec.display_label,
+        section_label: spec.section_label,
         list_cells: spec.list_cells,
         tab: &spec.tab,
         kind: "string_list",
@@ -832,6 +838,7 @@ fn toml_document_entry_field(
         source_id: spec.source_id.to_string(),
         path: field_path,
         display_label: display_path.clone(),
+        section_label: spec.section_label.to_string(),
         list_cells: vec![
             toml_document_parent_label(&entry.segments),
             toml_document_key_label(&entry.segments, type_label),
@@ -1061,6 +1068,7 @@ fn row_matches_search(model: &ConfigUiModel, row: UiRowRef, search: &str) -> boo
                 [
                     field.path.as_str(),
                     field.display_label.as_str(),
+                    field.section_label.as_str(),
                     field.current_value.as_str(),
                     field.default_value.as_str(),
                     field.description.as_str(),
@@ -1236,7 +1244,7 @@ pub fn render_json_edit_value(value: &JsonValue) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::apply_status;
+    use crate::test_support::{apply_status, field, model_with_fields};
     use serde_json::json;
 
     fn status() -> ConfigUiApplyStatus {
@@ -1250,6 +1258,7 @@ mod tests {
         build_toml_document_fields(ConfigUiTomlDocumentSpec {
             source_id: "native",
             tab: "native",
+            section_label: "",
             current_toml,
             default_toml,
             validation: "",
@@ -1320,6 +1329,7 @@ mod tests {
             source_id: DEFAULT_CONFIG_SOURCE_ID,
             path: "ui.theme",
             display_label: String::new(),
+            section_label: String::new(),
             list_cells: Vec::new(),
             tab: "general",
             kind: "string",
@@ -1480,6 +1490,7 @@ help = "Theme name"
             source_id: "settings",
             path: "plugins.enabled",
             display_label: "Enabled plugins".to_string(),
+            section_label: "Plugins".to_string(),
             list_cells: vec!["plugins".to_string(), "5 enabled".to_string()],
             tab: "advanced",
             kind: "string_list",
@@ -1497,6 +1508,7 @@ help = "Theme name"
         assert_eq!(field.source_id, "settings");
         assert_eq!(field.path, "plugins.enabled");
         assert_eq!(field.display_label, "Enabled plugins");
+        assert_eq!(field.section_label, "Plugins");
         assert_eq!(field.list_cells, vec!["plugins", "5 enabled"]);
         assert_eq!(field.tab, "advanced");
         assert_eq!(field.current_value, "[5 items]");
@@ -1519,6 +1531,7 @@ help = "Theme name"
             source_id: "settings".to_string(),
             path: "widgets.enabled".to_string(),
             display_label: "Enabled widgets".to_string(),
+            section_label: "Widgets".to_string(),
             list_cells: vec!["widgets".to_string(), "2 selected".to_string()],
             tab: "widgets".to_string(),
             current: Some(vec!["status".to_string(), "clock".to_string()]),
@@ -1540,6 +1553,7 @@ help = "Theme name"
         assert_eq!(field.source_id, "settings");
         assert_eq!(field.path, "widgets.enabled");
         assert_eq!(field.display_label, "Enabled widgets");
+        assert_eq!(field.section_label, "Widgets");
         assert_eq!(field.list_cells, vec!["widgets", "2 selected"]);
         assert_eq!(field.tab, "widgets");
         assert_eq!(field.kind, "string_list");
@@ -1585,6 +1599,7 @@ help = "Theme name"
             source_id: "settings".to_string(),
             path: "widgets.enabled".to_string(),
             display_label: String::new(),
+            section_label: String::new(),
             list_cells: Vec::new(),
             tab: "widgets".to_string(),
             current: None,
@@ -1740,6 +1755,7 @@ rulers = [80]
         let rows = build_toml_document_fields(ConfigUiTomlDocumentSpec {
             source_id: "native",
             tab: "native",
+            section_label: "Editor",
             current_toml: r#"
 [editor]
 line-number = "relative"
@@ -1834,6 +1850,31 @@ plugins = ["git", "status"]
         assert_eq!(plugins.current_value, r#"["git","status"]"#);
         assert_eq!(plugins.edit_value, r#"["git","status"]"#);
         assert_eq!(plugins.edit_behavior, ConfigUiEditBehavior::Default);
+    }
+
+    // Defends: host section labels remain presentation metadata while search preserves real field order and identity.
+    #[test]
+    fn section_labels_are_searchable_without_changing_visible_rows() {
+        let mut runtime_enabled = field("runtime.enabled", "bool", "true", &[]);
+        runtime_enabled.section_label = "Runtime".to_string();
+        let mut runtime_shell = field("runtime.shell", "string", r#""nu""#, &[]);
+        runtime_shell.section_label = "Runtime".to_string();
+        let mut theme = field("ui.theme", "string", r#""dark""#, &[]);
+        theme.section_label = "Appearance".to_string();
+        let model = model_with_fields(vec![runtime_enabled, runtime_shell, theme]);
+
+        assert_eq!(
+            visible_rows_for_tab_search(&model, 0, ""),
+            vec![UiRowRef::Field(0), UiRowRef::Field(1), UiRowRef::Field(2)]
+        );
+        assert_eq!(
+            visible_rows_for_tab_search(&model, 0, "runtime"),
+            vec![UiRowRef::Field(0), UiRowRef::Field(1)]
+        );
+        assert_eq!(
+            visible_rows_for_tab_search(&model, 0, "appearance"),
+            vec![UiRowRef::Field(2)]
+        );
     }
 
     // Defends: host-owned file action rows join tab/search rows without becoming scalar settings.

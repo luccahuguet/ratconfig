@@ -67,6 +67,12 @@ enum ListLayout<'a> {
     Table(&'a ConfigUiListTable),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ListEntry<'a> {
+    Section(&'a str),
+    Row(UiRowRef),
+}
+
 struct HeaderMetadata {
     source_label: Option<String>,
     source_path: String,
@@ -323,19 +329,19 @@ fn render_body(
 
 fn render_list(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect, rows: &[UiRowRef]) {
     let layout = list_layout(&app.model, app.selected_tab);
-    let items = rows
+    let entries = list_entries(&app.model, rows);
+    let items = entries
         .iter()
-        .map(|row| {
-            ListItem::new(themed_line(
-                row_line_for_layout(&app.model, *row, layout),
-                app.active_theme,
-            ))
+        .map(|entry| {
+            let line = match entry {
+                ListEntry::Section(label) => section_heading_line(label),
+                ListEntry::Row(row) => row_line_for_layout(&app.model, *row, layout),
+            };
+            ListItem::new(themed_line(line, app.active_theme))
         })
         .collect::<Vec<_>>();
     let mut state = ListState::default();
-    if !items.is_empty() {
-        state.select(Some(app.selected_row));
-    }
+    state.select(selected_list_entry_index(&entries, app.selected_row));
     let title = if app.search.is_empty() {
         "settings".to_string()
     } else {
@@ -374,6 +380,44 @@ fn render_list(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect, rows: &[UiR
         list_chunks[1],
         &mut state,
     );
+}
+
+fn list_entries<'a>(model: &'a ConfigUiModel, rows: &[UiRowRef]) -> Vec<ListEntry<'a>> {
+    let mut entries = Vec::with_capacity(rows.len());
+    let mut previous_section = None;
+    for row in rows {
+        let section = match row {
+            UiRowRef::Field(index) => {
+                let label = model.fields[*index].section_label.trim();
+                (!label.is_empty()).then_some(label)
+            }
+            _ => None,
+        };
+        if section != previous_section
+            && let Some(label) = section
+        {
+            entries.push(ListEntry::Section(label));
+        }
+        entries.push(ListEntry::Row(*row));
+        previous_section = section;
+    }
+    entries
+}
+
+fn selected_list_entry_index(entries: &[ListEntry<'_>], selected_row: usize) -> Option<usize> {
+    entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| matches!(entry, ListEntry::Row(_)))
+        .nth(selected_row)
+        .map(|(index, _)| index)
+}
+
+fn section_heading_line(label: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("── ", fg_style(Color::Gray)),
+        Span::styled(label.to_string(), bold_fg_style(Color::Cyan)),
+    ])
 }
 
 fn list_header_line(layout: ListLayout<'_>) -> Line<'static> {
@@ -1261,6 +1305,92 @@ mod tests {
         model
     }
 
+    // Defends: headings are derived from filtered field rows and selection indices continue to target only real rows.
+    #[test]
+    fn section_entries_follow_visible_rows_and_translate_selection() {
+        let mut runtime_enabled = field("runtime.enabled", "bool", "true", &[]);
+        runtime_enabled.section_label = "Runtime".to_string();
+        let mut runtime_shell = field("runtime.shell", "string", r#""nu""#, &[]);
+        runtime_shell.section_label = "Runtime".to_string();
+        let mut theme = field("ui.theme", "string", r#""dark""#, &[]);
+        theme.section_label = "Appearance".to_string();
+        let model = model_with_fields(vec![runtime_enabled, runtime_shell, theme]);
+        let rows = visible_rows_for_tab_search(&model, 0, "");
+        let entries = list_entries(&model, &rows);
+
+        assert_eq!(
+            entries,
+            vec![
+                ListEntry::Section("Runtime"),
+                ListEntry::Row(UiRowRef::Field(0)),
+                ListEntry::Row(UiRowRef::Field(1)),
+                ListEntry::Section("Appearance"),
+                ListEntry::Row(UiRowRef::Field(2)),
+            ]
+        );
+        assert_eq!(selected_list_entry_index(&entries, 0), Some(1));
+        assert_eq!(selected_list_entry_index(&entries, 1), Some(2));
+        assert_eq!(selected_list_entry_index(&entries, 2), Some(4));
+        assert_eq!(
+            rendered_text(&section_heading_line("Runtime")),
+            "── Runtime"
+        );
+
+        let filtered_rows = visible_rows_for_tab_search(&model, 0, "theme");
+        assert_eq!(
+            list_entries(&model, &filtered_rows),
+            vec![
+                ListEntry::Section("Appearance"),
+                ListEntry::Row(UiRowRef::Field(2))
+            ]
+        );
+    }
+
+    // Defends: unsectioned tabs retain one list item per row and custom tables share the same heading mechanism.
+    #[test]
+    fn section_entries_preserve_unsectioned_and_custom_table_layouts() {
+        let mut model = model_with_fields(vec![
+            field("keys.copy", "string", r#""Ctrl+c""#, &[]),
+            field("keys.paste", "string", r#""Ctrl+v""#, &[]),
+        ]);
+        let rows = visible_rows_for_tab_search(&model, 0, "");
+        assert_eq!(
+            list_entries(&model, &rows),
+            vec![
+                ListEntry::Row(UiRowRef::Field(0)),
+                ListEntry::Row(UiRowRef::Field(1))
+            ]
+        );
+        assert_eq!(
+            selected_list_entry_index(&list_entries(&model, &rows), 1),
+            Some(1)
+        );
+
+        model.fields[0].section_label = "Managed".to_string();
+        model.fields[1].section_label = "Reference".to_string();
+        model.fields[0].list_cells = strings(&["copy", "Ctrl+c"]);
+        model.fields[1].list_cells = strings(&["paste", "Ctrl+v"]);
+        set_list_table(&mut model, "general", &[("action", 12), ("binding", 12)]);
+        assert!(matches!(list_layout(&model, 0), ListLayout::Table(_)));
+        assert_eq!(
+            list_entries(&model, &rows),
+            vec![
+                ListEntry::Section("Managed"),
+                ListEntry::Row(UiRowRef::Field(0)),
+                ListEntry::Section("Reference"),
+                ListEntry::Row(UiRowRef::Field(1))
+            ]
+        );
+        assert_eq!(
+            rendered_cells(&row_line_for_layout(
+                &model,
+                UiRowRef::Field(1),
+                list_layout(&model, 0),
+            )),
+            vec!["paste", "Ctrl+v"]
+        );
+    }
+
     fn source(
         tab: &str,
         label: &str,
@@ -1457,6 +1587,7 @@ mod tests {
         let document = build_toml_document_fields(ConfigUiTomlDocumentSpec {
             source_id: "native",
             tab: "native",
+            section_label: "",
             current_toml: r#"
 [editor]
 rulers = [80, 100]
