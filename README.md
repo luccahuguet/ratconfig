@@ -217,7 +217,7 @@ When using the optional crossterm runner, the callback is invoked while the runn
 Hosts that want ratconfig to own the crossterm terminal setup, draw loop, event reads, and key conversion can enable the optional runner:
 
 ```toml
-ratconfig = { version = "1", features = ["crossterm-runner"] }
+ratconfig = { version = "2", features = ["crossterm-runner"] }
 ```
 
 ```rust,no_run
@@ -452,6 +452,12 @@ Before cutting a release:
 - run feature checks when feature-gated behavior changes, such as `cargo test --no-default-features` and `cargo test --features crossterm-runner`
 - tag the release as `vX.Y.Z` after the version commit is ready
 - update downstream pinned-git consumers such as main Yazelix after the Ratconfig commit or tag is pushed
+
+### 2.0.0
+
+- Boolean rows use `Space` to stage a value, `Enter` to save the staged value, and `Esc` to cancel it
+- Normal-mode `Enter` on a boolean leaves the value unchanged and shows the staged-edit guidance
+- Hosts can group consecutive fields under non-selectable section headings with `ConfigUiField::section_label` and `ConfigUiTomlDocumentSpec::section_label`
 
 ## Status
 
