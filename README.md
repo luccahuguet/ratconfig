@@ -42,20 +42,22 @@ Yazelix-specific behavior stays out of this repository, including Home Manager o
 use std::path::PathBuf;
 use ratconfig::{
     ConfigUiApplyStatus, ConfigUiEditBehavior, ConfigUiField, ConfigUiModel,
-    ConfigUiPathOwner, ConfigUiValueState,
+    ConfigUiPathOwner, ConfigUiSource, ConfigUiValueState,
     DEFAULT_CONFIG_SOURCE_ID,
     jsonc::{PatchError, set_jsonc_value_text},
 };
 
 fn model() -> ConfigUiModel {
     ConfigUiModel {
-        active_config_path: PathBuf::from("settings.jsonc"),
-        cursor_config_path: PathBuf::new(),
-        default_cursor_config_path: PathBuf::new(),
-        active_config_exists: true,
-        config_owner: ConfigUiPathOwner::User,
-        config_read_only: false,
-        sources: Vec::new(),
+        sources: vec![ConfigUiSource {
+            id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
+            tab: "general".to_string(),
+            label: "Settings".to_string(),
+            path: PathBuf::from("settings.jsonc"),
+            exists: true,
+            owner: ConfigUiPathOwner::User,
+            read_only: false,
+        }],
         tabs: vec!["general".to_string()],
         tab_list_tables: std::collections::BTreeMap::new(),
         fields: vec![ConfigUiField {
@@ -102,7 +104,7 @@ fn patch_jsonc() -> Result<String, PatchError> {
 
 Host applications build the model from their own schema and config files, then use ratconfig editor/rendering helpers inside their terminal event loop. After an edit, the host validates and writes the patched text, reloads the model, and applies any live runtime changes it owns
 
-Populate `ConfigUiModel::sources` when tabs represent separate host-owned config documents. Ratconfig uses that metadata only to render the selected tab's label, path, owner, and write mode; hosts still own discovery, loading, writes, creation policy, and validation
+Populate `ConfigUiModel::sources` for host-owned config documents. Ratconfig uses that metadata only to render the selected tab's label, path, owner, and write mode; tabs without a matching source show neutral non-file-backed metadata. Hosts still own discovery, loading, writes, creation policy, and validation
 
 Use `ConfigUiField::display_label` when row and detail text should be friendlier than the stable field path. Ratconfig still uses `path` for edit intents and host write routing
 
@@ -454,6 +456,12 @@ Before cutting a release:
 - run feature checks when feature-gated behavior changes, such as `cargo test --no-default-features` and `cargo test --features crossterm-runner`
 - tag the release as `vX.Y.Z` after the version commit is ready
 - update downstream pinned-git consumers such as main Yazelix after the Ratconfig commit or tag is pushed
+
+### 3.0.0
+
+- `ConfigUiSource` is the only config-document metadata owner in `ConfigUiModel`
+- Tabs without a matching source render neutral non-file-backed header metadata
+- Legacy single-config and cursor-specific model fields are removed
 
 ### 2.0.0
 

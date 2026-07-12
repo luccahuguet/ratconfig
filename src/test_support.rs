@@ -1,9 +1,8 @@
 use crate::{
-    ConfigUiApplyStatus, ConfigUiEditBehavior, ConfigUiField, ConfigUiModel, ConfigUiPathOwner,
-    ConfigUiValueState, DEFAULT_CONFIG_SOURCE_ID,
+    ConfigUiApplyStatus, ConfigUiEditBehavior, ConfigUiField, ConfigUiModel, ConfigUiValueState,
+    DEFAULT_CONFIG_SOURCE_ID,
 };
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 pub(crate) fn apply_status(summary: &str, detail: &str) -> ConfigUiApplyStatus {
     ConfigUiApplyStatus {
@@ -55,12 +54,6 @@ pub(crate) fn field_with_source(
 
 pub(crate) fn model_with_fields(fields: Vec<ConfigUiField>) -> ConfigUiModel {
     ConfigUiModel {
-        active_config_path: PathBuf::from("/tmp/acme/settings.jsonc"),
-        cursor_config_path: PathBuf::from("/tmp/acme/cursors.jsonc"),
-        default_cursor_config_path: PathBuf::from("/tmp/acme/default_cursors.jsonc"),
-        active_config_exists: true,
-        config_owner: ConfigUiPathOwner::User,
-        config_read_only: false,
         sources: Vec::new(),
         tabs: vec!["general".to_string()],
         tab_list_tables: BTreeMap::new(),

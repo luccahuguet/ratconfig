@@ -223,9 +223,9 @@ fn header_metadata(model: &ConfigUiModel, selected_tab: usize) -> HeaderMetadata
 
     HeaderMetadata {
         source_label: None,
-        source_path: config_path_text(&model.active_config_path, model.active_config_exists),
-        owner: owner_label(model.config_owner),
-        mode: write_mode(model.config_read_only),
+        source_path: "not file-backed".to_string(),
+        owner: "none",
+        mode: "n/a",
     }
 }
 
@@ -1306,11 +1306,7 @@ mod tests {
         let mut field = field("core.debug_mode", "bool", "false", &[]);
         field.state = state;
         field.apply_status = apply_status("after app restart", "Restart the app after saving");
-        let mut model = model_with_fields(vec![field]);
-        model.active_config_path = PathBuf::from("/home/alex/.config/acme/settings.jsonc");
-        model.cursor_config_path = PathBuf::from("/home/alex/.config/acme/cursors.jsonc");
-        model.default_cursor_config_path = PathBuf::from("/runtime/acme/default_cursors.jsonc");
-        model
+        model_with_fields(vec![field])
     }
 
     // Defends: tab numbering is presentation-only and stops after the ninth host-owned label.
@@ -1458,28 +1454,33 @@ mod tests {
         assert!(text.contains("mode: read-only"));
     }
 
-    // Defends: callers without sources and the reserved advanced tab keep global fallback metadata.
+    // Defends: tabs without a matching source render neutral non-file-backed metadata.
     #[test]
-    fn header_falls_back_to_model_config_metadata() {
+    fn header_is_neutral_without_selected_config_source() {
         let metadata = header_metadata(&test_model(ConfigUiValueState::Explicit), 0);
         assert_eq!(metadata.source_label, None);
-        assert!(metadata.source_path.contains("settings.jsonc"));
-        assert_eq!(metadata.owner, "user");
-        assert_eq!(metadata.mode, "writable");
+        assert_eq!(metadata.source_path, "not file-backed");
+        assert_eq!(metadata.owner, "none");
+        assert_eq!(metadata.mode, "n/a");
 
         let line = header_metadata_line(&metadata, "ok", Style::default(), 160);
         assert!(!rendered_text(&line).contains("source:"));
 
         let mut model = test_model(ConfigUiValueState::Explicit);
-        let owner = ConfigUiPathOwner::HomeManager;
         model.tabs = vec!["settings".to_string(), "advanced".to_string()];
-        model.sources = vec![source("advanced", "Advanced Source", true, owner, true)];
+        model.sources = vec![source(
+            "settings",
+            "Settings",
+            true,
+            ConfigUiPathOwner::User,
+            false,
+        )];
 
         let metadata = header_metadata(&model, 1);
         assert_eq!(metadata.source_label, None);
-        assert!(metadata.source_path.contains("settings.jsonc"));
-        assert_eq!(metadata.owner, "user");
-        assert_eq!(metadata.mode, "writable");
+        assert_eq!(metadata.source_path, "not file-backed");
+        assert_eq!(metadata.owner, "none");
+        assert_eq!(metadata.mode, "n/a");
     }
 
     // Defends: source labels are bounded and omitted before they crowd out path context.

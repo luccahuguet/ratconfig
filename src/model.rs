@@ -11,12 +11,6 @@ pub const DEFAULT_CONFIG_SOURCE_ID: &str = "config";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigUiModel {
-    pub active_config_path: PathBuf,
-    pub cursor_config_path: PathBuf,
-    pub default_cursor_config_path: PathBuf,
-    pub active_config_exists: bool,
-    pub config_owner: ConfigUiPathOwner,
-    pub config_read_only: bool,
     pub sources: Vec<ConfigUiSource>,
     pub tabs: Vec<String>,
     pub tab_list_tables: BTreeMap<String, ConfigUiListTable>,
@@ -134,9 +128,6 @@ pub fn selected_config_source(
     selected_tab: usize,
 ) -> Option<&ConfigUiSource> {
     let tab = model.tabs.get(selected_tab)?;
-    if tab == "advanced" {
-        return None;
-    }
     model
         .sources
         .iter()
@@ -1275,7 +1266,7 @@ mod tests {
             .unwrap_or_else(|| panic!("missing TOML document field {path}"))
     }
 
-    // Defends: source metadata is selected by host tab while operational tabs can keep the legacy fallback.
+    // Defends: source metadata is selected by host tab while source-less tabs stay explicitly unmatched.
     #[test]
     fn selected_config_source_matches_selected_tab() {
         let source = |id: &str, tab: &str| ConfigUiSource {
@@ -1288,16 +1279,9 @@ mod tests {
             read_only: false,
         };
         let model = ConfigUiModel {
-            active_config_path: PathBuf::from("/tmp/acme/settings.jsonc"),
-            cursor_config_path: PathBuf::new(),
-            default_cursor_config_path: PathBuf::new(),
-            active_config_exists: true,
-            config_owner: ConfigUiPathOwner::User,
-            config_read_only: false,
             sources: vec![
                 source("settings-source", "settings"),
                 source("keys-source", "keys"),
-                source("advanced-source", "advanced"),
             ],
             tabs: vec![
                 "settings".to_string(),
@@ -1896,12 +1880,6 @@ plugins = ["git", "status"]
         }
 
         let model = ConfigUiModel {
-            active_config_path: PathBuf::from("/tmp/acme/settings.jsonc"),
-            cursor_config_path: PathBuf::new(),
-            default_cursor_config_path: PathBuf::new(),
-            active_config_exists: true,
-            config_owner: ConfigUiPathOwner::User,
-            config_read_only: false,
             sources: Vec::new(),
             tabs: vec!["general".to_string(), "advanced".to_string()],
             tab_list_tables: BTreeMap::new(),
