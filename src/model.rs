@@ -223,16 +223,13 @@ impl ConfigUiField {
 pub const NO_CONFIG_DEFAULT_VALUE_LABEL: &str = "no default";
 
 #[derive(Debug, Clone)]
-pub struct ConfigUiFieldRowSpec<'a> {
-    pub source_id: &'a str,
-    pub path: &'a str,
+pub struct ConfigUiFieldSpec {
+    pub source_id: String,
+    pub path: String,
     pub display_label: String,
     pub section_label: String,
     pub list_cells: Vec<String>,
-    pub tab: &'a str,
-    pub kind: &'a str,
-    pub current: Option<&'a JsonValue>,
-    pub default: Option<&'a JsonValue>,
+    pub tab: String,
     pub description: String,
     pub allowed_values: Vec<String>,
     pub validation: String,
@@ -242,23 +239,101 @@ pub struct ConfigUiFieldRowSpec<'a> {
     pub edit_behavior: ConfigUiEditBehavior,
 }
 
-#[derive(Debug, Clone)]
-pub struct ConfigUiStringListChoiceSpec {
-    pub source_id: String,
-    pub path: String,
-    pub display_label: String,
-    pub section_label: String,
-    pub list_cells: Vec<String>,
-    pub tab: String,
-    pub current: Option<Vec<String>>,
-    pub default: Option<Vec<String>>,
-    pub description: String,
-    pub allowed_values: Vec<String>,
-    pub validation: String,
-    pub rebuild_required: bool,
-    pub apply_status: ConfigUiApplyStatus,
-    pub has_blocking_diagnostic: bool,
-    pub edit_behavior: ConfigUiEditBehavior,
+impl ConfigUiFieldSpec {
+    pub fn new(
+        source_id: impl Into<String>,
+        path: impl Into<String>,
+        tab: impl Into<String>,
+        description: impl Into<String>,
+        allowed_values: Vec<String>,
+        validation: impl Into<String>,
+        apply_status: ConfigUiApplyStatus,
+    ) -> Self {
+        Self {
+            source_id: source_id.into(),
+            path: path.into(),
+            display_label: String::new(),
+            section_label: String::new(),
+            list_cells: Vec::new(),
+            tab: tab.into(),
+            description: description.into(),
+            allowed_values,
+            validation: validation.into(),
+            rebuild_required: false,
+            apply_status,
+            has_blocking_diagnostic: false,
+            edit_behavior: ConfigUiEditBehavior::Default,
+        }
+    }
+
+    pub fn build(
+        self,
+        kind: impl Into<String>,
+        current: Option<&JsonValue>,
+        default: Option<&JsonValue>,
+    ) -> ConfigUiField {
+        let state = if self.has_blocking_diagnostic {
+            ConfigUiValueState::Invalid
+        } else if current.is_some() {
+            ConfigUiValueState::Explicit
+        } else if default.is_some() {
+            ConfigUiValueState::Defaulted
+        } else {
+            ConfigUiValueState::Unset
+        };
+        ConfigUiField {
+            source_id: self.source_id,
+            path: self.path,
+            display_label: self.display_label,
+            section_label: self.section_label,
+            list_cells: self.list_cells,
+            tab: self.tab,
+            kind: kind.into(),
+            current_value: current
+                .or(default)
+                .map(render_json_value)
+                .unwrap_or_else(|| "not set".to_string()),
+            edit_value: current
+                .or(default)
+                .map(render_json_edit_value)
+                .unwrap_or_default(),
+            default_value: default
+                .map(render_json_value)
+                .unwrap_or_else(|| NO_CONFIG_DEFAULT_VALUE_LABEL.to_string()),
+            state,
+            description: self.description,
+            allowed_values: self.allowed_values,
+            validation: self.validation,
+            rebuild_required: self.rebuild_required,
+            apply_status: self.apply_status,
+            edit_behavior: self.edit_behavior,
+        }
+    }
+
+    pub fn build_string_list(
+        self,
+        current: Option<Vec<String>>,
+        default: Option<Vec<String>>,
+    ) -> Result<ConfigUiField, String> {
+        if self.allowed_values.is_empty() {
+            return Err(format!(
+                "{} must define at least one allowed string-list value.",
+                self.path
+            ));
+        }
+        for values in [current.as_deref(), default.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            for value in values {
+                validate_string_choice_value(&self.path, value, &self.allowed_values)?;
+            }
+        }
+
+        let current = current.as_deref().map(string_list_values_json);
+        let default = default.as_deref().map(string_list_values_json);
+        Ok(self.build("string_list", current.as_ref(), default.as_ref()))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -277,88 +352,6 @@ pub struct ConfigUiTomlDocumentSpec<'a> {
 pub struct ConfigUiTomlDocumentRows {
     pub list_table: ConfigUiListTable,
     pub fields: Vec<ConfigUiField>,
-}
-
-pub fn build_config_ui_field(spec: ConfigUiFieldRowSpec<'_>) -> ConfigUiField {
-    let state = if spec.has_blocking_diagnostic {
-        ConfigUiValueState::Invalid
-    } else if spec.current.is_some() {
-        ConfigUiValueState::Explicit
-    } else if spec.default.is_some() {
-        ConfigUiValueState::Defaulted
-    } else {
-        ConfigUiValueState::Unset
-    };
-    ConfigUiField {
-        source_id: spec.source_id.to_string(),
-        path: spec.path.to_string(),
-        display_label: spec.display_label,
-        section_label: spec.section_label,
-        list_cells: spec.list_cells,
-        tab: spec.tab.to_string(),
-        kind: spec.kind.to_string(),
-        current_value: spec
-            .current
-            .or(spec.default)
-            .map(render_json_value)
-            .unwrap_or_else(|| "not set".to_string()),
-        edit_value: spec
-            .current
-            .or(spec.default)
-            .map(render_json_edit_value)
-            .unwrap_or_default(),
-        default_value: spec
-            .default
-            .map(render_json_value)
-            .unwrap_or_else(|| NO_CONFIG_DEFAULT_VALUE_LABEL.to_string()),
-        state,
-        description: spec.description,
-        allowed_values: spec.allowed_values,
-        validation: spec.validation,
-        rebuild_required: spec.rebuild_required,
-        apply_status: spec.apply_status,
-        edit_behavior: spec.edit_behavior,
-    }
-}
-
-pub fn build_string_list_choice_field(
-    spec: ConfigUiStringListChoiceSpec,
-) -> Result<ConfigUiField, String> {
-    if spec.allowed_values.is_empty() {
-        return Err(format!(
-            "{} must define at least one allowed string-list value.",
-            spec.path
-        ));
-    }
-    for values in [spec.current.as_deref(), spec.default.as_deref()]
-        .into_iter()
-        .flatten()
-    {
-        for value in values {
-            validate_string_choice_value(&spec.path, value, &spec.allowed_values)?;
-        }
-    }
-
-    let current = spec.current.as_deref().map(string_list_values_json);
-    let default = spec.default.as_deref().map(string_list_values_json);
-    Ok(build_config_ui_field(ConfigUiFieldRowSpec {
-        source_id: &spec.source_id,
-        path: &spec.path,
-        display_label: spec.display_label,
-        section_label: spec.section_label,
-        list_cells: spec.list_cells,
-        tab: &spec.tab,
-        kind: "string_list",
-        current: current.as_ref(),
-        default: default.as_ref(),
-        description: spec.description,
-        allowed_values: spec.allowed_values,
-        validation: spec.validation,
-        rebuild_required: spec.rebuild_required,
-        apply_status: spec.apply_status,
-        has_blocking_diagnostic: spec.has_blocking_diagnostic,
-        edit_behavior: spec.edit_behavior,
-    }))
 }
 
 fn toml_document_list_table() -> ConfigUiListTable {
@@ -1304,28 +1297,18 @@ mod tests {
         assert!(selected_config_source(&model, 2).is_none());
     }
 
-    fn spec<'a>(
-        current: Option<&'a JsonValue>,
-        default: Option<&'a JsonValue>,
-        has_blocking_diagnostic: bool,
-    ) -> ConfigUiFieldRowSpec<'a> {
-        ConfigUiFieldRowSpec {
-            source_id: DEFAULT_CONFIG_SOURCE_ID,
-            path: "ui.theme",
-            display_label: String::new(),
-            section_label: String::new(),
-            list_cells: Vec::new(),
-            tab: "general",
-            kind: "string",
-            current,
-            default,
-            description: "Theme name".to_string(),
-            allowed_values: vec!["light".to_string(), "dark".to_string()],
-            validation: "must be a known theme".to_string(),
-            rebuild_required: false,
-            apply_status: status(),
+    fn spec(has_blocking_diagnostic: bool) -> ConfigUiFieldSpec {
+        ConfigUiFieldSpec {
             has_blocking_diagnostic,
-            edit_behavior: ConfigUiEditBehavior::Default,
+            ..ConfigUiFieldSpec::new(
+                DEFAULT_CONFIG_SOURCE_ID,
+                "ui.theme",
+                "general",
+                "Theme name",
+                vec!["light".to_string(), "dark".to_string()],
+                "must be a known theme",
+                status(),
+            )
         }
     }
 
@@ -1444,25 +1427,25 @@ help = "Theme name"
         let current = json!("dark");
         let default = json!("light");
 
-        let explicit = build_config_ui_field(spec(Some(&current), Some(&default), false));
+        let explicit = spec(false).build("string", Some(&current), Some(&default));
         assert_eq!(explicit.state, ConfigUiValueState::Explicit);
         assert_eq!(explicit.current_value, "\"dark\"");
         assert_eq!(explicit.edit_value, "\"dark\"");
         assert_eq!(explicit.default_value, "\"light\"");
         assert!(explicit.has_default_value());
 
-        let defaulted = build_config_ui_field(spec(None, Some(&default), false));
+        let defaulted = spec(false).build("string", None, Some(&default));
         assert_eq!(defaulted.state, ConfigUiValueState::Defaulted);
         assert_eq!(defaulted.current_value, "\"light\"");
         assert!(defaulted.has_default_value());
 
-        let unset = build_config_ui_field(spec(None, None, false));
+        let unset = spec(false).build("string", None, None);
         assert_eq!(unset.state, ConfigUiValueState::Unset);
         assert_eq!(unset.current_value, "not set");
         assert_eq!(unset.default_value, NO_CONFIG_DEFAULT_VALUE_LABEL);
         assert!(!unset.has_default_value());
 
-        let invalid = build_config_ui_field(spec(Some(&current), Some(&default), true));
+        let invalid = spec(true).build("string", Some(&current), Some(&default));
         assert_eq!(invalid.state, ConfigUiValueState::Invalid);
     }
 
@@ -1470,24 +1453,23 @@ help = "Theme name"
     #[test]
     fn field_row_builder_preserves_host_metadata() {
         let current = json!(["git", "search", "preview", "terminal", "theme"]);
-        let field = build_config_ui_field(ConfigUiFieldRowSpec {
-            source_id: "settings",
-            path: "plugins.enabled",
+        let field = ConfigUiFieldSpec {
             display_label: "Enabled plugins".to_string(),
             section_label: "Plugins".to_string(),
             list_cells: vec!["plugins".to_string(), "5 enabled".to_string()],
-            tab: "advanced",
-            kind: "string_list",
-            current: Some(&current),
-            default: None,
-            description: "Enabled plugin list".to_string(),
-            allowed_values: vec!["git".to_string()],
-            validation: "known plugins only".to_string(),
             rebuild_required: true,
-            apply_status: status(),
-            has_blocking_diagnostic: false,
             edit_behavior: ConfigUiEditBehavior::FriendlyStringList,
-        });
+            ..ConfigUiFieldSpec::new(
+                "settings",
+                "plugins.enabled",
+                "advanced",
+                "Enabled plugin list",
+                vec!["git".to_string()],
+                "known plugins only",
+                status(),
+            )
+        }
+        .build("string_list", Some(&current), None);
 
         assert_eq!(field.source_id, "settings");
         assert_eq!(field.path, "plugins.enabled");
@@ -1511,27 +1493,29 @@ help = "Theme name"
     // Defends: hosts can build allowed string-list choice fields without hand-assembling JSON row specs.
     #[test]
     fn string_list_choice_helper_builds_ordered_field() {
-        let field = build_string_list_choice_field(ConfigUiStringListChoiceSpec {
-            source_id: "settings".to_string(),
-            path: "widgets.enabled".to_string(),
+        let field = ConfigUiFieldSpec {
             display_label: "Enabled widgets".to_string(),
             section_label: "Widgets".to_string(),
             list_cells: vec!["widgets".to_string(), "2 selected".to_string()],
-            tab: "widgets".to_string(),
-            current: Some(vec!["status".to_string(), "clock".to_string()]),
-            default: Some(vec!["clock".to_string()]),
-            description: "Enabled widget ids".to_string(),
-            allowed_values: vec![
-                "clock".to_string(),
-                "status".to_string(),
-                "mode".to_string(),
-            ],
-            validation: "known widget ids only".to_string(),
             rebuild_required: true,
-            apply_status: status(),
-            has_blocking_diagnostic: false,
-            edit_behavior: ConfigUiEditBehavior::Default,
-        })
+            ..ConfigUiFieldSpec::new(
+                "settings",
+                "widgets.enabled",
+                "widgets",
+                "Enabled widget ids",
+                vec![
+                    "clock".to_string(),
+                    "status".to_string(),
+                    "mode".to_string(),
+                ],
+                "known widget ids only",
+                status(),
+            )
+        }
+        .build_string_list(
+            Some(vec!["status".to_string(), "clock".to_string()]),
+            Some(vec!["clock".to_string()]),
+        )
         .expect("valid string-list field");
 
         assert_eq!(field.source_id, "settings");
@@ -1579,23 +1563,16 @@ help = "Theme name"
     // Defends: the choice helper fails fast when no choice ids are available.
     #[test]
     fn string_list_choice_helper_requires_allowed_values() {
-        let error = build_string_list_choice_field(ConfigUiStringListChoiceSpec {
-            source_id: "settings".to_string(),
-            path: "widgets.enabled".to_string(),
-            display_label: String::new(),
-            section_label: String::new(),
-            list_cells: Vec::new(),
-            tab: "widgets".to_string(),
-            current: None,
-            default: None,
-            description: String::new(),
-            allowed_values: Vec::new(),
-            validation: String::new(),
-            rebuild_required: false,
-            apply_status: status(),
-            has_blocking_diagnostic: false,
-            edit_behavior: ConfigUiEditBehavior::Default,
-        })
+        let error = ConfigUiFieldSpec::new(
+            "settings",
+            "widgets.enabled",
+            "widgets",
+            "",
+            Vec::new(),
+            "",
+            status(),
+        )
+        .build_string_list(None, None)
         .expect_err("missing choices");
 
         assert!(error.contains("must define at least one allowed string-list value"));
@@ -1883,7 +1860,7 @@ plugins = ["git", "status"]
             sources: Vec::new(),
             tabs: vec!["general".to_string(), "advanced".to_string()],
             tab_list_tables: BTreeMap::new(),
-            fields: vec![build_config_ui_field(spec(None, None, false))],
+            fields: vec![spec(false).build("string", None, None)],
             file_actions: vec![
                 file_action("general", "Prompt config"),
                 file_action("advanced", "Native logs"),

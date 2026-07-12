@@ -120,43 +120,43 @@ Populate `ConfigUiModel::theme_switcher` when a committed field value should sel
 
 ## String-List Choices
 
-Use `build_string_list_choice_field` for string-list settings whose values must come from a host-defined allowed set. `ConfigUiEditBehavior::Default` keeps edited values in allowed-value order; `ConfigUiEditBehavior::OrderedStringList` preserves selected-value order and enables reorder controls in the picker
+Use `ConfigUiFieldSpec::build_string_list` for string-list settings whose values must come from a host-defined allowed set. The same field spec builds ordinary JSON-backed rows with `build`, so presentation and policy options have one shared construction surface. `ConfigUiEditBehavior::Default` keeps edited values in allowed-value order; `ConfigUiEditBehavior::OrderedStringList` preserves selected-value order and enables reorder controls in the picker
 
 ```rust
 use ratconfig::{
-    ConfigUiApplyStatus, ConfigUiEditBehavior, ConfigUiField, ConfigUiStringListChoiceSpec,
-    build_string_list_choice_field,
+    ConfigUiApplyStatus, ConfigUiEditBehavior, ConfigUiField, ConfigUiFieldSpec,
     toml_adapter::{TomlPatchError, set_toml_value_text},
 };
 use serde_json::Value;
 
 fn sections_field() -> Result<ConfigUiField, String> {
-    build_string_list_choice_field(ConfigUiStringListChoiceSpec {
-        source_id: "settings".to_string(),
-        path: "layout.sections".to_string(),
+    ConfigUiFieldSpec {
         display_label: "Layout sections".to_string(),
         section_label: "Visible content".to_string(),
-        list_cells: Vec::new(),
-        tab: "layout".to_string(),
-        current: Some(vec!["left".to_string(), "center".to_string()]),
-        default: Some(vec!["center".to_string()]),
-        description: "Choose visible layout sections".to_string(),
-        allowed_values: vec![
-            "left".to_string(),
-            "center".to_string(),
-            "right".to_string(),
-        ],
-        validation: "known layout section ids only".to_string(),
-        rebuild_required: false,
-        apply_status: ConfigUiApplyStatus {
-            summary: "after save".to_string(),
-            label: "after save".to_string(),
-            detail: "Reload the application to apply this value".to_string(),
-            pending: true,
-        },
-        has_blocking_diagnostic: false,
         edit_behavior: ConfigUiEditBehavior::OrderedStringList,
-    })
+        ..ConfigUiFieldSpec::new(
+            "settings",
+            "layout.sections",
+            "layout",
+            "Choose visible layout sections",
+            vec![
+                "left".to_string(),
+                "center".to_string(),
+                "right".to_string(),
+            ],
+            "known layout section ids only",
+            ConfigUiApplyStatus {
+                summary: "after save".to_string(),
+                label: "after save".to_string(),
+                detail: "Reload the application to apply this value".to_string(),
+                pending: true,
+            },
+        )
+    }
+    .build_string_list(
+        Some(vec!["left".to_string(), "center".to_string()]),
+        Some(vec!["center".to_string()]),
+    )
 }
 
 fn patch_sections_toml(raw: &str, value: &Value) -> Result<String, TomlPatchError> {
@@ -460,6 +460,7 @@ Before cutting a release:
 ### 3.0.0
 
 - `ConfigUiSource` is the only config-document metadata owner in `ConfigUiModel`
+- `ConfigUiFieldSpec` replaces the duplicated ordinary and string-list field parameter bags
 - Tabs without a matching source render neutral non-file-backed header metadata
 - Legacy single-config and cursor-specific model fields are removed
 
