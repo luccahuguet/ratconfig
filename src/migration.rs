@@ -1,10 +1,9 @@
 // Test lane: default
 
 use crate::jsonc::{
-    PatchError, PatchMutation, PatchOutcome, get_json_path, parse_jsonc_value,
-    set_jsonc_value_text, unset_jsonc_value_text,
+    PatchError, get_json_path, parse_jsonc_value, set_jsonc_value_text, unset_jsonc_value_text,
 };
-use crate::patch::dotted_paths_overlap;
+use crate::patch::{PatchMutation, PatchOutcome, dotted_paths_overlap};
 use serde_json::Value as JsonValue;
 
 pub type ValueTransform = fn(&JsonValue) -> Result<Option<JsonValue>, String>;
@@ -62,26 +61,6 @@ impl From<PatchError> for MigrationError {
     }
 }
 
-pub(crate) struct TextPatchOutcome {
-    pub text: String,
-    pub mutation: PatchMutation,
-}
-
-impl TextPatchOutcome {
-    fn changed(&self) -> bool {
-        self.mutation != PatchMutation::Unchanged
-    }
-}
-
-impl From<PatchOutcome> for TextPatchOutcome {
-    fn from(outcome: PatchOutcome) -> Self {
-        Self {
-            text: outcome.text,
-            mutation: outcome.mutation,
-        }
-    }
-}
-
 pub(crate) trait MigrationErrorKind {
     fn destination_exists(from: &str, to: &str) -> Self;
     fn overlapping_paths(from: &str, to: &str) -> Self;
@@ -120,16 +99,8 @@ pub fn apply_migrations_text(
         operations,
         |text| parse_jsonc_value(text).map_err(MigrationError::from),
         get_json_path,
-        |text, path, value| {
-            set_jsonc_value_text(text, path, value)
-                .map(TextPatchOutcome::from)
-                .map_err(MigrationError::from)
-        },
-        |text, path| {
-            unset_jsonc_value_text(text, path)
-                .map(TextPatchOutcome::from)
-                .map_err(MigrationError::from)
-        },
+        |text, path, value| set_jsonc_value_text(text, path, value).map_err(MigrationError::from),
+        |text, path| unset_jsonc_value_text(text, path).map_err(MigrationError::from),
     )
 }
 
@@ -138,8 +109,8 @@ pub(crate) fn apply_migrations_text_with<Error: MigrationErrorKind>(
     operations: &[MigrationOp],
     parse_value: impl Fn(&str) -> Result<JsonValue, Error>,
     get_path: impl for<'a> Fn(&'a JsonValue, &str) -> Option<&'a JsonValue>,
-    set_value: impl Fn(&str, &str, &JsonValue) -> Result<TextPatchOutcome, Error>,
-    unset_value: impl Fn(&str, &str) -> Result<TextPatchOutcome, Error>,
+    set_value: impl Fn(&str, &str, &JsonValue) -> Result<PatchOutcome, Error>,
+    unset_value: impl Fn(&str, &str) -> Result<PatchOutcome, Error>,
 ) -> Result<MigrationOutcome, Error> {
     let mut text = raw.to_string();
     let mut mutations = Vec::new();

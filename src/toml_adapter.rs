@@ -1,34 +1,13 @@
 // Test lane: default
 
 use crate::migration::{
-    MigrationErrorKind, MigrationMutation, MigrationOp, MigrationOutcome, TextPatchOutcome,
-    apply_migrations_text_with, defaults_to_add_default_ops,
+    MigrationErrorKind, MigrationOp, MigrationOutcome, apply_migrations_text_with,
+    defaults_to_add_default_ops,
 };
 use crate::model::toml_value_to_json;
-use crate::patch::{PatchMutation, get_dotted_json_path, split_dotted_path};
+use crate::patch::{PatchMutation, PatchOutcome, get_dotted_json_path, split_dotted_path};
 use serde_json::Value as JsonValue;
 use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TomlPatchOutcome {
-    pub text: String,
-    pub mutation: PatchMutation,
-}
-
-impl TomlPatchOutcome {
-    pub fn changed(&self) -> bool {
-        self.mutation != PatchMutation::Unchanged
-    }
-}
-
-impl From<TomlPatchOutcome> for TextPatchOutcome {
-    fn from(outcome: TomlPatchOutcome) -> Self {
-        Self {
-            text: outcome.text,
-            mutation: outcome.mutation,
-        }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TomlPatchError {
@@ -36,27 +15,6 @@ pub enum TomlPatchError {
     InvalidPath { path: String },
     RewriteRequired { path: String, detail: String },
     UnsupportedValue { path: String, detail: String },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TomlMigrationOutcome {
-    pub text: String,
-    pub mutations: Vec<MigrationMutation>,
-}
-
-impl TomlMigrationOutcome {
-    pub fn changed(&self) -> bool {
-        !self.mutations.is_empty()
-    }
-}
-
-impl From<MigrationOutcome> for TomlMigrationOutcome {
-    fn from(outcome: MigrationOutcome) -> Self {
-        Self {
-            text: outcome.text,
-            mutations: outcome.mutations,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,7 +58,7 @@ pub fn set_toml_value_text(
     raw: &str,
     path: &str,
     value: &JsonValue,
-) -> Result<TomlPatchOutcome, TomlPatchError> {
+) -> Result<PatchOutcome, TomlPatchError> {
     let parts = split_path(path)?;
     let replacement = toml_value_from_json(value, path)?;
     let mut document = parse_document(raw)?;
@@ -119,13 +77,13 @@ pub fn set_toml_value_text(
         mutation
     };
     validate_toml(&text)?;
-    Ok(TomlPatchOutcome { text, mutation })
+    Ok(PatchOutcome { text, mutation })
 }
 
-pub fn unset_toml_value_text(raw: &str, path: &str) -> Result<TomlPatchOutcome, TomlPatchError> {
+pub fn unset_toml_value_text(raw: &str, path: &str) -> Result<PatchOutcome, TomlPatchError> {
     let parts = split_path(path)?;
     let mut document = parse_document(raw)?;
-    let unchanged = || TomlPatchOutcome {
+    let unchanged = || PatchOutcome {
         text: raw.to_string(),
         mutation: PatchMutation::Unchanged,
     };
@@ -138,7 +96,7 @@ pub fn unset_toml_value_text(raw: &str, path: &str) -> Result<TomlPatchOutcome, 
     }
     let text = document.to_string();
     validate_toml(&text)?;
-    Ok(TomlPatchOutcome {
+    Ok(PatchOutcome {
         text,
         mutation: PatchMutation::Removed,
     })
@@ -161,30 +119,23 @@ pub fn get_toml_path<'a>(value: &'a JsonValue, path: &str) -> Option<&'a JsonVal
 pub fn apply_toml_migrations_text(
     raw: &str,
     operations: &[MigrationOp],
-) -> Result<TomlMigrationOutcome, TomlMigrationError> {
+) -> Result<MigrationOutcome, TomlMigrationError> {
     apply_migrations_text_with(
         raw,
         operations,
         |text| parse_toml_value(text).map_err(TomlMigrationError::from),
         get_toml_path,
         |text, path, value| {
-            set_toml_value_text(text, path, value)
-                .map(TextPatchOutcome::from)
-                .map_err(TomlMigrationError::from)
+            set_toml_value_text(text, path, value).map_err(TomlMigrationError::from)
         },
-        |text, path| {
-            unset_toml_value_text(text, path)
-                .map(TextPatchOutcome::from)
-                .map_err(TomlMigrationError::from)
-        },
+        |text, path| unset_toml_value_text(text, path).map_err(TomlMigrationError::from),
     )
-    .map(TomlMigrationOutcome::from)
 }
 
 pub fn apply_toml_defaults_text(
     raw: &str,
     defaults: &[(&str, JsonValue)],
-) -> Result<TomlMigrationOutcome, TomlMigrationError> {
+) -> Result<MigrationOutcome, TomlMigrationError> {
     apply_toml_migrations_text(raw, &defaults_to_add_default_ops(defaults))
 }
 
@@ -302,6 +253,7 @@ fn rewrite_required(path: &str, detail: &str) -> TomlPatchError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::migration::MigrationMutation;
     use serde_json::json;
 
     fn full_to_compact(value: &JsonValue) -> Result<Option<JsonValue>, String> {

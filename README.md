@@ -461,6 +461,7 @@ Before cutting a release:
 
 - `ConfigUiSource` is the only config-document metadata owner in `ConfigUiModel`
 - `ConfigUiFieldSpec` replaces the duplicated ordinary and string-list field parameter bags
+- JSONC and TOML patchers share one format-neutral `PatchOutcome`; TOML migrations return the shared `MigrationOutcome`
 - Tabs without a matching source render neutral non-file-backed header metadata
 - Legacy single-config and cursor-specific model fields are removed
 

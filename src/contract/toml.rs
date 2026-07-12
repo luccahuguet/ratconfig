@@ -5,8 +5,9 @@ use super::{
     ContractJoinOutcome, ContractState, append_applied_change_ids, apply_contract_with,
     contract_state_to_json, new_joined_state, validate_contract,
 };
+use crate::patch::PatchOutcome;
 use crate::toml_adapter::{
-    TomlPatchError, TomlPatchOutcome, apply_toml_migrations_text, get_toml_path, parse_toml_value,
+    TomlPatchError, apply_toml_migrations_text, get_toml_path, parse_toml_value,
     set_toml_value_text,
 };
 use serde_json::Value as JsonValue;
@@ -51,7 +52,7 @@ pub fn write_toml_contract_state_text(
     raw: &str,
     state_path: &str,
     state: &ContractState,
-) -> Result<TomlPatchOutcome, ContractError> {
+) -> Result<PatchOutcome, ContractError> {
     set_toml_value_text(raw, state_path, &contract_state_to_json(state)).map_err(Into::into)
 }
 

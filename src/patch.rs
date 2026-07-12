@@ -8,6 +8,18 @@ pub enum PatchMutation {
     Unchanged,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatchOutcome {
+    pub text: String,
+    pub mutation: PatchMutation,
+}
+
+impl PatchOutcome {
+    pub fn changed(&self) -> bool {
+        self.mutation != PatchMutation::Unchanged
+    }
+}
+
 pub fn split_dotted_path(path: &str) -> Option<Vec<String>> {
     path.split('.')
         .map(|part| {
