@@ -189,7 +189,17 @@ mod tests {
     // Defends: event dispatch is only crossterm conversion plus the existing reusable reducer.
     #[test]
     fn dispatches_crossterm_events_to_reducer() {
-        let mut app = ConfigUiApp::new(test_model());
+        let mut model = test_model();
+        model.tabs.push("advanced".to_string());
+        let mut app = ConfigUiApp::new(model);
+
+        app.selected_row = 1;
+        assert_eq!(
+            handle_crossterm_event(&mut app, key_event(KeyCode::Char('2'), KeyModifiers::NONE)),
+            ConfigUiIntent::None
+        );
+        assert_eq!((app.selected_tab, app.selected_row), (1, 0));
+        app.selected_tab = 0;
 
         assert_eq!(
             handle_crossterm_event(&mut app, key_event(KeyCode::Char('j'), KeyModifiers::NONE)),

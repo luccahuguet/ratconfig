@@ -290,19 +290,27 @@ fn header_metadata_line(
 }
 
 fn render_tabs(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect) {
-    let labels = app
-        .model
-        .tabs
-        .iter()
-        .map(|tab| Line::from(Span::raw(tab.clone())))
-        .collect::<Vec<_>>();
     frame.render_widget(
-        Tabs::new(labels)
+        Tabs::new(tab_labels(&app.model.tabs))
             .select(app.selected_tab)
             .style(themed_style(fg_style(Color::Gray), app.active_theme))
             .highlight_style(themed_style(bold_fg_style(Color::Yellow), app.active_theme)),
         area,
     );
+}
+
+fn tab_labels(tabs: &[String]) -> Vec<Line<'static>> {
+    tabs.iter()
+        .enumerate()
+        .map(|(index, tab)| {
+            let label = if index < 9 {
+                format!("({}) {tab}", index + 1)
+            } else {
+                tab.clone()
+            };
+            Line::from(Span::raw(label))
+        })
+        .collect()
 }
 
 fn render_body(
@@ -1303,6 +1311,22 @@ mod tests {
         model.cursor_config_path = PathBuf::from("/home/alex/.config/acme/cursors.jsonc");
         model.default_cursor_config_path = PathBuf::from("/runtime/acme/default_cursors.jsonc");
         model
+    }
+
+    // Defends: tab numbering is presentation-only and stops after the ninth host-owned label.
+    #[test]
+    fn tab_labels_show_first_nine_shortcuts() {
+        let tabs = (1..=10)
+            .map(|index| format!("tab_{index}"))
+            .collect::<Vec<_>>();
+        let labels = tab_labels(&tabs)
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(labels[0], "(1) tab_1");
+        assert_eq!(labels[8], "(9) tab_9");
+        assert_eq!(labels[9], "tab_10");
     }
 
     // Defends: headings are derived from filtered field rows and selection indices continue to target only real rows.

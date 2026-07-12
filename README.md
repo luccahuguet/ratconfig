@@ -108,6 +108,8 @@ Use `ConfigUiField::display_label` when row and detail text should be friendlier
 
 Use `ConfigUiField::section_label` to place consecutive fields under host-defined, non-selectable headings within a tab. Ratconfig derives headings from the visible filtered rows, so empty sections disappear during search while selection and edit intents continue to address only real fields. Leave it empty to preserve the unsectioned layout
 
+The first nine tabs display `(1)` through `(9)` shortcuts; pressing the matching digit selects that tab in normal mode while search and edit modes continue accepting digits as input
+
 Populate `ConfigUiModel::tab_list_tables` and matching `ConfigUiField::list_cells` when a tab should render a structured display table instead of the default `takes effect | setting | value` field list. This is presentation-only data; Ratconfig does not parse labels, values, paths, or host-specific concepts to build those cells
 
 Fields with defaults expose a reset-to-default action that emits `ConfigUiIntent::UnsetField`. Hosts decide whether that means unsetting text, writing a default, validation, persistence, reloads, and apply behavior. Use `NO_CONFIG_DEFAULT_VALUE_LABEL` for manually constructed fields that have no default; builder helpers set it automatically

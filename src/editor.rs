@@ -385,6 +385,14 @@ impl ConfigUiApp {
             ConfigUiKey::Enter | ConfigUiKey::Char(' ') => self.activate_selected_row(),
             ConfigUiKey::Char('e') => self.edit_or_activate_selected_row(),
             ConfigUiKey::Char('u') => self.return_selected_field_to_default(),
+            ConfigUiKey::Char(ch @ '1'..='9') => {
+                let index = usize::from(ch as u8 - b'1');
+                if index < self.model.tabs.len() {
+                    self.selected_tab = index;
+                    self.selected_row = 0;
+                }
+                ConfigUiIntent::None
+            }
             ConfigUiKey::Tab | ConfigUiKey::Right | ConfigUiKey::Char('l') => {
                 self.next_tab();
                 ConfigUiIntent::None
@@ -1641,6 +1649,51 @@ line-number = "relative"
         assert!(app.search.is_empty());
         assert_eq!(app.handle_key(ConfigUiKey::Enter), ConfigUiIntent::None);
         assert!(!app.search_active);
+    }
+
+    // Defends: normal-mode digits select the matching first-nine tab and reset row selection without changing out-of-range state.
+    #[test]
+    fn reducer_selects_numbered_tabs_directly() {
+        let mut model = test_model();
+        model.tabs = (1..=10).map(|index| format!("tab_{index}")).collect();
+        model.tabs[0] = "general".to_string();
+        let mut app = ConfigUiApp::new(model);
+        app.selected_row = 2;
+
+        assert_eq!(app.handle_key(ConfigUiKey::Char('2')), ConfigUiIntent::None);
+        assert_eq!((app.selected_tab, app.selected_row), (1, 0));
+
+        app.selected_row = 2;
+        assert_eq!(app.handle_key(ConfigUiKey::Char('9')), ConfigUiIntent::None);
+        assert_eq!((app.selected_tab, app.selected_row), (8, 0));
+
+        app.model.tabs.truncate(3);
+        app.selected_tab = 0;
+        app.selected_row = 2;
+        assert_eq!(app.handle_key(ConfigUiKey::Char('9')), ConfigUiIntent::None);
+        assert_eq!((app.selected_tab, app.selected_row), (0, 2));
+        assert_eq!(app.handle_key(ConfigUiKey::Char('0')), ConfigUiIntent::None);
+        assert_eq!((app.selected_tab, app.selected_row), (0, 2));
+    }
+
+    // Regression: digit shortcuts remain ordinary text while search or scalar text editing is active.
+    #[test]
+    fn numbered_tab_digits_remain_search_and_edit_input() {
+        let mut model = model_with_fields(vec![field("ui.scale", "integer", "1", &[])]);
+        model.tabs = vec!["general".to_string(), "advanced".to_string()];
+        let mut app = ConfigUiApp::new(model);
+
+        app.search_active = true;
+        assert_eq!(app.handle_key(ConfigUiKey::Char('2')), ConfigUiIntent::None);
+        assert_eq!(app.search, "2");
+        assert_eq!(app.selected_tab, 0);
+
+        app.search_active = false;
+        app.search.clear();
+        app.begin_edit_field(0);
+        assert_eq!(app.handle_key(ConfigUiKey::Char('2')), ConfigUiIntent::None);
+        assert_eq!(app.edit.as_ref().expect("text edit").input, "12");
+        assert_eq!(app.selected_tab, 0);
     }
 
     // Defends: vertical row navigation wraps within the visible rows and stays stable for empty views.
