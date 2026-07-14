@@ -221,7 +221,7 @@ When using the optional crossterm runner, the callback is invoked while the runn
 Hosts that want ratconfig to own the crossterm terminal setup, draw loop, event reads, and key conversion can enable the optional runner:
 
 ```toml
-ratconfig = { version = "4", features = ["crossterm-runner"] }
+ratconfig = { git = "https://github.com/luccahuguet/ratconfig", tag = "v4.0.0", features = ["crossterm-runner"] }
 ```
 
 ```rust,no_run

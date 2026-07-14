@@ -2,13 +2,13 @@
 
 use super::{
     AppliedContractChange, ConfigContract, ContractApplyOutcome, ContractError,
-    ContractJoinOutcome, ContractState, append_applied_change_ids, apply_contract_with,
-    contract_state_to_json, new_joined_state, validate_contract,
+    ContractJoinOutcome, ContractState, append_applied_change_ids, contract_state_to_json,
+    new_joined_state, plan_from_changes, planned_change_refs, read_contract_state,
+    validate_contract,
 };
 use crate::patch::PatchOutcome;
 use crate::toml_adapter::{
-    TomlPatchError, apply_toml_migrations_text, get_toml_path, parse_toml_value,
-    set_toml_value_text,
+    TomlPatchError, apply_toml_migrations_text, parse_toml_value, set_toml_value_text,
 };
 use serde_json::Value as JsonValue;
 
@@ -23,13 +23,35 @@ pub fn apply_toml_contract_text(
     contract: &ConfigContract,
     from_version: u64,
 ) -> Result<ContractApplyOutcome, ContractError> {
-    apply_contract_with(raw, contract, from_version, |text, change| {
-        apply_toml_migrations_text(text, &change.operations)
-            .map(|outcome| (outcome.text, outcome.mutations))
-            .map_err(|error| ContractError::TomlMigration {
+    let changes = planned_change_refs(contract, from_version)?;
+    let plan = plan_from_changes(from_version, contract.current_version, &changes);
+    if plan.requires_manual_action() {
+        return Err(ContractError::ManualRequired { plan });
+    }
+
+    let mut text = raw.to_string();
+    let mut applied_changes = Vec::new();
+    for change in changes {
+        let outcome = apply_toml_migrations_text(&text, &change.operations).map_err(|error| {
+            ContractError::TomlMigration {
                 change_id: change.id.clone(),
                 error,
-            })
+            }
+        })?;
+        text = outcome.text;
+        applied_changes.push(AppliedContractChange {
+            id: change.id.clone(),
+            from_version: change.from_version,
+            to_version: change.to_version,
+            mutations: outcome.mutations,
+        });
+    }
+
+    Ok(ContractApplyOutcome {
+        text,
+        from_version,
+        to_version: contract.current_version,
+        applied_changes,
     })
 }
 
@@ -45,7 +67,7 @@ pub fn read_toml_contract_state(
     value: &JsonValue,
     state_path: &str,
 ) -> Result<Option<ContractState>, ContractError> {
-    super::read_contract_state_from_value(value, state_path, get_toml_path)
+    read_contract_state(value, state_path)
 }
 
 pub fn write_toml_contract_state_text(
@@ -132,6 +154,7 @@ fn write_toml_joined_state(
 mod tests {
     use super::*;
     use crate::migration::MigrationOp;
+    use crate::toml_adapter::get_toml_path;
     use serde_json::json;
 
     fn contract_with_changes(

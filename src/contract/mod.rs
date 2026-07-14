@@ -198,42 +198,6 @@ pub fn plan_contract_migration(
     ))
 }
 
-fn apply_contract_with(
-    raw: &str,
-    contract: &ConfigContract,
-    from_version: u64,
-    mut apply_change: impl FnMut(
-        &str,
-        &ContractChange,
-    ) -> Result<(String, Vec<MigrationMutation>), ContractError>,
-) -> Result<ContractApplyOutcome, ContractError> {
-    let changes = planned_change_refs(contract, from_version)?;
-    let plan = plan_from_changes(from_version, contract.current_version, &changes);
-    if plan.requires_manual_action() {
-        return Err(ContractError::ManualRequired { plan });
-    }
-
-    let mut text = raw.to_string();
-    let mut applied_changes = Vec::new();
-    for change in changes {
-        let (next_text, mutations) = apply_change(&text, change)?;
-        text = next_text;
-        applied_changes.push(AppliedContractChange {
-            id: change.id.clone(),
-            from_version: change.from_version,
-            to_version: change.to_version,
-            mutations,
-        });
-    }
-
-    Ok(ContractApplyOutcome {
-        text,
-        from_version,
-        to_version: contract.current_version,
-        applied_changes,
-    })
-}
-
 pub fn read_contract_state(
     value: &JsonValue,
     state_path: &str,
@@ -245,15 +209,7 @@ pub fn read_contract_state_from_json(
     value: &JsonValue,
     state_path: &str,
 ) -> Result<Option<ContractState>, ContractError> {
-    read_contract_state_from_value(value, state_path, get_dotted_json_path)
-}
-
-fn read_contract_state_from_value(
-    value: &JsonValue,
-    state_path: &str,
-    get_path: impl for<'a> Fn(&'a JsonValue, &str) -> Option<&'a JsonValue>,
-) -> Result<Option<ContractState>, ContractError> {
-    let Some(state_value) = get_path(value, state_path) else {
+    let Some(state_value) = get_dotted_json_path(value, state_path) else {
         return Ok(None);
     };
     let Some(state) = state_value.as_object() else {
@@ -566,6 +522,28 @@ mode = "full"
         assert_eq!(get_toml_path(&value, "old.remove"), None);
         assert_eq!(get_toml_path(&value, "project.name"), Some(&json!("ferox")));
         assert_eq!(get_toml_path(&value, "ui.mode"), Some(&json!("compact")));
+    }
+
+    // Defends: adapter failures retain the contract change that caused them.
+    #[test]
+    fn automatic_contract_errors_include_change_id() {
+        let contract = contract_with_changes(
+            vec![ContractChange::automatic(
+                "move-name",
+                1,
+                2,
+                vec![MigrationOp::Rename {
+                    from: "old".to_string(),
+                    to: "new".to_string(),
+                }],
+            )],
+            2,
+        );
+
+        assert!(matches!(
+            apply_toml_contract_text("old = 1\nnew = 2\n", &contract, 1),
+            Err(ContractError::TomlMigration { change_id, .. }) if change_id == "move-name"
+        ));
     }
 
     // Defends: impossible migrations block the whole plan with actionable manual steps instead of partly rewriting config.

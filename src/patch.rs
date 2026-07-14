@@ -41,6 +41,8 @@ pub fn dotted_paths_overlap(a: &str, b: &str) -> bool {
 }
 
 pub(crate) fn get_dotted_json_path<'a>(value: &'a JsonValue, path: &str) -> Option<&'a JsonValue> {
-    path.split('.')
-        .try_fold(value, |current, part| current.as_object()?.get(part))
+    path.split('.').try_fold(value, |current, part| {
+        let current = current.as_object()?;
+        current.get(part).or_else(|| current.get(part.trim()))
+    })
 }

@@ -1,11 +1,10 @@
 // Test lane: default
 
-use crate::migration::{
-    MigrationErrorKind, MigrationOp, MigrationOutcome, apply_migrations_text_with,
-    defaults_to_add_default_ops,
-};
+use crate::migration::{MigrationMutation, MigrationOp, MigrationOutcome};
 use crate::model::toml_value_to_json;
-use crate::patch::{PatchMutation, PatchOutcome, get_dotted_json_path, split_dotted_path};
+use crate::patch::{
+    PatchMutation, PatchOutcome, dotted_paths_overlap, get_dotted_json_path, split_dotted_path,
+};
 use serde_json::Value as JsonValue;
 use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value};
 
@@ -28,29 +27,6 @@ pub enum TomlMigrationError {
 impl From<TomlPatchError> for TomlMigrationError {
     fn from(error: TomlPatchError) -> Self {
         Self::Patch(error)
-    }
-}
-
-impl MigrationErrorKind for TomlMigrationError {
-    fn destination_exists(from: &str, to: &str) -> Self {
-        Self::DestinationExists {
-            from: from.into(),
-            to: to.into(),
-        }
-    }
-
-    fn overlapping_paths(from: &str, to: &str) -> Self {
-        Self::OverlappingPaths {
-            from: from.into(),
-            to: to.into(),
-        }
-    }
-
-    fn transform_failed(path: &str, message: String) -> Self {
-        Self::TransformFailed {
-            path: path.into(),
-            message,
-        }
     }
 }
 
@@ -120,23 +96,96 @@ pub fn apply_toml_migrations_text(
     raw: &str,
     operations: &[MigrationOp],
 ) -> Result<MigrationOutcome, TomlMigrationError> {
-    apply_migrations_text_with(
-        raw,
-        operations,
-        |text| parse_toml_value(text).map_err(TomlMigrationError::from),
-        get_toml_path,
-        |text, path, value| {
-            set_toml_value_text(text, path, value).map_err(TomlMigrationError::from)
-        },
-        |text, path| unset_toml_value_text(text, path).map_err(TomlMigrationError::from),
-    )
+    let mut text = raw.to_string();
+    let mut mutations = Vec::new();
+    for operation in operations {
+        match operation {
+            MigrationOp::Rename { from, to } => {
+                split_path(from)?;
+                split_path(to)?;
+                if dotted_paths_overlap(from, to) {
+                    return Err(TomlMigrationError::OverlappingPaths {
+                        from: from.clone(),
+                        to: to.clone(),
+                    });
+                }
+                let value_tree = parse_toml_value(&text)?;
+                let Some(value) = get_toml_path(&value_tree, from).cloned() else {
+                    continue;
+                };
+                if get_toml_path(&value_tree, to).is_some() {
+                    return Err(TomlMigrationError::DestinationExists {
+                        from: from.clone(),
+                        to: to.clone(),
+                    });
+                }
+                let set = set_toml_value_text(&text, to, &value)?;
+                let unset = unset_toml_value_text(&set.text, from)?;
+                if set.changed() || unset.changed() {
+                    mutations.push(MigrationMutation::Renamed {
+                        from: from.clone(),
+                        to: to.clone(),
+                    });
+                }
+                text = unset.text;
+            }
+            MigrationOp::Delete { path } => {
+                let outcome = unset_toml_value_text(&text, path)?;
+                if outcome.mutation == PatchMutation::Removed {
+                    mutations.push(MigrationMutation::Deleted { path: path.clone() });
+                }
+                text = outcome.text;
+            }
+            MigrationOp::AddDefault { path, value } => {
+                let value_tree = parse_toml_value(&text)?;
+                if get_toml_path(&value_tree, path).is_none() {
+                    let outcome = set_toml_value_text(&text, path, value)?;
+                    if outcome.changed() {
+                        mutations.push(MigrationMutation::AddedDefault { path: path.clone() });
+                    }
+                    text = outcome.text;
+                }
+            }
+            MigrationOp::Transform { path, transform } => {
+                split_path(path)?;
+                let value_tree = parse_toml_value(&text)?;
+                let Some(value) = get_toml_path(&value_tree, path) else {
+                    continue;
+                };
+                let Some(next) =
+                    transform(value).map_err(|message| TomlMigrationError::TransformFailed {
+                        path: path.clone(),
+                        message,
+                    })?
+                else {
+                    continue;
+                };
+                if &next == value {
+                    continue;
+                }
+                let outcome = set_toml_value_text(&text, path, &next)?;
+                if outcome.changed() {
+                    mutations.push(MigrationMutation::Transformed { path: path.clone() });
+                }
+                text = outcome.text;
+            }
+        }
+    }
+    Ok(MigrationOutcome { text, mutations })
 }
 
 pub fn apply_toml_defaults_text(
     raw: &str,
     defaults: &[(&str, JsonValue)],
 ) -> Result<MigrationOutcome, TomlMigrationError> {
-    apply_toml_migrations_text(raw, &defaults_to_add_default_ops(defaults))
+    let operations = defaults
+        .iter()
+        .map(|(path, value)| MigrationOp::AddDefault {
+            path: (*path).to_string(),
+            value: value.clone(),
+        })
+        .collect::<Vec<_>>();
+    apply_toml_migrations_text(raw, &operations)
 }
 
 fn parse_document(raw: &str) -> Result<DocumentMut, TomlPatchError> {
@@ -253,7 +302,6 @@ fn rewrite_required(path: &str, detail: &str) -> TomlPatchError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::migration::MigrationMutation;
     use serde_json::json;
 
     fn full_to_compact(value: &JsonValue) -> Result<Option<JsonValue>, String> {
@@ -262,6 +310,10 @@ mod tests {
             Some(_) => Ok(None),
             None => Err("expected a string".to_string()),
         }
+    }
+
+    fn reject_transform(_value: &JsonValue) -> Result<Option<JsonValue>, String> {
+        Err("unsupported value".to_string())
     }
 
     // Defends: TOML edits preserve surrounding comments while materializing structured values.
@@ -317,6 +369,23 @@ line-number = "relative"
         assert_eq!(
             get_toml_path(&value, "editor.line-number"),
             Some(&json!("absolute"))
+        );
+    }
+
+    // Defends: reads use the same dotted-path normalization as writes.
+    #[test]
+    fn toml_path_reads_match_patch_normalization() {
+        let outcome =
+            set_toml_value_text("", " ui . theme ", &json!("dark")).expect("normalized TOML path");
+        let value = parse_toml_value(&outcome.text).expect("toml");
+
+        assert_eq!(get_toml_path(&value, " ui . theme "), Some(&json!("dark")));
+        assert_eq!(
+            get_toml_path(
+                &json!({ " ui ": { " theme ": "exact" }, "ui": { "theme": "normalized" } }),
+                " ui . theme "
+            ),
+            Some(&json!("exact"))
         );
     }
 
@@ -450,5 +519,60 @@ enabled = true
                 to: "old.enabled_copy".to_string()
             }
         );
+    }
+
+    // Defends: migration errors preserve destination and transform context.
+    #[test]
+    fn toml_migrations_preserve_public_error_boundaries() {
+        let raw = "old = \"a\"\nnew = \"b\"\n";
+        assert!(matches!(
+            apply_toml_migrations_text(
+                raw,
+                &[MigrationOp::Rename {
+                    from: "old".to_string(),
+                    to: "new".to_string(),
+                }]
+            ),
+            Err(TomlMigrationError::DestinationExists { from, to })
+                if from == "old" && to == "new"
+        ));
+        assert!(matches!(
+            apply_toml_migrations_text(
+                raw,
+                &[MigrationOp::Transform {
+                    path: "old".to_string(),
+                    transform: reject_transform,
+                }]
+            ),
+            Err(TomlMigrationError::TransformFailed { path, message })
+                if path == "old" && message == "unsupported value"
+        ));
+    }
+
+    // Defends: malformed migration paths fail even when no source value exists.
+    #[test]
+    fn toml_migrations_reject_invalid_absent_paths() {
+        let operations = [
+            MigrationOp::Rename {
+                from: "missing".to_string(),
+                to: "bad key".to_string(),
+            },
+            MigrationOp::Rename {
+                from: "bad key".to_string(),
+                to: "missing".to_string(),
+            },
+            MigrationOp::Transform {
+                path: "bad key".to_string(),
+                transform: reject_transform,
+            },
+        ];
+
+        for operation in operations {
+            assert!(matches!(
+                apply_toml_migrations_text("", &[operation]),
+                Err(TomlMigrationError::Patch(TomlPatchError::InvalidPath { path }))
+                    if path == "bad key"
+            ));
+        }
     }
 }
