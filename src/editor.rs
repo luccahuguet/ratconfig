@@ -178,6 +178,19 @@ impl ConfigUiApp {
             .map(|action| (index, action))
     }
 
+    pub(crate) fn selected_structured_file_action(&self) -> Option<(usize, &ConfigUiFileAction)> {
+        let field = self.selected_field()?;
+        structured_only_edit_notice(field)?;
+        let mut matches = self
+            .model
+            .file_actions
+            .iter()
+            .enumerate()
+            .filter(|(_, action)| action.source_id == field.source_id);
+        let action = matches.next()?;
+        matches.next().is_none().then_some(action)
+    }
+
     pub fn notice_info(&mut self, text: impl Into<String>) {
         self.notice = Some(ConfigUiNotice {
             text: text.into(),
@@ -378,7 +391,11 @@ impl ConfigUiApp {
                 self.move_up();
                 ConfigUiIntent::None
             }
-            ConfigUiKey::Enter if self.selected_field().is_some_and(is_bool_field) => {
+            ConfigUiKey::Enter
+                if self.selected_field().is_some_and(|field| {
+                    is_bool_field(field) && structured_only_edit_notice(field).is_none()
+                }) =>
+            {
                 self.notice_info("Press Space to stage this change, then Enter to save.");
                 ConfigUiIntent::None
             }
@@ -591,6 +608,9 @@ impl ConfigUiApp {
         if let Some((index, _)) = self.selected_file_action() {
             return self.activate_file_action(index);
         }
+        if let Some((index, _)) = self.selected_structured_file_action() {
+            return self.activate_file_action(index);
+        }
         self.begin_edit_selected_field()
     }
 
@@ -664,6 +684,10 @@ impl ConfigUiApp {
             return ConfigUiIntent::None;
         };
         let field = &self.model.fields[field_index];
+        if let Some(message) = structured_only_edit_notice(field).map(str::to_string) {
+            self.notice_info(message);
+            return ConfigUiIntent::None;
+        }
         if !field.has_default_value() {
             self.notice_info("This setting has no default value.");
             return ConfigUiIntent::None;
@@ -1846,6 +1870,38 @@ line-number = "relative"
             path: PathBuf::from(path),
             create_if_missing,
         }
+    }
+
+    // Defends: e on a structured field opens only its uniquely matching host-owned source file.
+    #[test]
+    fn structured_field_edit_opens_unique_source_file_action() {
+        let mut structured = field_with_source("native", "editor.rulers", "bool", "true", &[]);
+        structured.edit_behavior = ConfigUiEditBehavior::StructuredOnly {
+            notice: "Edit the source file directly.".to_string(),
+        };
+        let mut model = model_with_fields(vec![structured]);
+        model.file_actions = vec![file_action("settings", "/tmp/settings", true, true)];
+        let mut app = ConfigUiApp::new(model);
+
+        assert_eq!(
+            app.handle_key(ConfigUiKey::Char('e')),
+            open_file_intent(0, "settings", "/tmp/settings", false)
+        );
+        for key in [ConfigUiKey::Enter, ConfigUiKey::Char('u')] {
+            assert_eq!(app.handle_key(key), ConfigUiIntent::None);
+            assert_eq!(
+                app.notice.as_ref().map(|notice| notice.text.as_str()),
+                Some("Edit the source file directly.")
+            );
+        }
+
+        app.model
+            .file_actions
+            .push(file_action("other", "/tmp/other", true, true));
+        assert!(matches!(
+            app.handle_key(ConfigUiKey::Char('e')),
+            ConfigUiIntent::BeginEdit { .. }
+        ));
     }
 
     // Defends: file action rows emit stable host-owned open intents for existing and missing files.

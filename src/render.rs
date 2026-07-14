@@ -1002,14 +1002,20 @@ fn normal_control_line(app: &ConfigUiApp) -> Line<'static> {
     let Some(field) = app.selected_field() else {
         return Line::from("Select a setting row to edit");
     };
-    let primary = if is_bool_field(field) {
+    let primary = if structured_only_edit_notice(field).is_some() {
+        let Some((_, action)) = app.selected_structured_file_action() else {
+            return Line::from("structured view only");
+        };
+        if action.disabled_reason.is_some() {
+            return Line::from("file action unavailable");
+        }
+        return Line::from(format!("e open {}", action.label));
+    } else if is_bool_field(field) {
         "Space stage  e edit"
     } else if is_scalar_enum_field(field) {
         "Enter/e/Space picker"
     } else if is_enum_string_list_field(field) {
         "Enter/e picker"
-    } else if structured_only_edit_notice(field).is_some() {
-        "structured view only"
     } else {
         "Enter/e edit"
     };
@@ -1157,10 +1163,10 @@ fn sidecar_status_label(present: bool) -> &'static str {
 }
 
 pub fn file_action_status_label(action: &ConfigUiFileAction) -> &'static str {
-    if action.disabled_reason.is_some() {
-        "error"
-    } else if action.read_only {
+    if action.read_only {
         "read-only"
+    } else if action.disabled_reason.is_some() {
+        "error"
     } else if action.exists {
         "existing"
     } else {
@@ -1292,14 +1298,6 @@ mod tests {
                     .collect(),
             },
         );
-    }
-
-    fn field_index(model: &ConfigUiModel, path: &str) -> usize {
-        model
-            .fields
-            .iter()
-            .position(|field| field.path == path)
-            .unwrap_or_else(|| panic!("missing field {path}"))
     }
 
     fn test_model(state: ConfigUiValueState) -> ConfigUiModel {
@@ -1606,62 +1604,6 @@ mod tests {
         assert_eq!(rendered_cells(&row), vec!["..", ""]);
     }
 
-    // Defends: arbitrary TOML document rows render complex tables and arrays through the generic table layout.
-    #[test]
-    fn toml_document_rows_render_complex_values_as_read_only_table_cells() {
-        let document = build_toml_document_fields(ConfigUiTomlDocumentSpec {
-            source_id: "native",
-            tab: "native",
-            section_label: "",
-            current_toml: r#"
-[editor]
-rulers = [80, 100]
-
-[[language]]
-name = "rust"
-"#,
-            default_toml: None,
-            validation: "",
-            rebuild_required: false,
-            apply_status: apply_status("after save", "Host applies this after saving."),
-        })
-        .expect("toml document");
-        let mut model = test_model(ConfigUiValueState::Explicit);
-        model.tabs = vec!["native".to_string()];
-        model.fields = document.fields;
-        model
-            .tab_list_tables
-            .insert("native".to_string(), document.list_table);
-        let layout = list_layout(&model, 0);
-
-        assert_eq!(
-            rendered_cells(&row_line_for_layout(
-                &model,
-                UiRowRef::Field(field_index(&model, "editor")),
-                layout
-            )),
-            vec!["", "[editor]", "table", "explicit", "{1 keys}", "-"]
-        );
-
-        assert_eq!(
-            rendered_cells(&row_line_for_layout(
-                &model,
-                UiRowRef::Field(field_index(&model, "editor.rulers")),
-                layout
-            )),
-            vec!["editor", "rulers", "array", "explicit", "[2 items]", "-"]
-        );
-
-        assert_eq!(
-            rendered_cells(&row_line_for_layout(
-                &model,
-                UiRowRef::Field(field_index(&model, "language")),
-                layout
-            )),
-            vec!["", "language", "array", "explicit", "[1 tables]", "-"]
-        );
-    }
-
     // Defends: the reserved advanced tab keeps status columns even if a host table profile exists.
     #[test]
     fn advanced_tab_ignores_custom_field_table() {
@@ -1804,14 +1746,31 @@ name = "rust"
         assert_eq!(span_width(&line, 1), STATUS_ITEM_COLUMN_WIDTH);
     }
 
-    // Defends: default reset is visible only when the selected field has a default.
+    // Defends: normal controls expose only actions available for the selected row.
     #[test]
-    fn normal_controls_hide_default_reset_without_default() {
+    fn normal_controls_follow_selected_row_capabilities() {
         let mut app = ConfigUiApp::new(test_model(ConfigUiValueState::Explicit));
         assert!(rendered_text(&normal_control_line(&app)).contains("u reset default"));
 
         app.model.fields[0].default_value = NO_CONFIG_DEFAULT_VALUE_LABEL.to_string();
         assert!(!rendered_text(&normal_control_line(&app)).contains("reset default"));
+
+        app.model.fields[0].source_id = "native".to_string();
+        app.model.fields[0].kind = "bool".to_string();
+        app.model.fields[0].default_value = "[80]".to_string();
+        app.model.fields[0].edit_behavior = ConfigUiEditBehavior::StructuredOnly {
+            notice: "Edit the source file directly.".to_string(),
+        };
+        app.model.file_actions = vec![file_action(true, false, false, None)];
+        assert_eq!(
+            rendered_text(&normal_control_line(&app)),
+            "e open Native config"
+        );
+        app.model.file_actions[0].disabled_reason = Some("Unavailable.".to_string());
+        assert_eq!(
+            rendered_text(&normal_control_line(&app)),
+            "file action unavailable"
+        );
     }
 
     // Defends: boolean controls distinguish normal-mode staging from edit-mode persistence.
@@ -1920,7 +1879,7 @@ name = "rust"
             file_action(true, false, true, None),
             file_action(false, false, true, None),
             file_action(false, false, false, None),
-            file_action(true, true, false, None),
+            file_action(true, true, false, Some("Managed declaratively")),
             file_action(false, false, true, Some("Path cannot be resolved")),
         ];
 

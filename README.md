@@ -14,7 +14,7 @@ Example host integration in Yazelix: ratconfig owns the reusable tabs, rows, edi
 - tabs, visible rows, search, selection, notices, and edit state
 - optional host-supplied list table profiles for structured field tabs
 - staged bool toggles, scalar editing, single-select, multiselect, and default reset controls
-- host-routed file action rows for native config files
+- host-routed file action rows and structured-field source shortcuts for native config files
 - built-in dark/light UI palettes and optional model-driven theme switching
 - generic Ratatui rendering for the model
 - optional host-supplied rich detail rendering callbacks
@@ -206,13 +206,13 @@ fn patch_native_toml(raw: &str, path: &str, value: &Value) -> Result<String, Tom
 }
 ```
 
-The generated rows include tables, scalar leaves, arrays, current/default state, and deterministic table/key ordering. Strings, booleans, integers, floats, and simple string arrays use the normal editable field path when the TOML key path can be represented as dotted bare keys such as `editor.line-number` and the current document can be patched safely through that path
+The generated rows include tables, scalar leaves, arrays, current/default state, deterministic table/key ordering, and compact previews of complete structured values. Strings, booleans, integers, finite floats, and non-empty string arrays use the normal editable field path when the TOML key path can be represented as dotted bare keys such as `editor.line-number` and the current document can be patched safely through that path
 
-Complex tables, complex arrays, datetimes, quoted keys with dots, and other paths that cannot be safely represented as dotted patch paths are rendered as structured read-only rows. Hosts can pair these rows with a normal file action when users need full TOML editing
+Complex tables, complex arrays, datetimes, quoted keys with dots, and other paths that cannot be safely represented as dotted patch paths are rendered as structured read-only rows. When exactly one file action has the same `source_id` as the selected structured field, `e` emits that action's existing `ConfigUiIntent::OpenFile` if it is available; unavailable, ambiguous, or missing ownership keeps the read-only behavior. Give each editable TOML document its own source id when its rows should open one exact file
 
 Ratconfig still does not infer product labels, schema validation, file layering, atomic writes, reloads, or apply policy for arbitrary TOML documents
 
-Populate `ConfigUiModel::file_actions` when the UI should show rows for host-owned native config files. Ratconfig renders label, path, state labels including `existing`, neutral `absent`, `read-only`, and `error`, plus the create-if-missing affordance, then emits `ConfigUiIntent::OpenFile`; hosts still own file discovery, creation, editor launch, validation, reloads, and all file IO
+Populate `ConfigUiModel::file_actions` when the UI should show rows for host-owned native config files. Ratconfig renders label, path, state labels including `existing`, neutral `absent`, `read-only`, and `error`, plus the create-if-missing affordance, then emits `ConfigUiIntent::OpenFile` from the action row or the uniquely owned structured-field shortcut. Hosts still own file discovery, creation, editor launch, validation, reloads, and all file IO
 
 While a text field is being edited, `Ctrl+e` emits `ConfigUiIntent::EditTextExternally`. The intent carries the field index, source id, path, and staged input buffer. Hosts can write that input to a temporary file, open the user's editor, read the edited text back, apply any host-owned newline or multiline policy, then call `ConfigUiApp::apply_external_text_edit`. Ratconfig does not spawn editors, create temporary files, or save automatically; `Enter` still emits `SetField` and `Esc` still cancels the staged edit
 

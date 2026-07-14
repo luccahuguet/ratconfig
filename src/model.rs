@@ -803,15 +803,11 @@ fn toml_document_entry_field(
     } else {
         String::new()
     };
-    let default_value = match (&entry.default, editable) {
-        (Some(value), true) => toml_document_render_value(value),
-        _ => NO_CONFIG_DEFAULT_VALUE_LABEL.to_string(),
-    };
-    let default_cell = entry
-        .default
-        .as_ref()
-        .map(toml_document_render_value)
-        .unwrap_or_else(|| "-".to_string());
+    let rendered_default = entry.default.as_ref().map(toml_document_render_value);
+    let default_value = rendered_default
+        .clone()
+        .unwrap_or_else(|| NO_CONFIG_DEFAULT_VALUE_LABEL.to_string());
+    let default_cell = rendered_default.unwrap_or_else(|| "-".to_string());
     let validation = if !editable || spec.validation.trim().is_empty() {
         toml_document_validation_label(type_label, editable).to_string()
     } else {
@@ -926,12 +922,13 @@ fn toml_document_key_label(segments: &[String], type_label: &str) -> String {
 fn toml_document_value_is_editable(value: &TomlValue) -> bool {
     matches!(
         value,
-        TomlValue::String(_) | TomlValue::Integer(_) | TomlValue::Float(_) | TomlValue::Boolean(_)
-    ) || toml_document_string_list(value)
+        TomlValue::String(_) | TomlValue::Integer(_) | TomlValue::Boolean(_)
+    ) || matches!(value, TomlValue::Float(value) if value.is_finite())
+        || toml_document_string_list(value)
 }
 
 fn toml_document_string_list(value: &TomlValue) -> bool {
-    matches!(value, TomlValue::Array(values) if values.iter().all(|value| matches!(value, TomlValue::String(_))))
+    matches!(value, TomlValue::Array(values) if !values.is_empty() && values.iter().all(|value| matches!(value, TomlValue::String(_))))
 }
 
 fn toml_document_field_kind(value: &TomlValue) -> &'static str {
@@ -962,22 +959,10 @@ fn toml_document_type_label(value: &TomlValue) -> &'static str {
 
 fn toml_document_render_value(value: &TomlValue) -> String {
     match value {
-        TomlValue::Table(table) => format!("{{{} keys}}", table.len()),
-        TomlValue::Array(values)
-            if !values.is_empty()
-                && values
-                    .iter()
-                    .all(|value| matches!(value, TomlValue::Table(_))) =>
-        {
-            format!("[{} tables]", values.len())
-        }
-        TomlValue::Array(values) if !toml_document_string_list(value) => {
-            format!("[{} items]", values.len())
-        }
         TomlValue::Datetime(value) => value.to_string(),
         _ => toml_value_to_json(value)
-            .map(|value| render_json_value(&value))
-            .unwrap_or_else(|source| format!("unsupported: {source}")),
+            .map(|value| render_json_edit_value(&value))
+            .unwrap_or_else(|_| value.to_string()),
     }
 }
 
@@ -1637,7 +1622,14 @@ normal = "block"
         let table = &rows.fields[0];
         assert_eq!(
             table.list_cells,
-            vec!["", "[editor]", "table", "explicit", "{4 keys}", "{4 keys}"]
+            vec![
+                "",
+                "[editor]",
+                "table",
+                "explicit",
+                r#"{"cursor-shape":{"insert":"bar"},"line-number":"relative","plugins":["git","theme"],"rulers":[80,100]}"#,
+                r#"{"cursor-shape":{"normal":"block"},"line-number":"absolute","plugins":["git"],"true-color":true}"#,
+            ]
         );
         assert_eq!(
             table.edit_behavior,
@@ -1667,11 +1659,13 @@ normal = "block"
 
     // Defends: default TOML documents can supply defaulted rows without a host schema.
     #[test]
-    fn toml_document_helper_marks_defaulted_and_unsupported_rows() {
+    fn toml_document_helper_marks_defaulted_and_structured_rows() {
         let rows = toml_document_rows(
             r#"
 [editor]
 rulers = [80, 100]
+limits = [inf, -inf, nan]
+limit = inf
 "#,
             Some(
                 r#"
@@ -1700,12 +1694,22 @@ rulers = [80]
 
         let rulers = toml_field(&rows, "editor.rulers");
         assert_eq!(rulers.kind, "array");
-        assert_eq!(rulers.current_value, "[2 items]");
-        assert_eq!(rulers.default_value, NO_CONFIG_DEFAULT_VALUE_LABEL);
-        assert_eq!(rulers.list_cells[5], "[1 items]");
+        assert_eq!(rulers.current_value, "[80,100]");
+        assert_eq!(rulers.default_value, "[80]");
+        assert_eq!(rulers.list_cells[5], "[80]");
         assert_eq!(rulers.validation, "read-only in generic TOML document view");
         assert!(matches!(
             rulers.edit_behavior,
+            ConfigUiEditBehavior::StructuredOnly { .. }
+        ));
+
+        let limits = toml_field(&rows, "editor.limits");
+        assert_eq!(limits.current_value, "[inf, -inf, nan]");
+
+        let limit = toml_field(&rows, "editor.limit");
+        assert_eq!(limit.current_value, "inf");
+        assert!(matches!(
+            limit.edit_behavior,
             ConfigUiEditBehavior::StructuredOnly { .. }
         ));
     }
@@ -1753,7 +1757,7 @@ rulers = [80, 100]
 
         assert_eq!(field.path, "\"weird.key\"");
         assert_eq!(field.display_label, "\"weird.key\"");
-        assert_eq!(field.default_value, NO_CONFIG_DEFAULT_VALUE_LABEL);
+        assert_eq!(field.default_value, "\"default\"");
         assert_eq!(
             field.list_cells,
             vec![
@@ -1795,13 +1799,14 @@ package = { name = "ratconfig", enabled = true }
         );
     }
 
-    // Defends: simple arbitrary TOML string lists reuse the existing editable string-list field semantics.
+    // Defends: only non-empty arbitrary TOML string lists infer editable string-list semantics.
     #[test]
-    fn toml_document_helper_builds_editable_simple_string_lists() {
+    fn toml_document_helper_infers_only_non_empty_string_lists() {
         let rows = toml_document_rows(
             r#"
 [shell]
 plugins = ["git", "status"]
+empty = []
 "#,
             None,
         );
@@ -1811,6 +1816,13 @@ plugins = ["git", "status"]
         assert_eq!(plugins.current_value, r#"["git","status"]"#);
         assert_eq!(plugins.edit_value, r#"["git","status"]"#);
         assert_eq!(plugins.edit_behavior, ConfigUiEditBehavior::Default);
+
+        let empty = toml_field(&rows, "shell.empty");
+        assert_eq!(empty.kind, "array");
+        assert!(matches!(
+            empty.edit_behavior,
+            ConfigUiEditBehavior::StructuredOnly { .. }
+        ));
     }
 
     // Defends: host section labels remain presentation metadata while search preserves real field order and identity.
