@@ -320,7 +320,7 @@ line-number = "relative"
         );
     }
 
-    // Defends: TOML migration operations match the JSONC migration contract for safe changes.
+    // Defends: TOML migration operations preserve the safe-change contract.
     #[test]
     fn toml_migrations_rename_delete_add_default_and_transform() {
         let raw = r#"# keep me

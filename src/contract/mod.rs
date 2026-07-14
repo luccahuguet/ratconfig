@@ -7,15 +7,12 @@
 //! record that a config has joined a contract and then reconcile future contract
 //! changes automatically when every step is safe.
 
-pub mod jsonc;
 pub mod toml;
 
-pub use jsonc::*;
 pub use toml::*;
 
-use crate::jsonc::PatchError;
-use crate::migration::{MigrationError, MigrationMutation, MigrationOp};
-use crate::patch::PatchMutation;
+use crate::migration::{MigrationMutation, MigrationOp};
+use crate::patch::{PatchMutation, get_dotted_json_path};
 use crate::toml_adapter::{TomlMigrationError, TomlPatchError};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::collections::BTreeSet;
@@ -182,11 +179,6 @@ pub enum ContractError {
     ManualRequired {
         plan: ContractPlan,
     },
-    JsoncMigration {
-        change_id: String,
-        error: MigrationError,
-    },
-    JsoncPatch(PatchError),
     TomlMigration {
         change_id: String,
         error: TomlMigrationError,
@@ -253,7 +245,7 @@ pub fn read_contract_state_from_json(
     value: &JsonValue,
     state_path: &str,
 ) -> Result<Option<ContractState>, ContractError> {
-    read_contract_state_from_value(value, state_path, crate::jsonc::get_json_path)
+    read_contract_state_from_value(value, state_path, get_dotted_json_path)
 }
 
 fn read_contract_state_from_value(
@@ -497,7 +489,7 @@ fn append_applied_change_ids(state: &mut ContractState, changes: &[AppliedContra
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::jsonc::{get_json_path, parse_jsonc_value};
+    use crate::toml_adapter::{get_toml_path, parse_toml_value};
     use serde_json::json;
 
     fn full_to_compact(value: &JsonValue) -> Result<Option<JsonValue>, String> {
@@ -520,11 +512,13 @@ mod tests {
     // Defends: a contract is a linear versioned history whose automatic changes can be replayed deterministically.
     #[test]
     fn applies_linear_automatic_contract_changes() {
-        let raw = r#"{
-  // keep me
-  "old": { "name": "ferox", "remove": true },
-  "ui": { "mode": "full" }
-}
+        let raw = r#"# keep me
+[old]
+name = "ferox"
+remove = true
+
+[ui]
+mode = "full"
 "#;
         let contract = contract_with_changes(
             vec![
@@ -555,7 +549,7 @@ mod tests {
             3,
         );
 
-        let outcome = apply_jsonc_contract_text(raw, &contract, 1).expect("contract apply");
+        let outcome = apply_toml_contract_text(raw, &contract, 1).expect("contract apply");
 
         assert_eq!(outcome.from_version, 1);
         assert_eq!(outcome.to_version, 3);
@@ -567,11 +561,11 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["move-name", "compact-mode"]
         );
-        assert!(outcome.text.contains("// keep me"));
-        assert!(!outcome.text.contains(r#""remove""#));
-        let value = parse_jsonc_value(&outcome.text).expect("jsonc");
-        assert_eq!(get_json_path(&value, "project.name"), Some(&json!("ferox")));
-        assert_eq!(get_json_path(&value, "ui.mode"), Some(&json!("compact")));
+        assert!(outcome.text.contains("# keep me"));
+        let value = parse_toml_value(&outcome.text).expect("toml");
+        assert_eq!(get_toml_path(&value, "old.remove"), None);
+        assert_eq!(get_toml_path(&value, "project.name"), Some(&json!("ferox")));
+        assert_eq!(get_toml_path(&value, "ui.mode"), Some(&json!("compact")));
     }
 
     // Defends: impossible migrations block the whole plan with actionable manual steps instead of partly rewriting config.
@@ -592,7 +586,7 @@ mod tests {
             2,
         );
 
-        let error = apply_jsonc_contract_text(r#"{ "theme": "dark" }"#, &contract, 1)
+        let error = apply_toml_contract_text(r#"theme = "dark""#, &contract, 1)
             .expect_err("manual migration required");
 
         assert_eq!(
@@ -619,92 +613,18 @@ mod tests {
         );
     }
 
-    // Defends: a joined config records contract state so future contract versions can be reconciled automatically.
-    #[test]
-    fn joined_contract_reconciles_future_versions_and_updates_state() {
-        let raw = r#"{ "core": {} }"#;
-        let v1 = contract_with_changes(Vec::new(), 1);
-        let joined = join_jsonc_contract_text(raw, &v1, "ratconfig.contract").expect("join");
-
-        assert_eq!(
-            joined.state,
-            ContractState {
-                contract_id: "demo".to_string(),
-                version: 1,
-                applied_change_ids: Vec::new(),
-            }
-        );
-
-        let v2 = contract_with_changes(
-            vec![ContractChange::automatic(
-                "add-debug",
-                1,
-                2,
-                vec![MigrationOp::AddDefault {
-                    path: "core.debug".to_string(),
-                    value: json!(true),
-                }],
-            )],
-            2,
-        );
-        let reconciled =
-            reconcile_joined_jsonc_contract_text(&joined.text, &v2, "ratconfig.contract")
-                .expect("reconcile");
-        let value = parse_jsonc_value(&reconciled.text).expect("jsonc");
-
-        assert_eq!(get_json_path(&value, "core.debug"), Some(&json!(true)));
-        assert_eq!(
-            read_contract_state(&value, "ratconfig.contract").expect("state"),
-            Some(ContractState {
-                contract_id: "demo".to_string(),
-                version: 2,
-                applied_change_ids: vec!["add-debug".to_string()],
-            })
-        );
-    }
-
-    // Defends: adopting a known older config can migrate first and then record the joined state in one returned text.
-    #[test]
-    fn join_from_known_version_applies_changes_before_recording_state() {
-        let raw = r#"{ "legacy": { "shell": "zsh" } }"#;
-        let contract = contract_with_changes(
-            vec![ContractChange::automatic(
-                "move-shell",
-                1,
-                2,
-                vec![MigrationOp::Rename {
-                    from: "legacy.shell".to_string(),
-                    to: "shell.command".to_string(),
-                }],
-            )],
-            2,
-        );
-
-        let joined = join_jsonc_contract_text_from_version(raw, &contract, "ratconfig.contract", 1)
-            .expect("join from version");
-        let value = parse_jsonc_value(&joined.text).expect("jsonc");
-
-        assert_eq!(get_json_path(&value, "shell.command"), Some(&json!("zsh")));
-        assert_eq!(joined.state.version, 2);
-        assert_eq!(joined.state.applied_change_ids, vec!["move-shell"]);
-    }
-
     // Defends: joined state is scoped to the host contract id rather than silently applying another project's migrations.
     #[test]
     fn reconcile_rejects_contract_id_mismatch() {
-        let raw = r#"{
-  "ratconfig": {
-    "contract": {
-      "schema_version": 1,
-      "contract_id": "other",
-      "version": 1,
-      "applied_change_ids": []
-    }
-  }
-}"#;
+        let raw = r#"[ratconfig.contract]
+schema_version = 1
+contract_id = "other"
+version = 1
+applied_change_ids = []
+"#;
         let contract = contract_with_changes(Vec::new(), 1);
 
-        let error = reconcile_joined_jsonc_contract_text(raw, &contract, "ratconfig.contract")
+        let error = reconcile_joined_toml_contract_text(raw, &contract, "ratconfig.contract")
             .expect_err("mismatch");
 
         assert_eq!(

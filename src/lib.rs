@@ -8,7 +8,6 @@ pub mod contract;
 #[cfg(feature = "crossterm-runner")]
 pub mod crossterm_runner;
 pub mod editor;
-pub mod jsonc;
 pub mod migration;
 pub mod model;
 pub mod patch;

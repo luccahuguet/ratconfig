@@ -1,6 +1,6 @@
 # Ratconfig
 
-Ratconfig is a reusable Rust crate for building Ratatui config editors over JSONC- and TOML-backed settings
+Ratconfig is a reusable Rust crate for building Ratatui config editors over TOML-backed settings
 
 It is extracted from Yazelix, but it is project-agnostic: applications provide their own config schema, default values, validation, file writes, and post-save apply behavior
 
@@ -18,7 +18,7 @@ Example host integration in Yazelix: ratconfig owns the reusable tabs, rows, edi
 - built-in dark/light UI palettes and optional model-driven theme switching
 - generic Ratatui rendering for the model
 - optional host-supplied rich detail rendering callbacks
-- comment-preserving JSONC and TOML set/unset patch primitives
+- comment-preserving TOML set/unset patch primitives
 - deterministic migration operations: rename, delete, add default, and narrow value transform
 - deterministic config contracts that record joined state, replay safe versioned changes, and report manual blockers when automation is not safe
 
@@ -44,7 +44,7 @@ use ratconfig::{
     ConfigUiApplyStatus, ConfigUiEditBehavior, ConfigUiField, ConfigUiModel,
     ConfigUiPathOwner, ConfigUiSource, ConfigUiValueState,
     DEFAULT_CONFIG_SOURCE_ID,
-    jsonc::{PatchError, set_jsonc_value_text},
+    toml_adapter::{TomlPatchError, set_toml_value_text},
 };
 
 fn model() -> ConfigUiModel {
@@ -53,7 +53,7 @@ fn model() -> ConfigUiModel {
             id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
             tab: "general".to_string(),
             label: "Settings".to_string(),
-            path: PathBuf::from("settings.jsonc"),
+            path: PathBuf::from("settings.toml"),
             exists: true,
             owner: ConfigUiPathOwner::User,
             read_only: false,
@@ -92,9 +92,9 @@ fn model() -> ConfigUiModel {
     }
 }
 
-fn patch_jsonc() -> Result<String, PatchError> {
-    let outcome = set_jsonc_value_text(
-        r#"{ "core": { "debug": false } }"#,
+fn patch_toml() -> Result<String, TomlPatchError> {
+    let outcome = set_toml_value_text(
+        "[core]\ndebug = false\n",
         "core.debug",
         &serde_json::json!(true),
     )?;
@@ -221,7 +221,7 @@ When using the optional crossterm runner, the callback is invoked while the runn
 Hosts that want ratconfig to own the crossterm terminal setup, draw loop, event reads, and key conversion can enable the optional runner:
 
 ```toml
-ratconfig = { version = "3", features = ["crossterm-runner"] }
+ratconfig = { version = "4", features = ["crossterm-runner"] }
 ```
 
 ```rust,no_run
@@ -295,8 +295,7 @@ Ratconfig can also treat a config file as having "joined" a host-defined contrac
 use ratconfig::{
     ConfigContract, ContractChange, ManualMigrationStep,
     contract::{
-        join_jsonc_contract_text_from_version, join_toml_contract_text_from_version,
-        reconcile_joined_jsonc_contract_text, reconcile_joined_toml_contract_text,
+        join_toml_contract_text_from_version, reconcile_joined_toml_contract_text,
     },
     migration::MigrationOp,
 };
@@ -332,25 +331,6 @@ fn contract() -> ConfigContract {
 }
 
 fn adopt_old_config(raw: &str) -> Result<String, ratconfig::ContractError> {
-    let outcome = join_jsonc_contract_text_from_version(
-        raw,
-        &contract(),
-        "ratconfig.contract",
-        1,
-    )?;
-    Ok(outcome.text)
-}
-
-fn reconcile_existing_config(raw: &str) -> Result<String, ratconfig::ContractError> {
-    let outcome = reconcile_joined_jsonc_contract_text(
-        raw,
-        &contract(),
-        "ratconfig.contract",
-    )?;
-    Ok(outcome.text)
-}
-
-fn adopt_old_toml_config(raw: &str) -> Result<String, ratconfig::ContractError> {
     let outcome = join_toml_contract_text_from_version(
         raw,
         &contract(),
@@ -360,7 +340,7 @@ fn adopt_old_toml_config(raw: &str) -> Result<String, ratconfig::ContractError> 
     Ok(outcome.text)
 }
 
-fn reconcile_existing_toml_config(raw: &str) -> Result<String, ratconfig::ContractError> {
+fn reconcile_existing_config(raw: &str) -> Result<String, ratconfig::ContractError> {
     let outcome = reconcile_joined_toml_contract_text(
         raw,
         &contract(),
@@ -379,23 +359,12 @@ The rules are deliberately strict:
 - manual changes stop the plan before any text is returned for writing
 - mismatched contract ids, unsupported saved versions, branchy histories, and missing migrations fail clearly
 
-Use `join_jsonc_contract_text` or `join_toml_contract_text` only for configs the host has already validated against the current contract. Use the `*_from_version` variants when adopting an older known config version, so ratconfig applies every automatic change before recording the joined state.
+Use `join_toml_contract_text` only for configs the host has already validated against the current contract. Use `join_toml_contract_text_from_version` when adopting an older known config version, so ratconfig applies each automatic change before recording the joined state.
 
 Run default completion on the text returned by join or reconcile, then validate and write that completed text:
 
 ```rust
-use ratconfig::{
-    migration::{MigrationError, apply_defaults_text},
-    toml_adapter::{TomlMigrationError, apply_toml_defaults_text},
-};
-
-fn complete_jsonc_defaults(raw: &str) -> Result<String, MigrationError> {
-    let outcome = apply_defaults_text(
-        raw,
-        &[("open.log_level", serde_json::json!("info"))],
-    )?;
-    Ok(outcome.text)
-}
+use ratconfig::toml_adapter::{TomlMigrationError, apply_toml_defaults_text};
 
 fn complete_toml_defaults(raw: &str) -> Result<String, TomlMigrationError> {
     let outcome = apply_toml_defaults_text(
@@ -408,7 +377,7 @@ fn complete_toml_defaults(raw: &str) -> Result<String, TomlMigrationError> {
 
 Default completion returns complete patched text and mutation records; the host still chooses the defaults, validates the result, and writes atomically
 
-The contract layer is project-agnostic. Yazelix can use it for `settings.jsonc`, but another application can define a different contract id, state path, default values, validation, storage format, and write policy.
+The contract layer is project-agnostic. Each application defines its contract id, state path, default values, validation, and write policy.
 
 ## Why In-House
 
@@ -416,16 +385,15 @@ Ratconfig keeps the contract layer small and in-crate because the existing Rust 
 
 - `config` is useful for layered configuration reads, but it does not own durable user-file write-back, versioned migrations, or comment-preserving edits
 - `jsonschema` is useful for validation, but validation only says whether a document matches a schema; it does not decide how to rename, delete, default, transform, or manually block a stale field
-- `json-patch` implements RFC 6902 JSON Patch and RFC 7396 JSON Merge Patch over JSON values, but it does not own joined contract state, linear version history, manual migration blockers, or JSONC comment preservation
 - `toml_edit` preserves comments, spaces, and item order while editing TOML, but it is a format-preserving TOML editor rather than a migration contract system
 
-The split is to keep ratconfig's semantic contract rules in ratconfig, while using proven format and validation crates where they fit. JSONC uses the ratconfig JSONC patcher. TOML uses a `toml_edit`-backed adapter. Both adapters share `ConfigContract`, `ContractChange`, `ManualMigrationStep`, contract state validation, and migration planning.
+Ratconfig owns the semantic contract rules and uses `toml_edit` for comment-preserving storage edits. `ConfigContract`, `ContractChange`, and `ManualMigrationStep` stay independent from host schemas and write policy.
 
 ## Storage Format Position
 
-JSONC remains the first text adapter because it is the current Yazelix config format and ratconfig already has comment-preserving JSONC patch primitives. TOML is also supported for projects that prefer a more common Rust and CLI configuration format.
+TOML is Ratconfig's text adapter. Semantic values use `serde_json::Value`, so the editor model and migration operations stay independent from TOML's syntax.
 
-The split-brain rule is simple: storage adapters may differ, contract semantics may not. JSONC and TOML both execute the same rename, delete, add-default, transform, join, reconcile, manual-blocker, and contract-id checks. Format-specific limits are adapter errors, not alternate migration behavior. For example, TOML rejects JSON `null` because TOML has no null value, and parent paths must be TOML tables before ratconfig patches through them.
+The TOML adapter executes rename, delete, add-default, transform, join, reconcile, manual-blocker, and contract-id checks. It rejects JSON `null` because TOML has no null value, and parent paths must be TOML tables before Ratconfig patches through them.
 
 ## Versioning And Releases
 
@@ -437,7 +405,7 @@ The public Ratconfig contract includes:
 - default features, optional feature names, and feature-gated public API
 - the MSRV declared by `rust-version` in `Cargo.toml`
 - documented model, editor, intent, renderer, and theme-switching semantics
-- JSONC and TOML set/unset patch behavior
+- TOML set/unset patch behavior
 - migration and config contract semantics for join, reconcile, automatic changes, manual blockers, and contract state validation
 - documented host integration responsibilities for schema loading, validation, file IO, atomic writes, editor launch, model reloads, and runtime apply policy
 
@@ -445,7 +413,7 @@ Patch releases preserve that contract. Examples include renderer bug fixes, clea
 
 Minor releases add to that contract without breaking existing hosts. Examples include a new helper, an additive model field with a backwards-compatible default, a new optional feature flag, or additive documented behavior that keeps existing intents and patch semantics valid
 
-Major releases break or remove part of that contract. Examples include removing or renaming a public type, function, field, enum variant, or feature flag; changing `ConfigUiIntent` payload or reducer semantics in a way hosts can observe; changing JSONC/TOML patch output semantics; changing migration/contract reconciliation rules; or raising the MSRV
+Major releases break or remove part of that contract. Examples include removing or renaming a public type, function, field, enum variant, or feature flag; changing `ConfigUiIntent` payload or reducer semantics in a way hosts can observe; changing TOML patch output semantics; changing migration/contract reconciliation rules; or raising the MSRV
 
 Before cutting a release:
 
@@ -457,11 +425,17 @@ Before cutting a release:
 - tag the release as `vX.Y.Z` after the version commit is ready
 - update downstream pinned-git consumers such as main Yazelix after the Ratconfig commit or tag is pushed
 
+### 4.0.0
+
+- TOML is the only text adapter
+- Ratconfig 4 removes the legacy JSONC APIs and `jsonc-parser` dependency
+- Format-neutral migration operations, outcomes, and contract planning remain available through the TOML adapter
+
 ### 3.0.0
 
 - `ConfigUiSource` is the only config-document metadata owner in `ConfigUiModel`
 - `ConfigUiFieldSpec` replaces the duplicated ordinary and string-list field parameter bags
-- JSONC and TOML patchers share one format-neutral `PatchOutcome`; TOML migrations return the shared `MigrationOutcome`
+- Text patchers use one format-neutral `PatchOutcome`; TOML migrations return the shared `MigrationOutcome`
 - Tabs without a matching source render neutral non-file-backed header metadata
 - Legacy single-config and cursor-specific model fields are removed
 
@@ -473,4 +447,4 @@ Before cutting a release:
 
 ## Status
 
-The reusable model, editor, renderer, JSONC patcher, TOML patcher, deterministic contract layer, default completion helpers, and migration primitives live in this crate
+The reusable model, editor, renderer, TOML patcher, deterministic contract layer, default completion helpers, and migration primitives live in this crate

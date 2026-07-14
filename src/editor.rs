@@ -1085,21 +1085,21 @@ pub fn field_bool_value(field: &ConfigUiField) -> Option<bool> {
 mod tests {
     use super::*;
     #[cfg(feature = "ui")]
-    use crate::jsonc::{PatchMutation, set_jsonc_value_text};
-    #[cfg(feature = "ui")]
     use crate::row_line_for_model;
     use crate::{
         ConfigUiTheme, ConfigUiThemeMapping, ConfigUiThemeSwitcher, ConfigUiTomlDocumentSpec,
         DEFAULT_CONFIG_SOURCE_ID, build_toml_document_fields,
         test_support::{after_save_status, field, field_with_source, model_with_fields},
     };
+    #[cfg(feature = "ui")]
+    use crate::{patch::PatchMutation, toml_adapter::set_toml_value_text};
     use serde_json::json;
     use std::path::PathBuf;
 
-    // Defends: the reusable ratconfig layer can drive a non-Yazelix config fixture with bool, select, multiselect, rendering, and JSONC patching.
+    // Defends: the reusable ratconfig layer can drive a non-Yazelix config fixture with bool, select, multiselect, rendering, and TOML patching.
     #[cfg(feature = "ui")]
     #[test]
-    fn non_yazelix_fixture_uses_generic_model_editor_render_and_jsonc_patch() {
+    fn non_yazelix_fixture_uses_generic_model_editor_render_and_toml_patch() {
         let model = test_model();
         let app = ConfigUiApp::new(model);
 
@@ -1125,16 +1125,15 @@ mod tests {
             r#"["git","search"]"#
         );
 
-        let raw = r#"{
-  // host-owned config
-  "ui": { "theme": "light" }
-}
+        let raw = r#"# host-owned config
+[ui]
+theme = "light"
 "#;
         let patched =
-            set_jsonc_value_text(raw, "ui.theme", &json!("dark")).expect("generic jsonc patch");
+            set_toml_value_text(raw, "ui.theme", &json!("dark")).expect("generic TOML patch");
         assert_eq!(patched.mutation, PatchMutation::Replaced);
-        assert!(patched.text.contains("// host-owned config"));
-        assert!(patched.text.contains(r#""theme": "dark""#));
+        assert!(patched.text.contains("# host-owned config"));
+        assert!(patched.text.contains(r#"theme = "dark""#));
     }
 
     // Defends: normal-mode keyboard reduction is project-agnostic and emits semantic edit/write intents for the host.

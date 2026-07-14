@@ -20,4 +20,4 @@ Only Ratconfig-specific guidance belongs here.
 
 ## Integration Notes
 
-Main Yazelix consumes this crate through a pinned git dependency and owns its JSONC settings adapter.
+Main Yazelix consumes this crate through a pinned git dependency and owns its TOML settings adapter.
