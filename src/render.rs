@@ -10,9 +10,11 @@ use serde_json::Value as JsonValue;
 use std::collections::BTreeSet;
 
 const HEADER_HORIZONTAL_PADDING: u16 = 1;
-const FIELD_TAKES_EFFECT_COLUMN_WIDTH: usize = 18;
-const FIELD_SETTING_COLUMN_WIDTH: usize = 44;
-const FIELD_VALUE_COLUMN_WIDTH: usize = 28;
+const FIELD_TAKES_EFFECT_MIN_WIDTH: usize = 13;
+const FIELD_TAKES_EFFECT_MAX_WIDTH: usize = 18;
+const FIELD_SETTING_MIN_WIDTH: usize = 8;
+const FIELD_SETTING_MAX_WIDTH: usize = 44;
+const FIELD_VALUE_MIN_WIDTH: usize = 5;
 const HEADER_MIN_PATH_WIDTH: usize = 8;
 const HEADER_MIN_SOURCE_LABEL_WIDTH: usize = 4;
 const HEADER_SOURCE_LABEL_WIDTH: usize = 18;
@@ -62,9 +64,22 @@ fn config_ui_theme_palette(theme: ConfigUiTheme) -> ConfigUiThemePalette {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FieldColumnWidths {
+    takes_effect: usize,
+    setting: usize,
+    value: usize,
+}
+
+const DEFAULT_FIELD_COLUMN_WIDTHS: FieldColumnWidths = FieldColumnWidths {
+    takes_effect: FIELD_TAKES_EFFECT_MAX_WIDTH,
+    setting: FIELD_SETTING_MAX_WIDTH,
+    value: 28,
+};
+
 #[derive(Clone, Copy)]
 enum ListLayout<'a> {
-    Field,
+    Field(FieldColumnWidths),
     Status,
     Table(&'a ConfigUiListTable),
 }
@@ -338,20 +353,6 @@ fn render_body(
 }
 
 fn render_list(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect, rows: &[UiRowRef]) {
-    let layout = list_layout(&app.model, app.selected_tab);
-    let entries = list_entries(&app.model, rows);
-    let items = entries
-        .iter()
-        .map(|entry| {
-            let line = match entry {
-                ListEntry::Section(label) => section_heading_line(label),
-                ListEntry::Row(row) => row_line_for_layout(&app.model, *row, layout),
-            };
-            ListItem::new(themed_line(line, app.active_theme))
-        })
-        .collect::<Vec<_>>();
-    let mut state = ListState::default();
-    state.select(selected_list_entry_index(&entries, app.selected_row));
     let title = if app.search.is_empty() {
         "settings".to_string()
     } else {
@@ -367,6 +368,20 @@ fn render_list(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect, rows: &[UiR
         return;
     }
 
+    let layout = list_layout_for_width(&app.model, app.selected_tab, usize::from(inner.width));
+    let entries = list_entries(&app.model, rows);
+    let items = entries
+        .iter()
+        .map(|entry| {
+            let line = match entry {
+                ListEntry::Section(label) => section_heading_line(label),
+                ListEntry::Row(row) => row_line_for_layout(&app.model, *row, layout),
+            };
+            ListItem::new(themed_line(line, app.active_theme))
+        })
+        .collect::<Vec<_>>();
+    let mut state = ListState::default();
+    state.select(selected_list_entry_index(&entries, app.selected_row));
     let list_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(0)])
@@ -432,7 +447,7 @@ fn section_heading_line(label: &str) -> Line<'static> {
 
 fn list_header_line(layout: ListLayout<'_>) -> Line<'static> {
     match layout {
-        ListLayout::Field => field_list_header_line(),
+        ListLayout::Field(widths) => field_list_header_line(widths),
         ListLayout::Status => status_list_header_line(),
         ListLayout::Table(table) => list_table_header_line(table),
     }
@@ -441,19 +456,80 @@ fn list_header_line(layout: ListLayout<'_>) -> Line<'static> {
 fn list_layout(model: &ConfigUiModel, selected_tab: usize) -> ListLayout<'_> {
     match model.tabs.get(selected_tab).map(String::as_str) {
         Some("advanced") => ListLayout::Status,
-        Some(tab) => model
-            .tab_list_tables
-            .get(tab)
-            .map_or(ListLayout::Field, ListLayout::Table),
-        None => ListLayout::Field,
+        Some(tab) => model.tab_list_tables.get(tab).map_or(
+            ListLayout::Field(DEFAULT_FIELD_COLUMN_WIDTHS),
+            ListLayout::Table,
+        ),
+        None => ListLayout::Field(DEFAULT_FIELD_COLUMN_WIDTHS),
     }
 }
 
-fn field_list_header_line() -> Line<'static> {
+fn list_layout_for_width(
+    model: &ConfigUiModel,
+    selected_tab: usize,
+    available_width: usize,
+) -> ListLayout<'_> {
+    match list_layout(model, selected_tab) {
+        ListLayout::Field(_) => {
+            ListLayout::Field(field_column_widths(model, selected_tab, available_width))
+        }
+        layout => layout,
+    }
+}
+
+fn field_column_widths(
+    model: &ConfigUiModel,
+    selected_tab: usize,
+    available_width: usize,
+) -> FieldColumnWidths {
+    let rows = visible_rows_for_tab_search(model, selected_tab, "");
+    let labels = rows.iter().filter_map(|row| match row {
+        UiRowRef::Field(index) => {
+            let field = &model.fields[*index];
+            Some((
+                field.apply_status.summary.as_str(),
+                field_display_label(field),
+            ))
+        }
+        UiRowRef::FileAction(index) => {
+            let action = &model.file_actions[*index];
+            Some((file_action_status_label(action), action.label.as_str()))
+        }
+        _ => None,
+    });
+    resolve_field_column_widths(available_width, labels)
+}
+
+fn resolve_field_column_widths<'a>(
+    available_width: usize,
+    rows: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> FieldColumnWidths {
+    let mut desired_takes_effect = FIELD_TAKES_EFFECT_MIN_WIDTH;
+    let mut desired_setting = FIELD_SETTING_MIN_WIDTH;
+    for (takes_effect, setting) in rows {
+        desired_takes_effect = desired_takes_effect.max(takes_effect.chars().count() + 1);
+        desired_setting = desired_setting.max(setting.chars().count() + 1);
+    }
+    desired_takes_effect = desired_takes_effect.min(FIELD_TAKES_EFFECT_MAX_WIDTH);
+    desired_setting = desired_setting.min(FIELD_SETTING_MAX_WIDTH);
+
+    let value_minimum = FIELD_VALUE_MIN_WIDTH.min(available_width.saturating_sub(2));
+    let label_space = available_width - value_minimum;
+    let setting_floor = usize::from(label_space > 1);
+    let takes_effect = desired_takes_effect.min(label_space - setting_floor);
+    let setting = desired_setting.min(label_space - takes_effect);
+    FieldColumnWidths {
+        takes_effect,
+        setting,
+        value: available_width - takes_effect - setting,
+    }
+}
+
+fn field_list_header_line(widths: FieldColumnWidths) -> Line<'static> {
     Line::from(vec![
-        column_header(fixed_label("takes effect", FIELD_TAKES_EFFECT_COLUMN_WIDTH)),
-        column_header(fixed_label("setting", FIELD_SETTING_COLUMN_WIDTH)),
-        column_header("value"),
+        column_header(field_column_cell("takes effect", widths.takes_effect)),
+        column_header(field_column_cell("setting", widths.setting)),
+        column_header(truncate("value", widths.value)),
     ])
 }
 
@@ -493,7 +569,7 @@ fn render_details(
 }
 
 pub fn row_line_for_model(model: &ConfigUiModel, row: UiRowRef) -> Line<'static> {
-    row_line_for_layout(model, row, ListLayout::Field)
+    row_line_for_layout(model, row, ListLayout::Field(DEFAULT_FIELD_COLUMN_WIDTHS))
 }
 
 fn row_line_for_layout(
@@ -505,9 +581,14 @@ fn row_line_for_layout(
         (UiRowRef::Field(index), ListLayout::Table(table)) => {
             list_table_row_line(table, &model.fields[index])
         }
-        (UiRowRef::Field(index), _) => {
+        (UiRowRef::Field(index), layout) => {
             let field = &model.fields[index];
+            let widths = match layout {
+                ListLayout::Field(widths) => widths,
+                _ => DEFAULT_FIELD_COLUMN_WIDTHS,
+            };
             field_row_line(
+                widths,
                 &field.apply_status.summary,
                 apply_status_style(&field.apply_status),
                 field_display_label(field),
@@ -534,9 +615,14 @@ fn row_line_for_layout(
                 action.path.display().to_string(),
             )
         }
-        (UiRowRef::FileAction(index), _) => {
+        (UiRowRef::FileAction(index), layout) => {
             let action = &model.file_actions[index];
+            let widths = match layout {
+                ListLayout::Field(widths) => widths,
+                _ => DEFAULT_FIELD_COLUMN_WIDTHS,
+            };
             field_row_line(
+                widths,
                 file_action_status_label(action),
                 file_action_status_style(action),
                 &action.label,
@@ -613,6 +699,7 @@ fn column_header(value: impl Into<String>) -> Span<'static> {
 }
 
 fn field_row_line(
+    widths: FieldColumnWidths,
     status: &str,
     status_style: Style,
     setting: &str,
@@ -621,19 +708,18 @@ fn field_row_line(
     value_style: Style,
 ) -> Line<'static> {
     Line::from(vec![
-        Span::styled(
-            fixed_label(status, FIELD_TAKES_EFFECT_COLUMN_WIDTH),
-            status_style,
-        ),
-        Span::styled(
-            fixed_label(
-                &truncate(setting, FIELD_SETTING_COLUMN_WIDTH),
-                FIELD_SETTING_COLUMN_WIDTH,
-            ),
-            setting_style,
-        ),
-        Span::styled(truncate(value, FIELD_VALUE_COLUMN_WIDTH), value_style),
+        Span::styled(field_column_cell(status, widths.takes_effect), status_style),
+        Span::styled(field_column_cell(setting, widths.setting), setting_style),
+        Span::styled(truncate(value, widths.value), value_style),
     ])
+}
+
+fn field_column_cell(value: &str, width: usize) -> String {
+    format!(
+        "{:<width$}",
+        truncate(value, width.saturating_sub(1)),
+        width = width
+    )
 }
 
 fn status_row_line(
@@ -1612,8 +1698,93 @@ mod tests {
     #[test]
     fn field_header_names_remaining_columns() {
         assert_eq!(
-            rendered_cells(&field_list_header_line()),
+            rendered_cells(&field_list_header_line(DEFAULT_FIELD_COLUMN_WIDTHS)),
             vec!["takes effect", "setting", "value"]
+        );
+    }
+
+    // Defends: a normal half-screen list gives unused setting space to structured previews.
+    #[test]
+    fn field_columns_give_remaining_width_to_values() {
+        let widths = resolve_field_column_widths(
+            78,
+            [
+                ("next Yazi", "flavor"),
+                ("next Yazi", "plugin.prepend_fetchers"),
+                ("absent", "yazi/package.toml"),
+            ],
+        );
+
+        assert_eq!(widths.takes_effect, FIELD_TAKES_EFFECT_MIN_WIDTH);
+        assert!(widths.setting < FIELD_SETTING_MAX_WIDTH);
+        assert!(widths.value > 28);
+        assert_eq!(widths.takes_effect + widths.setting + widths.value, 78);
+    }
+
+    // Defends: headers and rows use the same resolved starts, and row content fills without overflowing.
+    #[test]
+    fn field_header_and_rows_share_resolved_boundaries() {
+        let widths =
+            resolve_field_column_widths(40, [("next launch", "a moderately long setting")]);
+        let header = field_list_header_line(widths);
+        let row = field_row_line(
+            widths,
+            "next launch",
+            Style::default(),
+            "a moderately long setting",
+            Style::default(),
+            "a value long enough to fill its resolved column",
+            Style::default(),
+        );
+
+        assert_eq!(span_width(&header, 0), widths.takes_effect);
+        assert_eq!(span_width(&header, 1), widths.setting);
+        assert_eq!(span_width(&row, 0), widths.takes_effect);
+        assert_eq!(span_width(&row, 1), widths.setting);
+        assert_eq!(span_width(&row, 2), widths.value);
+        assert_eq!(rendered_text(&row).chars().count(), 40);
+    }
+
+    // Defends: tiny render areas retain bounded columns instead of producing an over-wide line.
+    #[test]
+    fn field_columns_fit_narrow_and_zero_widths() {
+        for available in [0, 1, 2, 3, 12, 25] {
+            let widths = resolve_field_column_widths(
+                available,
+                [("a long takes-effect status", "a long setting label")],
+            );
+            let row = field_row_line(
+                widths,
+                "a long takes-effect status",
+                Style::default(),
+                "a long setting label",
+                Style::default(),
+                "a long value",
+                Style::default(),
+            );
+
+            assert_eq!(
+                widths.takes_effect + widths.setting + widths.value,
+                available
+            );
+            assert_eq!(rendered_text(&row).chars().count(), available);
+        }
+    }
+
+    // Defends: search does not move column starts because widths use every row in the selected tab.
+    #[test]
+    fn field_columns_stay_stable_when_search_hides_the_longest_label() {
+        let mut short = field("short", "string", r#""value""#, &[]);
+        short.display_label = "Short".to_string();
+        let mut long = field("long", "string", r#""value""#, &[]);
+        long.display_label = "A much longer setting label".to_string();
+        let model = model_with_fields(vec![short, long]);
+
+        assert_eq!(visible_rows_for_tab_search(&model, 0, "short").len(), 1);
+        let widths = field_column_widths(&model, 0, 60);
+        assert_eq!(
+            widths.setting,
+            "A much longer setting label".chars().count() + 1
         );
     }
 

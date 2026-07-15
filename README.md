@@ -114,6 +114,8 @@ The first nine tabs display `(1)` through `(9)` shortcuts; pressing the matching
 
 Populate `ConfigUiModel::tab_list_tables` and matching `ConfigUiField::list_cells` when a tab should render a structured display table instead of the default `takes effect | setting | value` field list. This is presentation-only data; Ratconfig does not parse labels, values, paths, or host-specific concepts to build those cells
 
+Hosts do not choose widths for the default list. Ratconfig sizes status and setting from every row in the selected tab, then gives the remaining cells to value; search and selection leave column starts unchanged
+
 Fields with defaults expose a reset-to-default action that emits `ConfigUiIntent::UnsetField`. Hosts decide whether that means unsetting text, writing a default, validation, persistence, reloads, and apply behavior. Use `NO_CONFIG_DEFAULT_VALUE_LABEL` for manually constructed fields that have no default; builder helpers set it automatically
 
 Populate `ConfigUiModel::theme_switcher` when a committed field value should select a built-in Ratconfig theme. The switcher names one source id, one field path, and `serde_json::Value` mappings to `ConfigUiTheme::Dark` or `ConfigUiTheme::Light`; Ratconfig resolves the initial theme from model fields and switches after `ConfigUiApp::finish_successful_set_field_by_path()` or `ConfigUiApp::finish_successful_unset_field_by_path()` confirms a successful write of that source/path after any host reload. Failed host validation/writeback should not call those methods, so staged edits stay active and the theme does not change
