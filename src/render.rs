@@ -2,15 +2,15 @@
 use super::*;
 use crate::model::UNSET_CONFIG_VALUE_LABEL;
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::symbols::merge::MergeStrategy;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs, Wrap};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeSet;
 
-const HEADER_HORIZONTAL_PADDING: u16 = 1;
+const HORIZONTAL_PADDING: u16 = 1;
+const BODY_PANE_GUTTER: u16 = 1;
 const FIELD_TAKES_EFFECT_MIN_WIDTH: usize = 13;
 const FIELD_TAKES_EFFECT_MAX_WIDTH: usize = 18;
 const FIELD_SETTING_MIN_WIDTH: usize = 8;
@@ -146,20 +146,20 @@ pub fn draw_config_ui_with_details(
     detail_lines: impl Fn(&ConfigUiApp, UiRowRef) -> Vec<Line<'static>>,
 ) {
     let area = frame.area();
-    let root = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),
-            Constraint::Length(1),
-            Constraint::Min(8),
-            Constraint::Length(2),
-        ])
-        .split(area);
+    let [header, tabs, separator, body, footer] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(8),
+        Constraint::Length(2),
+    ])
+    .areas(area);
 
-    render_header(frame, app, root[0]);
-    render_tabs(frame, app, root[1]);
-    render_body(frame, app, root[2], &detail_lines);
-    render_footer(frame, app, root[3]);
+    render_header(frame, app, header);
+    render_tabs(frame, app, tabs);
+    render_tab_separator(frame, app.active_theme, separator);
+    render_body(frame, app, body, &detail_lines);
+    render_footer(frame, app, footer);
 }
 
 fn render_header(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect) {
@@ -190,14 +190,9 @@ fn render_header(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect) {
             .border_style(border_style(theme)),
         area,
     );
-    let horizontal_padding = HEADER_HORIZONTAL_PADDING.min(area.width / 2);
     let content = Rect {
-        x: area.x + horizontal_padding,
-        y: area.y,
-        width: area
-            .width
-            .saturating_sub(horizontal_padding.saturating_mul(2)),
         height: area.height.saturating_sub(1).max(1),
+        ..horizontal_inset(area)
     };
     let title_width = 15_u16.min(content.width);
     let gap = u16::from(content.width > title_width);
@@ -321,6 +316,14 @@ fn render_tabs(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect) {
     );
 }
 
+fn render_tab_separator(frame: &mut Frame<'_>, theme: ConfigUiTheme, area: Rect) {
+    let area = horizontal_inset(area);
+    frame.render_widget(
+        Paragraph::new("─".repeat(usize::from(area.width))).style(border_style(theme)),
+        area,
+    );
+}
+
 fn tab_labels(tabs: &[String]) -> Vec<Line<'static>> {
     tabs.iter()
         .enumerate()
@@ -341,18 +344,19 @@ fn render_body(
     area: Rect,
     detail_lines: &impl Fn(&ConfigUiApp, UiRowRef) -> Vec<Line<'static>>,
 ) {
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Fill(1), Constraint::Fill(1)])
-        .spacing(-1)
-        .split(area);
+    let [settings_area, _, details_area] = Layout::horizontal([
+        Constraint::Fill(1),
+        Constraint::Length(BODY_PANE_GUTTER),
+        Constraint::Fill(1),
+    ])
+    .areas(area);
     let rows = app.visible_rows();
     app.clamp_selection_for_len(rows.len());
-    render_list(frame, app, chunks[0], &rows);
+    render_list(frame, app, settings_area, &rows);
     render_details(
         frame,
         app,
-        chunks[1],
+        details_area,
         rows.get(app.selected_row).copied(),
         detail_lines,
     );
@@ -360,13 +364,12 @@ fn render_body(
 
 fn render_list(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect, rows: &[UiRowRef]) {
     let title = settings_title(app);
-    let block = Block::default()
-        .title(themed_line(Line::from(title), app.active_theme))
-        .borders(Borders::LEFT | Borders::RIGHT)
-        .border_style(border_style(app.active_theme));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    if inner.height == 0 {
+    let (title_area, content_area) = pane_areas(area);
+    frame.render_widget(
+        Paragraph::new(themed_line(Line::from(title), app.active_theme)),
+        title_area,
+    );
+    if content_area.height == 0 {
         return;
     }
 
@@ -374,7 +377,7 @@ fn render_list(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect, rows: &[UiR
         ListLayout::Field(_) => ListLayout::Field(field_column_widths(
             &app.model,
             app.selected_tab,
-            usize::from(inner.width),
+            usize::from(content_area.width),
         )),
         layout => layout,
     };
@@ -391,22 +394,20 @@ fn render_list(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect, rows: &[UiR
         .collect::<Vec<_>>();
     let mut state = ListState::default();
     state.select(selected_list_entry_index(&entries, app.selected_row));
-    let list_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0)])
-        .split(inner);
+    let [header, rows_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(content_area);
     frame.render_widget(
         Paragraph::new(themed_line(list_header_line(layout), app.active_theme))
             .alignment(Alignment::Left),
-        list_chunks[0],
+        header,
     );
-    if list_chunks[1].height == 0 {
+    if rows_area.height == 0 {
         return;
     }
 
     frame.render_stateful_widget(
         List::new(items).highlight_style(selected_row_style(app.active_theme)),
-        list_chunks[1],
+        rows_area,
         &mut state,
     );
 }
@@ -568,18 +569,40 @@ fn render_details(
             fg_style(Color::Gray),
         ))],
     };
+    let (title_area, content_area) = pane_areas(area);
     frame.render_widget(
-        Paragraph::new(themed_lines(lines, app.active_theme))
-            .block(
-                Block::default()
-                    .title(themed_line(Line::from("details"), app.active_theme))
-                    .borders(Borders::LEFT | Borders::RIGHT)
-                    .border_style(border_style(app.active_theme))
-                    .merge_borders(MergeStrategy::Exact),
-            )
-            .wrap(Wrap { trim: false }),
-        area,
+        Paragraph::new(themed_line(Line::from("details"), app.active_theme)),
+        title_area,
     );
+    frame.render_widget(
+        Paragraph::new(themed_lines(lines, app.active_theme)).wrap(Wrap { trim: false }),
+        content_area,
+    );
+}
+
+fn pane_areas(area: Rect) -> (Rect, Rect) {
+    let [title, _, content] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .areas(area);
+    let title_padding = HORIZONTAL_PADDING.min(title.width);
+    let title = Rect {
+        x: title.x + title_padding,
+        width: title.width.saturating_sub(title_padding),
+        ..title
+    };
+    (title, horizontal_inset(content))
+}
+
+fn horizontal_inset(area: Rect) -> Rect {
+    let padding = HORIZONTAL_PADDING.min(area.width / 2);
+    Rect {
+        x: area.x + padding,
+        width: area.width.saturating_sub(padding.saturating_mul(2)),
+        ..area
+    }
 }
 
 fn empty_settings_message(app: &ConfigUiApp) -> &'static str {
@@ -1659,8 +1682,8 @@ mod tests {
         let text = render_app(&mut terminal, &mut app);
         assert!(text.contains("settings · Core 0/2"));
         assert!(text.contains("No Core settings"));
-        assert!(text.contains("Press a to"));
-        assert!(text.contains("show All"));
+        assert!(text.contains("Press a"));
+        assert!(text.contains("to show All"));
         assert!(text.contains("a to All"));
 
         app.search_active = true;
@@ -2175,9 +2198,9 @@ mod tests {
         );
     }
 
-    // Defends: every semantic light role stays readable in normal and selected rendered states.
+    // Defends: light roles stay readable while the borderless body keeps its spacing hierarchy.
     #[test]
-    fn light_theme_roles_have_stable_contrast_in_the_rendered_ui() {
+    fn light_theme_and_borderless_body_have_stable_rendered_contract() {
         let mut invalid = field("ui.invalid", "string", "broken", &[]);
         invalid.state = ConfigUiValueState::Invalid;
         let mut ready = field("ui.ready", "string", "ready-value", &[]);
@@ -2201,26 +2224,28 @@ mod tests {
         assert_eq!(rendered_cell(buffer, "Config").fg, palette.title);
         assert_eq!(rendered_cell(buffer, "state").fg, palette.metadata_key);
         assert_eq!(rendered_cell(buffer, "q quit").fg, palette.text);
-        assert_eq!(buffer[(buffer.area.left(), 3)].fg, palette.border);
         assert_eq!(rendered_cell(buffer, "settings").fg, Color::Black);
         assert_eq!(rendered_cell(buffer, "details").fg, Color::Black);
         assert_eq!(rendered_cell(buffer, "(1) general").fg, palette.accent);
         assert_eq!(rendered_cell(buffer, "(2) other").fg, Color::Black);
 
-        let border_y = 20;
-        let vertical_borders = (buffer.area.left()..buffer.area.right())
-            .filter(|x| buffer[(*x, border_y)].symbol() == "│")
-            .count();
-        assert_eq!(buffer[(buffer.area.left(), border_y)].symbol(), "│");
-        assert_eq!(buffer[(buffer.area.right() - 1, border_y)].symbol(), "│");
-        assert_eq!(vertical_borders, 3);
-        for border_y in [3, 21] {
-            assert_eq!(
-                (buffer.area.left()..buffer.area.right())
-                    .filter(|x| buffer[(*x, border_y)].symbol() == "─")
-                    .count(),
-                0
-            );
+        assert_eq!(buffer[(buffer.area.left(), 2)].symbol(), " ");
+        assert_eq!(buffer[(buffer.area.left() + 1, 2)].symbol(), "(");
+        assert_eq!(buffer[(buffer.area.left(), 3)].symbol(), " ");
+        assert_eq!(buffer[(buffer.area.right() - 1, 3)].symbol(), " ");
+        for x in buffer.area.left() + 1..buffer.area.right() - 1 {
+            assert_eq!(buffer[(x, 3)].symbol(), "─");
+            assert_eq!(buffer[(x, 3)].fg, palette.border);
+        }
+
+        for (position, symbol) in [((1, 4), "s"), ((1, 6), "t"), ((62, 4), "d"), ((62, 6), "u")] {
+            assert_eq!(buffer[position].symbol(), symbol);
+        }
+        assert!((buffer.area.left()..buffer.area.right()).all(|x| buffer[(x, 5)].symbol() == " "));
+        let body_area = Rect::new(buffer.area.x, 4, buffer.area.width, 18);
+        for y in body_area.y..body_area.bottom() {
+            assert_eq!(buffer[(60, y)].symbol(), " ");
+            assert!((body_area.left()..body_area.right()).all(|x| buffer[(x, y)].symbol() != "│"));
         }
         assert!(
             buffer
