@@ -46,3 +46,11 @@ pub(crate) fn get_dotted_json_path<'a>(value: &'a JsonValue, path: &str) -> Opti
         current.get(part).or_else(|| current.get(part.trim()))
     })
 }
+
+pub(crate) fn get_dotted_json_path_parts<'a>(
+    value: &'a JsonValue,
+    path: &[String],
+) -> Option<&'a JsonValue> {
+    path.iter()
+        .try_fold(value, |current, part| current.as_object()?.get(part))
+}

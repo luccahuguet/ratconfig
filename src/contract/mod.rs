@@ -209,9 +209,15 @@ pub fn read_contract_state_from_json(
     value: &JsonValue,
     state_path: &str,
 ) -> Result<Option<ContractState>, ContractError> {
-    let Some(state_value) = get_dotted_json_path(value, state_path) else {
-        return Ok(None);
-    };
+    get_dotted_json_path(value, state_path)
+        .map(|state_value| read_contract_state_value(state_value, state_path))
+        .transpose()
+}
+
+fn read_contract_state_value(
+    state_value: &JsonValue,
+    state_path: &str,
+) -> Result<ContractState, ContractError> {
     let Some(state) = state_value.as_object() else {
         return Err(invalid_state(
             state_path,
@@ -227,11 +233,11 @@ pub fn read_contract_state_from_json(
             ),
         ));
     }
-    Ok(Some(ContractState {
+    Ok(ContractState {
         contract_id: required_string(state, state_path, "contract_id")?,
         version: required_u64(state, state_path, "version")?,
         applied_change_ids: optional_string_array(state, state_path, "applied_change_ids")?,
-    }))
+    })
 }
 
 fn planned_change_refs(

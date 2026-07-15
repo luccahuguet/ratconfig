@@ -3,12 +3,13 @@
 use super::{
     AppliedContractChange, ConfigContract, ContractApplyOutcome, ContractError,
     ContractJoinOutcome, ContractState, append_applied_change_ids, contract_state_to_json,
-    new_joined_state, plan_from_changes, planned_change_refs, read_contract_state,
+    new_joined_state, plan_from_changes, planned_change_refs, read_contract_state_value,
     validate_contract,
 };
-use crate::patch::PatchOutcome;
+use crate::patch::{PatchOutcome, get_dotted_json_path_parts};
 use crate::toml_adapter::{
     TomlPatchError, apply_toml_migrations_text, parse_toml_value, set_toml_value_text,
+    split_toml_path,
 };
 use serde_json::Value as JsonValue;
 
@@ -67,7 +68,10 @@ pub fn read_toml_contract_state(
     value: &JsonValue,
     state_path: &str,
 ) -> Result<Option<ContractState>, ContractError> {
-    read_contract_state(value, state_path)
+    let parts = split_toml_path(state_path)?;
+    get_dotted_json_path_parts(value, &parts)
+        .map(|state_value| read_contract_state_value(state_value, state_path))
+        .transpose()
 }
 
 pub fn write_toml_contract_state_text(
@@ -167,6 +171,38 @@ mod tests {
             current_version,
             changes,
         }
+    }
+
+    // Defends: TOML state reads target the same normalized path as state writes.
+    #[test]
+    fn toml_contract_state_reads_normalized_path() {
+        let state = |contract_id| {
+            json!({
+                "schema_version": 1,
+                "contract_id": contract_id,
+                "version": 1,
+            })
+        };
+        let value = json!({
+            " ratconfig ": { " contract ": state("exact") },
+            "ratconfig": { "contract": state("normalized") },
+        });
+
+        assert_eq!(
+            read_toml_contract_state(&value, " ratconfig . contract ")
+                .expect("normalized state path")
+                .expect("contract state")
+                .contract_id,
+            "normalized"
+        );
+        assert!(matches!(
+            read_toml_contract_state(
+                &json!({ "ratconfig": { "contract": true } }),
+                " ratconfig . contract "
+            ),
+            Err(ContractError::InvalidState { state_path, .. })
+                if state_path == " ratconfig . contract "
+        ));
     }
 
     // Defends: TOML configs can join the same semantic contract and later reconcile automatic changes.
