@@ -51,14 +51,14 @@ fn config_ui_theme_palette(theme: ConfigUiTheme) -> ConfigUiThemePalette {
         },
         ConfigUiTheme::Light => ConfigUiThemePalette {
             text: Color::Black,
-            muted: Color::DarkGray,
+            muted: Color::Rgb(62, 68, 78),
             title: Color::Rgb(0, 88, 132),
             accent: Color::Rgb(96, 64, 128),
             success: Color::Rgb(0, 100, 56),
             error: Color::Rgb(160, 32, 32),
             metadata_key: Color::Rgb(32, 76, 132),
             config_key: Color::Rgb(0, 92, 120),
-            border: Color::Gray,
+            border: Color::Rgb(88, 100, 118),
             selected_bg: Color::Rgb(214, 224, 238),
         },
     }
@@ -403,12 +403,7 @@ fn render_list(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect, rows: &[UiR
     }
 
     frame.render_stateful_widget(
-        List::new(items).highlight_style(themed_style(
-            Style::default()
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-            app.active_theme,
-        )),
+        List::new(items).highlight_style(selected_row_style(app.active_theme)),
         list_chunks[1],
         &mut state,
     );
@@ -1260,9 +1255,6 @@ fn themed_style(mut style: Style, theme: ConfigUiTheme) -> Style {
     style.fg = Some(style.fg.map_or(palette.text, |color| {
         light_foreground_for_dark_role(color, palette)
     }));
-    style.bg = style
-        .bg
-        .map(|color| light_background_for_dark_role(color, palette));
     style
 }
 
@@ -1280,11 +1272,10 @@ fn light_foreground_for_dark_role(color: Color, palette: ConfigUiThemePalette) -
     }
 }
 
-fn light_background_for_dark_role(color: Color, palette: ConfigUiThemePalette) -> Color {
-    match color {
-        Color::DarkGray => palette.selected_bg,
-        _ => color,
-    }
+fn selected_row_style(theme: ConfigUiTheme) -> Style {
+    Style::default()
+        .bg(config_ui_theme_palette(theme).selected_bg)
+        .add_modifier(Modifier::BOLD)
 }
 
 fn border_style(theme: ConfigUiTheme) -> Style {
@@ -1428,6 +1419,9 @@ pub fn truncate_start(value: &str, limit: usize) -> String {
 mod tests {
     use super::*;
     use crate::test_support::{apply_status, field, model_with_fields};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::{Buffer, Cell};
     use serde_json::json;
     use std::path::PathBuf;
 
@@ -1447,6 +1441,44 @@ mod tests {
 
     fn span_width(line: &Line<'_>, index: usize) -> usize {
         line.spans[index].width()
+    }
+
+    fn rendered_cell<'a>(buffer: &'a Buffer, text: &str) -> &'a Cell {
+        for y in buffer.area.y..buffer.area.bottom() {
+            for x in buffer.area.x..buffer.area.right() {
+                let suffix = (x..buffer.area.right())
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>();
+                if suffix.starts_with(text) {
+                    return &buffer[(x, y)];
+                }
+            }
+        }
+        panic!("{text:?} was not rendered");
+    }
+
+    fn contrast_ratio(foreground: Color, background: Color) -> f64 {
+        fn luminance(color: Color) -> f64 {
+            let (red, green, blue) = match color {
+                Color::Black => (0, 0, 0),
+                Color::White => (255, 255, 255),
+                Color::Rgb(red, green, blue) => (red, green, blue),
+                color => panic!("light theme role uses terminal-defined color {color:?}"),
+            };
+            let channel = |value: u8| {
+                let value = f64::from(value) / 255.0;
+                if value <= 0.04045 {
+                    value / 12.92
+                } else {
+                    ((value + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * channel(red) + 0.7152 * channel(green) + 0.0722 * channel(blue)
+        }
+
+        let foreground = luminance(foreground);
+        let background = luminance(background);
+        (foreground.max(background) + 0.05) / (foreground.min(background) + 0.05)
     }
 
     fn strings(values: &[&str]) -> Vec<String> {
@@ -1999,18 +2031,47 @@ mod tests {
         );
     }
 
-    // Defends: light mode maps default text and selected rows to dark-on-light contrast.
+    // Defends: every semantic light role stays readable in normal and selected rendered states.
     #[test]
-    fn light_theme_maps_text_and_selection_for_readability() {
-        let palette = config_ui_theme_palette(ConfigUiTheme::Light);
-        let line = themed_line(Line::from("plain"), ConfigUiTheme::Light);
-        let selected = themed_style(Style::default().bg(Color::DarkGray), ConfigUiTheme::Light);
+    fn light_theme_roles_have_stable_contrast_in_the_rendered_ui() {
+        let mut invalid = field("ui.invalid", "string", "broken", &[]);
+        invalid.state = ConfigUiValueState::Invalid;
+        let mut ready = field("ui.ready", "string", "ready-value", &[]);
+        ready.apply_status = apply_status("ready now", "Already active.");
+        ready.apply_status.pending = false;
+        let mut app = ConfigUiApp::new(model_with_fields(vec![invalid, ready]));
+        app.active_theme = ConfigUiTheme::Light;
 
-        assert_eq!(line.spans[0].style.fg, Some(palette.text));
-        assert_eq!(selected.fg, Some(palette.text));
-        assert_eq!(selected.bg, Some(palette.selected_bg));
-        assert_ne!(palette.text, Color::White);
-        assert_ne!(palette.muted, Color::White);
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("test terminal");
+        terminal
+            .draw(|frame| draw_config_ui(frame, &mut app))
+            .expect("render config UI");
+
+        let palette = config_ui_theme_palette(ConfigUiTheme::Light);
+        let buffer = terminal.backend().buffer();
+        assert_eq!(rendered_cell(buffer, "broken").fg, palette.error);
+        assert_eq!(rendered_cell(buffer, "broken").bg, palette.selected_bg);
+        assert_eq!(rendered_cell(buffer, "ready now").fg, palette.success);
+        assert_eq!(rendered_cell(buffer, "ready-value").fg, palette.muted);
+        assert_eq!(rendered_cell(buffer, "Config").fg, palette.title);
+        assert_eq!(rendered_cell(buffer, "state").fg, palette.metadata_key);
+        assert_eq!(rendered_cell(buffer, "q quit").fg, palette.text);
+        assert_eq!(rendered_cell(buffer, "┌settings").fg, palette.border);
+
+        for foreground in [
+            palette.text,
+            palette.muted,
+            palette.title,
+            palette.accent,
+            palette.success,
+            palette.error,
+            palette.metadata_key,
+            palette.config_key,
+        ] {
+            assert!(contrast_ratio(foreground, Color::White) >= 4.5);
+            assert!(contrast_ratio(foreground, palette.selected_bg) >= 4.5);
+        }
+        assert!(contrast_ratio(palette.border, Color::White) >= 3.0);
     }
 
     // Defends: absent advanced status rows stay neutral instead of warning-colored.
