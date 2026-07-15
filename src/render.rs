@@ -64,7 +64,7 @@ fn config_ui_theme_palette(theme: ConfigUiTheme) -> ConfigUiThemePalette {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy)]
 struct FieldColumnWidths {
     takes_effect: usize,
     setting: usize,
@@ -368,7 +368,14 @@ fn render_list(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect, rows: &[UiR
         return;
     }
 
-    let layout = list_layout_for_width(&app.model, app.selected_tab, usize::from(inner.width));
+    let layout = match list_layout(&app.model, app.selected_tab) {
+        ListLayout::Field(_) => ListLayout::Field(field_column_widths(
+            &app.model,
+            app.selected_tab,
+            usize::from(inner.width),
+        )),
+        layout => layout,
+    };
     let entries = list_entries(&app.model, rows);
     let items = entries
         .iter()
@@ -464,19 +471,6 @@ fn list_layout(model: &ConfigUiModel, selected_tab: usize) -> ListLayout<'_> {
     }
 }
 
-fn list_layout_for_width(
-    model: &ConfigUiModel,
-    selected_tab: usize,
-    available_width: usize,
-) -> ListLayout<'_> {
-    match list_layout(model, selected_tab) {
-        ListLayout::Field(_) => {
-            ListLayout::Field(field_column_widths(model, selected_tab, available_width))
-        }
-        layout => layout,
-    }
-}
-
 fn field_column_widths(
     model: &ConfigUiModel,
     selected_tab: usize,
@@ -507,8 +501,8 @@ fn resolve_field_column_widths<'a>(
     let mut desired_takes_effect = FIELD_TAKES_EFFECT_MIN_WIDTH;
     let mut desired_setting = FIELD_SETTING_MIN_WIDTH;
     for (takes_effect, setting) in rows {
-        desired_takes_effect = desired_takes_effect.max(takes_effect.chars().count() + 1);
-        desired_setting = desired_setting.max(setting.chars().count() + 1);
+        desired_takes_effect = desired_takes_effect.max(terminal_width(takes_effect) + 1);
+        desired_setting = desired_setting.max(terminal_width(setting) + 1);
     }
     desired_takes_effect = desired_takes_effect.min(FIELD_TAKES_EFFECT_MAX_WIDTH);
     desired_setting = desired_setting.min(FIELD_SETTING_MAX_WIDTH);
@@ -529,7 +523,7 @@ fn field_list_header_line(widths: FieldColumnWidths) -> Line<'static> {
     Line::from(vec![
         column_header(field_column_cell("takes effect", widths.takes_effect)),
         column_header(field_column_cell("setting", widths.setting)),
-        column_header(truncate("value", widths.value)),
+        column_header(truncate_cells("value", widths.value)),
     ])
 }
 
@@ -710,16 +704,40 @@ fn field_row_line(
     Line::from(vec![
         Span::styled(field_column_cell(status, widths.takes_effect), status_style),
         Span::styled(field_column_cell(setting, widths.setting), setting_style),
-        Span::styled(truncate(value, widths.value), value_style),
+        Span::styled(truncate_cells(value, widths.value), value_style),
     ])
 }
 
 fn field_column_cell(value: &str, width: usize) -> String {
-    format!(
-        "{:<width$}",
-        truncate(value, width.saturating_sub(1)),
-        width = width
-    )
+    let value = truncate_cells(value, width.saturating_sub(1));
+    let padding = width.saturating_sub(terminal_width(&value));
+    value + &" ".repeat(padding)
+}
+
+fn truncate_cells(value: &str, limit: usize) -> String {
+    if terminal_width(value) <= limit {
+        return value.to_string();
+    }
+    if limit <= 3 {
+        return ".".repeat(limit);
+    }
+
+    let mut prefix = String::new();
+    let mut width = 0;
+    let span = Span::raw(value);
+    for grapheme in span.styled_graphemes(Style::default()) {
+        let grapheme_width = terminal_width(grapheme.symbol);
+        if width + grapheme_width > limit - 3 {
+            break;
+        }
+        prefix.push_str(grapheme.symbol);
+        width += grapheme_width;
+    }
+    prefix + "..."
+}
+
+fn terminal_width(value: &str) -> usize {
+    Span::raw(value).width()
 }
 
 fn status_row_line(
@@ -1428,7 +1446,7 @@ mod tests {
     }
 
     fn span_width(line: &Line<'_>, index: usize) -> usize {
-        line.spans[index].content.chars().count()
+        line.spans[index].width()
     }
 
     fn strings(values: &[&str]) -> Vec<String> {
@@ -1721,28 +1739,29 @@ mod tests {
         assert_eq!(widths.takes_effect + widths.setting + widths.value, 78);
     }
 
-    // Defends: headers and rows use the same resolved starts, and row content fills without overflowing.
+    // Defends: headers and rows share terminal-cell boundaries for ASCII, CJK, and joined emoji.
     #[test]
     fn field_header_and_rows_share_resolved_boundaries() {
-        let widths =
-            resolve_field_column_widths(40, [("next launch", "a moderately long setting")]);
+        let widths = resolve_field_column_widths(40, [("next launch", "設定設定設定")]);
         let header = field_list_header_line(widths);
         let row = field_row_line(
             widths,
             "next launch",
             Style::default(),
-            "a moderately long setting",
+            "設定設定設定",
             Style::default(),
-            "a value long enough to fill its resolved column",
+            "値が長い設定値値が長い設定値",
             Style::default(),
         );
 
+        assert_eq!(widths.setting, 13);
         assert_eq!(span_width(&header, 0), widths.takes_effect);
         assert_eq!(span_width(&header, 1), widths.setting);
         assert_eq!(span_width(&row, 0), widths.takes_effect);
         assert_eq!(span_width(&row, 1), widths.setting);
-        assert_eq!(span_width(&row, 2), widths.value);
-        assert_eq!(rendered_text(&row).chars().count(), 40);
+        assert!(span_width(&row, 2) <= widths.value);
+        assert!(row.width() <= 40);
+        assert_eq!(truncate_cells("👩‍💻👩‍💻👩‍💻", 5), "👩‍💻...");
     }
 
     // Defends: tiny render areas retain bounded columns instead of producing an over-wide line.
@@ -1767,7 +1786,7 @@ mod tests {
                 widths.takes_effect + widths.setting + widths.value,
                 available
             );
-            assert_eq!(rendered_text(&row).chars().count(), available);
+            assert_eq!(row.width(), available);
         }
     }
 
@@ -1784,7 +1803,7 @@ mod tests {
         let widths = field_column_widths(&model, 0, 60);
         assert_eq!(
             widths.setting,
-            "A much longer setting label".chars().count() + 1
+            terminal_width("A much longer setting label") + 1
         );
     }
 
