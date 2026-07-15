@@ -15,11 +15,41 @@ pub struct ConfigUiModel {
     pub tabs: Vec<String>,
     pub tab_list_tables: BTreeMap<String, ConfigUiListTable>,
     pub fields: Vec<ConfigUiField>,
+    /// Positive Core allowlist. `None` keeps every field in Core; explicit and invalid values
+    /// remain visible even when omitted from `Some`.
+    pub core_fields: Option<Vec<ConfigUiFieldId>>,
     pub file_actions: Vec<ConfigUiFileAction>,
     pub sidecars: Vec<ConfigUiSidecar>,
     pub native_config_statuses: Vec<ConfigUiNativeStatus>,
     pub diagnostics: Vec<ConfigUiDiagnostic>,
     pub theme_switcher: Option<ConfigUiThemeSwitcher>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigUiFieldId {
+    pub source_id: String,
+    pub path: String,
+}
+
+impl ConfigUiFieldId {
+    pub fn new(source_id: impl Into<String>, path: impl Into<String>) -> Self {
+        Self {
+            source_id: source_id.into(),
+            path: path.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigUiSettingsView {
+    Core,
+    All,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ConfigUiFieldCounts {
+    pub core: usize,
+    pub total: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,11 +114,16 @@ pub fn visible_rows_for_tab_search(
     selected_tab: usize,
     search: &str,
 ) -> Vec<UiRowRef> {
-    let tab = model
-        .tabs
-        .get(selected_tab)
-        .map(String::as_str)
-        .unwrap_or("general");
+    visible_rows_for_tab_search_in_view(model, selected_tab, search, ConfigUiSettingsView::All)
+}
+
+pub fn visible_rows_for_tab_search_in_view(
+    model: &ConfigUiModel,
+    selected_tab: usize,
+    search: &str,
+    view: ConfigUiSettingsView,
+) -> Vec<UiRowRef> {
+    let tab = tab_name(model, selected_tab);
     let search = search.to_ascii_lowercase();
     if tab == "advanced" {
         return (0..model.diagnostics.len())
@@ -102,10 +137,46 @@ pub fn visible_rows_for_tab_search(
 
     (0..model.fields.len())
         .filter(|index| model.fields[*index].tab == tab)
+        .filter(|index| {
+            view == ConfigUiSettingsView::All
+                || !search.is_empty()
+                || field_is_visible_in_core(model, &model.fields[*index])
+        })
         .map(UiRowRef::Field)
         .chain(file_action_rows_for_tab(model, tab))
         .filter(|row| row_matches_search(model, *row, &search))
         .collect()
+}
+
+pub fn field_counts_for_tab(model: &ConfigUiModel, selected_tab: usize) -> ConfigUiFieldCounts {
+    let tab = tab_name(model, selected_tab);
+    if tab == "advanced" {
+        return ConfigUiFieldCounts::default();
+    }
+    let fields = model.fields.iter().filter(|field| field.tab == tab);
+    fields.fold(ConfigUiFieldCounts::default(), |mut counts, field| {
+        counts.total += 1;
+        counts.core += usize::from(field_is_visible_in_core(model, field));
+        counts
+    })
+}
+
+fn tab_name(model: &ConfigUiModel, selected_tab: usize) -> &str {
+    model
+        .tabs
+        .get(selected_tab)
+        .map_or("general", String::as_str)
+}
+
+fn field_is_visible_in_core(model: &ConfigUiModel, field: &ConfigUiField) -> bool {
+    matches!(
+        field.state,
+        ConfigUiValueState::Explicit | ConfigUiValueState::Invalid
+    ) || model.core_fields.as_ref().is_none_or(|core_fields| {
+        core_fields
+            .iter()
+            .any(|core| core.source_id == field.source_id && core.path == field.path)
+    })
 }
 
 fn file_action_rows_for_tab<'a>(
@@ -1269,6 +1340,7 @@ mod tests {
             ],
             tab_list_tables: BTreeMap::new(),
             fields: Vec::new(),
+            core_fields: None,
             file_actions: Vec::new(),
             sidecars: Vec::new(),
             native_config_statuses: Vec::new(),
@@ -1882,11 +1954,12 @@ empty = []
             }
         }
 
-        let model = ConfigUiModel {
+        let mut model = ConfigUiModel {
             sources: Vec::new(),
             tabs: vec!["general".to_string(), "advanced".to_string()],
             tab_list_tables: BTreeMap::new(),
             fields: vec![spec(false).build("string", None, None)],
+            core_fields: None,
             file_actions: vec![
                 file_action("general", "Prompt config"),
                 file_action("advanced", "Native logs"),
@@ -1896,6 +1969,9 @@ empty = []
             diagnostics: Vec::new(),
             theme_switcher: None,
         };
+        let mut hidden_advanced_field = model.fields[0].clone();
+        hidden_advanced_field.tab = "advanced".to_string();
+        model.fields.push(hidden_advanced_field);
 
         assert_eq!(
             visible_rows_for_tab_search(&model, 0, ""),
@@ -1912,6 +1988,114 @@ empty = []
         assert_eq!(
             visible_rows_for_tab_search(&model, 1, "logs"),
             vec![UiRowRef::FileAction(1)]
+        );
+        assert_eq!(
+            field_counts_for_tab(&model, 1),
+            ConfigUiFieldCounts::default()
+        );
+        model.core_fields = Some(Vec::new());
+        assert_eq!(
+            visible_rows_for_tab_search_in_view(&model, 0, "", ConfigUiSettingsView::Core),
+            vec![UiRowRef::FileAction(0)]
+        );
+    }
+
+    // Defends: one positive host allowlist defines Core without hiding active values.
+    #[test]
+    fn core_allowlist_filters_defaults_but_keeps_active_values_and_all_scope_search() {
+        let mut core = field("core.default", "string", r#""core""#, &[]);
+        core.state = ConfigUiValueState::Defaulted;
+        let mut hidden = field("hidden.default", "string", r#""hidden""#, &[]);
+        hidden.state = ConfigUiValueState::Defaulted;
+        let explicit = field("hidden.explicit", "string", r#""set""#, &[]);
+        let mut invalid = field("hidden.invalid", "string", r#""broken""#, &[]);
+        invalid.state = ConfigUiValueState::Invalid;
+        let mut model = model_with_fields(vec![core, hidden, explicit, invalid]);
+        model.core_fields = Some(vec![ConfigUiFieldId::new(
+            DEFAULT_CONFIG_SOURCE_ID,
+            "core.default",
+        )]);
+        let visible = |search, view| visible_rows_for_tab_search_in_view(&model, 0, search, view);
+
+        assert_eq!(
+            visible("", ConfigUiSettingsView::Core),
+            vec![UiRowRef::Field(0), UiRowRef::Field(2), UiRowRef::Field(3)]
+        );
+        assert_eq!(
+            visible("", ConfigUiSettingsView::All),
+            visible_rows_for_tab_search(&model, 0, "")
+        );
+        assert_eq!(
+            visible("hidden.default", ConfigUiSettingsView::Core),
+            vec![UiRowRef::Field(1)]
+        );
+        assert_eq!(
+            field_counts_for_tab(&model, 0),
+            ConfigUiFieldCounts { core: 3, total: 4 }
+        );
+    }
+
+    // Defends: omitting the allowlist preserves all-core compatibility, including empty tabs.
+    #[test]
+    fn absent_core_allowlist_treats_every_field_as_core() {
+        let mut one = field("one", "string", r#""one""#, &[]);
+        one.state = ConfigUiValueState::Defaulted;
+        let mut two = field("two", "string", r#""two""#, &[]);
+        two.state = ConfigUiValueState::Unset;
+        let mut model = model_with_fields(vec![one, two]);
+        model.tabs.push("empty".to_string());
+
+        assert_eq!(
+            visible_rows_for_tab_search_in_view(&model, 0, "", ConfigUiSettingsView::Core),
+            visible_rows_for_tab_search(&model, 0, "")
+        );
+        assert_eq!(
+            field_counts_for_tab(&model, 0),
+            ConfigUiFieldCounts { core: 2, total: 2 }
+        );
+        assert_eq!(
+            field_counts_for_tab(&model, 1),
+            ConfigUiFieldCounts { core: 0, total: 0 }
+        );
+        assert_eq!(
+            field_counts_for_tab(&model, model.tabs.len()),
+            ConfigUiFieldCounts { core: 2, total: 2 }
+        );
+    }
+
+    // Defends: generated TOML rows can be classified by stable identity without reconstructing fields.
+    #[test]
+    fn core_allowlist_classifies_generated_toml_fields_by_source_and_path() {
+        let rows = toml_document_rows(
+            "",
+            Some(
+                r#"
+[ui]
+theme = "dark"
+font = "mono"
+"#,
+            ),
+        );
+        let mut same_path_other_source = toml_field(&rows, "ui.theme").clone();
+        same_path_other_source.source_id = "other".to_string();
+        let mut model = model_with_fields(rows.fields);
+        model.fields.push(same_path_other_source);
+        model.tabs = vec!["native".to_string()];
+        model.core_fields = Some(vec![ConfigUiFieldId::new("native", "ui.theme")]);
+
+        let visible_paths =
+            visible_rows_for_tab_search_in_view(&model, 0, "", ConfigUiSettingsView::Core)
+                .into_iter()
+                .filter_map(|row| match row {
+                    UiRowRef::Field(index) => Some(model.fields[index].path.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+
+        assert_eq!(visible_paths, vec!["ui.theme"]);
+        assert_eq!(
+            field_counts_for_tab(&model, 0),
+            ConfigUiFieldCounts { core: 1, total: 4 }
         );
     }
 }

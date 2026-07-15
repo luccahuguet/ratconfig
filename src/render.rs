@@ -359,11 +359,7 @@ fn render_body(
 }
 
 fn render_list(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect, rows: &[UiRowRef]) {
-    let title = if app.search.is_empty() {
-        "settings".to_string()
-    } else {
-        format!("settings filtered by {}", app.search)
-    };
+    let title = settings_title(app);
     let block = Block::default()
         .title(themed_line(Line::from(title), app.active_theme))
         .borders(Borders::LEFT | Borders::RIGHT)
@@ -413,6 +409,28 @@ fn render_list(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect, rows: &[UiR
         list_chunks[1],
         &mut state,
     );
+}
+
+fn settings_title(app: &ConfigUiApp) -> String {
+    let counts = field_counts_for_tab(&app.model, app.selected_tab);
+    if counts.core == counts.total {
+        return if app.search.is_empty() {
+            "settings".to_string()
+        } else {
+            format!("settings filtered by {}", app.search)
+        };
+    }
+
+    if !app.search.is_empty() {
+        return format!(
+            "settings · search All · Core {}/{} · {}",
+            counts.core, counts.total, app.search
+        );
+    }
+    match app.settings_view {
+        ConfigUiSettingsView::Core => format!("settings · Core {}/{}", counts.core, counts.total),
+        ConfigUiSettingsView::All => format!("settings All{}/Core{}", counts.total, counts.core),
+    }
 }
 
 fn list_entries<'a>(model: &'a ConfigUiModel, rows: &[UiRowRef]) -> Vec<ListEntry<'a>> {
@@ -546,7 +564,7 @@ fn render_details(
     let lines = match row {
         Some(row) => detail_lines(app, row),
         None => vec![Line::from(Span::styled(
-            "No settings match this tab/search.",
+            empty_settings_message(app),
             fg_style(Color::Gray),
         ))],
     };
@@ -562,6 +580,22 @@ fn render_details(
             .wrap(Wrap { trim: false }),
         area,
     );
+}
+
+fn empty_settings_message(app: &ConfigUiApp) -> &'static str {
+    if !app.search.is_empty() {
+        "No settings match this search."
+    } else if app.settings_view == ConfigUiSettingsView::Core
+        && app.selected_tab_has_non_core_fields()
+    {
+        if app.search_active {
+            "No Core settings on this tab. Type to search All."
+        } else {
+            "No Core settings on this tab. Press a to show All."
+        }
+    } else {
+        "No settings on this tab."
+    }
 }
 
 pub fn row_line_for_model(model: &ConfigUiModel, row: UiRowRef) -> Line<'static> {
@@ -1117,6 +1151,14 @@ fn render_footer(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect) {
         || normal_control_line(app),
         |notice| notice_line(notice, area.width as usize),
     );
+    let controls = footer_control_line(app);
+    frame.render_widget(
+        Paragraph::new(themed_lines(vec![notice, controls], app.active_theme)),
+        area,
+    );
+}
+
+fn footer_control_line(app: &ConfigUiApp) -> Line<'static> {
     let search = if app.search_active {
         format!("search: {}_", app.search)
     } else if app.search.is_empty() {
@@ -1124,14 +1166,23 @@ fn render_footer(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect) {
     } else {
         "Esc clears search".to_string()
     };
-    let mut controls = raw_line(["q quit  ", "Tab tabs  ", "j/k move  "]);
-    controls
-        .spans
-        .push(Span::styled(search, fg_style(Color::Yellow)));
-    frame.render_widget(
-        Paragraph::new(themed_lines(vec![notice, controls], app.active_theme)),
-        area,
-    );
+    let mut spans = vec![Span::raw("q quit ")];
+    if app.can_toggle_settings_view() {
+        let target = match app.settings_view {
+            ConfigUiSettingsView::Core => "All",
+            ConfigUiSettingsView::All => "Core",
+        };
+        spans.push(Span::styled(
+            format!("a to {target} "),
+            fg_style(Color::Yellow),
+        ));
+    }
+    spans.extend([
+        Span::raw("Tab tabs "),
+        Span::raw("j/k move "),
+        Span::styled(search, fg_style(Color::Yellow)),
+    ]);
+    Line::from(spans)
 }
 
 fn notice_line(notice: &ConfigUiNotice, width: usize) -> Line<'static> {
@@ -1446,6 +1497,14 @@ mod tests {
             .collect()
     }
 
+    fn render_app(terminal: &mut Terminal<TestBackend>, app: &mut ConfigUiApp) -> String {
+        terminal
+            .draw(|frame| draw_config_ui(frame, app))
+            .expect("render config UI");
+        let buffer = terminal.backend().buffer();
+        buffer.content().iter().map(Cell::symbol).collect()
+    }
+
     fn span_width(line: &Line<'_>, index: usize) -> usize {
         line.spans[index].width()
     }
@@ -1553,6 +1612,84 @@ mod tests {
         assert_eq!(labels[0], "(1) tab_1");
         assert_eq!(labels[8], "(9) tab_9");
         assert_eq!(labels[9], "tab_10");
+    }
+
+    // Defends: narrow layouts expose the active view, honest counts, and the matching toggle without hiding search scope.
+    #[test]
+    fn core_all_view_state_and_controls_remain_clear_in_a_narrow_ui() {
+        let mut core = field("core.visible", "string", r#""core""#, &[]);
+        core.state = ConfigUiValueState::Defaulted;
+        let mut hidden = field("hidden.secret", "string", r#""secret""#, &[]);
+        hidden.state = ConfigUiValueState::Defaulted;
+        let mut model = model_with_fields(vec![core, hidden]);
+        model.core_fields = Some(vec![ConfigUiFieldId::new(
+            DEFAULT_CONFIG_SOURCE_ID,
+            "core.visible",
+        )]);
+        let mut app = ConfigUiApp::new(model);
+        let mut terminal = Terminal::new(TestBackend::new(44, 16)).expect("test terminal");
+
+        let text = render_app(&mut terminal, &mut app);
+        assert!(text.contains("settings · Core 1/2"));
+        assert!(text.contains("a to All"));
+        assert!(text.contains("/ search"));
+
+        app.handle_key(ConfigUiKey::Char('a'));
+        assert_eq!(app.visible_rows().len(), 2);
+        let text = render_app(&mut terminal, &mut app);
+        assert!(text.contains("settings All2/Core1"));
+        assert!(text.contains("a to Core"));
+        assert!(text.contains("/ search"));
+
+        app.search_active = true;
+        let text = render_app(&mut terminal, &mut app);
+        assert!(text.contains("search: _"));
+        assert!(!text.contains("a to"));
+
+        app.search_active = false;
+        app.search = "secret".to_string();
+        assert_eq!(app.visible_rows(), vec![UiRowRef::Field(1)]);
+        let text = render_app(&mut terminal, &mut app);
+        assert!(text.contains("settings · search All"));
+        assert!(!text.contains("a to"));
+
+        app.search.clear();
+        app.model.core_fields = Some(Vec::new());
+        app.settings_view = ConfigUiSettingsView::Core;
+        let text = render_app(&mut terminal, &mut app);
+        assert!(text.contains("settings · Core 0/2"));
+        assert!(text.contains("No Core settings"));
+        assert!(text.contains("Press a to"));
+        assert!(text.contains("show All"));
+        assert!(text.contains("a to All"));
+
+        app.search_active = true;
+        let text = render_app(&mut terminal, &mut app);
+        assert!(text.contains("Type to"));
+        assert!(text.contains("search All"));
+        assert!(!text.contains("show All"));
+
+        app.search_active = false;
+        for index in 2..12 {
+            let mut extra = app.model.fields[0].clone();
+            extra.path = format!("extra.setting_{index}");
+            app.model.fields.push(extra);
+        }
+        app.model.core_fields = Some(
+            app.model
+                .fields
+                .iter()
+                .take(10)
+                .map(|field| ConfigUiFieldId::new(field.source_id.clone(), field.path.clone()))
+                .collect(),
+        );
+        app.settings_view = ConfigUiSettingsView::Core;
+        let text = render_app(&mut terminal, &mut app);
+        assert!(text.contains("settings · Core 10/12"));
+
+        app.settings_view = ConfigUiSettingsView::All;
+        let text = render_app(&mut terminal, &mut app);
+        assert!(text.contains("settings All12/Core10"));
     }
 
     // Defends: headings are derived from filtered field rows and selection indices continue to target only real rows.

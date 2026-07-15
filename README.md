@@ -84,6 +84,7 @@ fn model() -> ConfigUiModel {
             },
             edit_behavior: ConfigUiEditBehavior::Default,
         }],
+        core_fields: None,
         file_actions: Vec::new(),
         sidecars: Vec::new(),
         native_config_statuses: Vec::new(),

@@ -1,8 +1,8 @@
 // Test lane: default
 
 use super::{
-    ConfigUiEditBehavior, ConfigUiField, ConfigUiFileAction, ConfigUiModel, ConfigUiTheme,
-    UiRowRef, visible_rows_for_tab_search,
+    ConfigUiEditBehavior, ConfigUiField, ConfigUiFileAction, ConfigUiModel, ConfigUiSettingsView,
+    ConfigUiTheme, UiRowRef, field_counts_for_tab, visible_rows_for_tab_search_in_view,
 };
 use crate::model::{
     UNSET_CONFIG_VALUE_LABEL, config_ui_theme_from_model, string_list_values_from_json,
@@ -17,6 +17,7 @@ pub struct ConfigUiApp {
     pub active_theme: ConfigUiTheme,
     pub selected_tab: usize,
     pub selected_row: usize,
+    pub settings_view: ConfigUiSettingsView,
     pub search: String,
     pub search_active: bool,
     pub edit: Option<ConfigUiEditState>,
@@ -97,11 +98,17 @@ pub enum ConfigUiIntent {
 impl ConfigUiApp {
     pub fn new(model: ConfigUiModel) -> Self {
         let active_theme = config_ui_theme_from_model(&model);
+        let settings_view = if model_has_non_core_fields(&model) {
+            ConfigUiSettingsView::Core
+        } else {
+            ConfigUiSettingsView::All
+        };
         Self {
             model,
             active_theme,
             selected_tab: 0,
             selected_row: 0,
+            settings_view,
             search: String::new(),
             search_active: false,
             edit: None,
@@ -110,7 +117,36 @@ impl ConfigUiApp {
     }
 
     pub fn visible_rows(&self) -> Vec<UiRowRef> {
-        visible_rows_for_tab_search(&self.model, self.selected_tab, &self.search)
+        visible_rows_for_tab_search_in_view(
+            &self.model,
+            self.selected_tab,
+            &self.search,
+            self.settings_view,
+        )
+    }
+
+    pub(crate) fn selected_tab_has_non_core_fields(&self) -> bool {
+        let counts = field_counts_for_tab(&self.model, self.selected_tab);
+        counts.core < counts.total
+    }
+
+    pub(crate) fn can_toggle_settings_view(&self) -> bool {
+        !self.search_active && self.search.is_empty() && self.selected_tab_has_non_core_fields()
+    }
+
+    fn toggle_settings_view(&mut self) {
+        if !self.can_toggle_settings_view() {
+            return;
+        }
+        let selected = self.visible_rows().get(self.selected_row).copied();
+        self.settings_view = match self.settings_view {
+            ConfigUiSettingsView::Core => ConfigUiSettingsView::All,
+            ConfigUiSettingsView::All => ConfigUiSettingsView::Core,
+        };
+        let rows = self.visible_rows();
+        self.selected_row = selected
+            .and_then(|selected| rows.iter().position(|row| *row == selected))
+            .unwrap_or_else(|| self.selected_row.min(rows.len().saturating_sub(1)));
     }
 
     pub fn next_tab(&mut self) {
@@ -373,12 +409,22 @@ impl ConfigUiApp {
             }
             _ => {}
         }
+        self.clamp_selection();
     }
 
     fn handle_normal_key(&mut self, key: ConfigUiKey) -> ConfigUiIntent {
         match key {
+            ConfigUiKey::Esc if !self.search.is_empty() => {
+                self.search.clear();
+                self.clamp_selection();
+                ConfigUiIntent::None
+            }
             ConfigUiKey::Char('q') | ConfigUiKey::Esc | ConfigUiKey::Ctrl('c') => {
                 ConfigUiIntent::Exit
+            }
+            ConfigUiKey::Char('a') => {
+                self.toggle_settings_view();
+                ConfigUiIntent::None
             }
             ConfigUiKey::Char('/') => {
                 self.search_active = true;
@@ -719,6 +765,13 @@ impl ConfigUiApp {
             value,
         }
     }
+}
+
+fn model_has_non_core_fields(model: &ConfigUiModel) -> bool {
+    (0..model.tabs.len().max(1)).any(|tab| {
+        let counts = field_counts_for_tab(model, tab);
+        counts.core < counts.total
+    })
 }
 
 fn default_field_value(field: &ConfigUiField) -> Option<JsonValue> {
@@ -1088,8 +1141,9 @@ mod tests {
     #[cfg(feature = "ui")]
     use crate::row_line_for_model;
     use crate::{
-        ConfigUiTheme, ConfigUiThemeMapping, ConfigUiThemeSwitcher, ConfigUiTomlDocumentSpec,
-        DEFAULT_CONFIG_SOURCE_ID, build_toml_document_fields,
+        ConfigUiFieldId, ConfigUiTheme, ConfigUiThemeMapping, ConfigUiThemeSwitcher,
+        ConfigUiTomlDocumentSpec, ConfigUiValueState, DEFAULT_CONFIG_SOURCE_ID,
+        build_toml_document_fields,
         test_support::{after_save_status, field, field_with_source, model_with_fields},
     };
     #[cfg(feature = "ui")]
@@ -1675,6 +1729,74 @@ line-number = "relative"
         assert!(!app.search_active);
     }
 
+    // Defends: Core is the focused default, search widens without changing it, and toggles preserve a surviving selection.
+    #[test]
+    fn reducer_controls_core_all_views_without_hidden_selection_or_search_state_leaks() {
+        let mut core = field("core.visible", "string", r#""core""#, &[]);
+        core.state = ConfigUiValueState::Defaulted;
+        let mut hidden = field("advanced.hidden", "string", r#""hidden""#, &[]);
+        hidden.state = ConfigUiValueState::Defaulted;
+        let explicit = field("advanced.explicit", "string", r#""set""#, &[]);
+        let mut other_tab = field("other.visible", "string", r#""other""#, &[]);
+        other_tab.state = ConfigUiValueState::Defaulted;
+        other_tab.tab = "other".to_string();
+        let mut model = model_with_fields(vec![core, hidden, explicit, other_tab]);
+        model.tabs.push("other".to_string());
+        model.core_fields = Some(vec![
+            ConfigUiFieldId::new(DEFAULT_CONFIG_SOURCE_ID, "core.visible"),
+            ConfigUiFieldId::new(DEFAULT_CONFIG_SOURCE_ID, "other.visible"),
+        ]);
+        let mut app = ConfigUiApp::new(model);
+
+        assert_eq!(app.settings_view, ConfigUiSettingsView::Core);
+        assert_eq!(
+            app.visible_rows(),
+            vec![UiRowRef::Field(0), UiRowRef::Field(2)]
+        );
+
+        assert_eq!(app.handle_key(ConfigUiKey::Char('a')), ConfigUiIntent::None);
+        assert_eq!(app.settings_view, ConfigUiSettingsView::All);
+        app.selected_row = 1;
+        assert_eq!(
+            app.selected_field().map(|field| field.path.as_str()),
+            Some("advanced.hidden")
+        );
+
+        app.handle_key(ConfigUiKey::Char('a'));
+        assert_eq!(app.settings_view, ConfigUiSettingsView::Core);
+        assert_eq!(
+            app.selected_field().map(|field| field.path.as_str()),
+            Some("advanced.explicit")
+        );
+        app.handle_key(ConfigUiKey::Char('a'));
+        assert_eq!(app.selected_row, 2);
+
+        app.handle_key(ConfigUiKey::Char('a'));
+        app.handle_key(ConfigUiKey::Char('/'));
+        app.handle_key(ConfigUiKey::Char('a'));
+        assert_eq!(app.search, "a");
+        assert_eq!(app.settings_view, ConfigUiSettingsView::Core);
+        app.handle_key(ConfigUiKey::Ctrl('u'));
+        for ch in "advanced.hidden".chars() {
+            app.handle_key(ConfigUiKey::Char(ch));
+        }
+        assert_eq!(app.visible_rows(), vec![UiRowRef::Field(1)]);
+        app.handle_key(ConfigUiKey::Enter);
+        app.handle_key(ConfigUiKey::Char('a'));
+        assert_eq!(app.settings_view, ConfigUiSettingsView::Core);
+        app.handle_key(ConfigUiKey::Esc);
+        assert!(app.search.is_empty());
+        assert_eq!(
+            app.visible_rows(),
+            vec![UiRowRef::Field(0), UiRowRef::Field(2)]
+        );
+
+        app.next_tab();
+        assert!(!app.selected_tab_has_non_core_fields());
+        app.handle_key(ConfigUiKey::Char('a'));
+        assert_eq!(app.settings_view, ConfigUiSettingsView::Core);
+    }
+
     // Defends: normal-mode digits select the matching first-nine tab and reset row selection without changing out-of-range state.
     #[test]
     fn reducer_selects_numbered_tabs_directly() {
@@ -1716,7 +1838,8 @@ line-number = "relative"
         app.search.clear();
         app.begin_edit_field(0);
         assert_eq!(app.handle_key(ConfigUiKey::Char('2')), ConfigUiIntent::None);
-        assert_eq!(app.edit.as_ref().expect("text edit").input, "12");
+        assert_eq!(app.handle_key(ConfigUiKey::Char('a')), ConfigUiIntent::None);
+        assert_eq!(app.edit.as_ref().expect("text edit").input, "12a");
         assert_eq!(app.selected_tab, 0);
     }
 

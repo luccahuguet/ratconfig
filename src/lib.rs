@@ -23,19 +23,20 @@ pub use crossterm_runner::*;
 pub use editor::*;
 pub use model::{
     ConfigUiApplyStatus, ConfigUiContractField, ConfigUiDiagnostic, ConfigUiEditBehavior,
-    ConfigUiField, ConfigUiFieldMetadata, ConfigUiFieldSpec, ConfigUiFileAction,
-    ConfigUiListColumn, ConfigUiListTable, ConfigUiMetadata, ConfigUiModel, ConfigUiNativeStatus,
-    ConfigUiPathOwner, ConfigUiSchemaField, ConfigUiSidecar, ConfigUiSource, ConfigUiTheme,
-    ConfigUiThemeMapping, ConfigUiThemeSwitcher, ConfigUiTomlDocumentRows,
-    ConfigUiTomlDocumentSpec, ConfigUiValueState, DEFAULT_CONFIG_SOURCE_ID,
-    NO_CONFIG_DEFAULT_VALUE_LABEL,
+    ConfigUiField, ConfigUiFieldCounts, ConfigUiFieldId, ConfigUiFieldMetadata, ConfigUiFieldSpec,
+    ConfigUiFileAction, ConfigUiListColumn, ConfigUiListTable, ConfigUiMetadata, ConfigUiModel,
+    ConfigUiNativeStatus, ConfigUiPathOwner, ConfigUiSchemaField, ConfigUiSettingsView,
+    ConfigUiSidecar, ConfigUiSource, ConfigUiTheme, ConfigUiThemeMapping, ConfigUiThemeSwitcher,
+    ConfigUiTomlDocumentRows, ConfigUiTomlDocumentSpec, ConfigUiValueState,
+    DEFAULT_CONFIG_SOURCE_ID, NO_CONFIG_DEFAULT_VALUE_LABEL,
 };
 pub use model::{
     UiRowRef, build_toml_document_fields, collect_config_ui_schema_fields,
     config_contract_fields_from_toml, config_ui_metadata_from_toml, effective_string_config,
-    effective_string_list_config, get_json_path, owner_label, render_json_edit_value,
-    render_json_value, schema_tabs, selected_config_source, string_list_values_from_json,
-    tab_index, toml_value_to_json, visible_rows_for_tab_search,
+    effective_string_list_config, field_counts_for_tab, get_json_path, owner_label,
+    render_json_edit_value, render_json_value, schema_tabs, selected_config_source,
+    string_list_values_from_json, tab_index, toml_value_to_json, visible_rows_for_tab_search,
+    visible_rows_for_tab_search_in_view,
 };
 #[cfg(feature = "ui")]
 pub use render::*;
