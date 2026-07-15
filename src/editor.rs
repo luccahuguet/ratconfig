@@ -5,7 +5,8 @@ use super::{
     UiRowRef, visible_rows_for_tab_search,
 };
 use crate::model::{
-    config_ui_theme_from_model, string_list_values_from_json, validate_string_choice_value,
+    UNSET_CONFIG_VALUE_LABEL, config_ui_theme_from_model, string_list_values_from_json,
+    validate_string_choice_value,
 };
 use serde_json::Value as JsonValue;
 use std::collections::BTreeSet;
@@ -729,7 +730,7 @@ fn default_field_value(field: &ConfigUiField) -> Option<JsonValue> {
 }
 
 pub fn edit_input_for_field(field: &ConfigUiField) -> String {
-    if field.current_value == "not set" {
+    if field.current_value == UNSET_CONFIG_VALUE_LABEL {
         if is_bool_field(field) {
             return "false".to_string();
         }

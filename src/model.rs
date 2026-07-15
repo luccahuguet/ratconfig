@@ -221,6 +221,7 @@ impl ConfigUiField {
 
 /// Display marker for manually constructed fields that do not have a default.
 pub const NO_CONFIG_DEFAULT_VALUE_LABEL: &str = "no default";
+pub(crate) const UNSET_CONFIG_VALUE_LABEL: &str = "not set";
 
 #[derive(Debug, Clone)]
 pub struct ConfigUiFieldSpec {
@@ -292,13 +293,13 @@ impl ConfigUiFieldSpec {
             current_value: current
                 .or(default)
                 .map(render_json_value)
-                .unwrap_or_else(|| "not set".to_string()),
+                .unwrap_or_else(|| UNSET_CONFIG_VALUE_LABEL.to_string()),
             edit_value: current
                 .or(default)
                 .map(render_json_edit_value)
                 .unwrap_or_default(),
             default_value: default
-                .map(render_json_value)
+                .map(render_json_edit_value)
                 .unwrap_or_else(|| NO_CONFIG_DEFAULT_VALUE_LABEL.to_string()),
             state,
             description: self.description,
@@ -793,7 +794,7 @@ fn toml_document_entry_field(
     };
     let current_value = effective
         .map(toml_document_render_value)
-        .unwrap_or_else(|| "not set".to_string());
+        .unwrap_or_else(|| UNSET_CONFIG_VALUE_LABEL.to_string());
     let edit_value = if editable {
         effective
             .map(toml_value_to_json)
@@ -1197,7 +1198,7 @@ pub fn render_json_value(value: &JsonValue) -> String {
         JsonValue::Null => "null".to_string(),
         JsonValue::Bool(value) => value.to_string(),
         JsonValue::Number(value) => value.to_string(),
-        JsonValue::String(value) => format!("{value:?}"),
+        JsonValue::String(_) => render_json_edit_value(value),
         JsonValue::Array(values) if values.len() <= 4 => {
             serde_json::to_string(values).expect("serde_json::Value arrays serialize")
         }
@@ -1406,9 +1407,9 @@ help = "Theme name"
         assert_eq!(metadata.fields["ui.theme"].help, "Theme name");
     }
 
-    // Defends: reusable field row construction marks explicit, defaulted, unset, and invalid states from host-provided values.
+    // Defends: reusable field rows derive state while keeping scalar value channels valid JSON.
     #[test]
-    fn field_row_builder_derives_neutral_value_state() {
+    fn field_row_builder_derives_state_and_json_scalar_values() {
         let current = json!("dark");
         let default = json!("light");
 
@@ -1432,6 +1433,19 @@ help = "Theme name"
 
         let invalid = spec(true).build("string", Some(&current), Some(&default));
         assert_eq!(invalid.state, ConfigUiValueState::Invalid);
+
+        let control_value = json!("\0");
+        let control_field = spec(false).build("string", Some(&control_value), Some(&control_value));
+        for rendered in [
+            &control_field.current_value,
+            &control_field.edit_value,
+            &control_field.default_value,
+        ] {
+            assert_eq!(
+                serde_json::from_str::<JsonValue>(rendered).expect("valid JSON value"),
+                control_value
+            );
+        }
     }
 
     // Defends: host policy fields pass through unchanged while the generic builder renders JSON safely.

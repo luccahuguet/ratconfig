@@ -1,10 +1,12 @@
 // Test lane: default
 use super::*;
+use crate::model::UNSET_CONFIG_VALUE_LABEL;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs, Wrap};
+use serde_json::Value as JsonValue;
 use std::collections::BTreeSet;
 
 const HEADER_HORIZONTAL_PADDING: u16 = 1;
@@ -690,11 +692,22 @@ fn field_style(field: &ConfigUiField, default: Style) -> Style {
 }
 
 pub fn default_field_detail_lines(field: &ConfigUiField) -> Vec<Line<'static>> {
+    let current = field_detail_value(field, &field.current_value, Some(&field.edit_value));
+    let has_default = field.has_default_value();
+    let default = if has_default {
+        field_detail_value(field, &field.default_value, None)
+    } else {
+        FieldDetailValue::Scalar(&field.default_value)
+    };
     let mut lines = field_title_lines(field);
+    lines.push(detail_line("state", state_label(field.state)));
+    lines.extend(field_detail_value_lines("current", &current));
+    if has_default && current == default {
+        lines.push(detail_line("default", "same as current"));
+    } else {
+        lines.extend(field_detail_value_lines("default", &default));
+    }
     lines.extend([
-        detail_line("state", state_label(field.state)),
-        detail_line("current", &field.current_value),
-        detail_line("default", &field.default_value),
         detail_line("type", &field.kind),
         detail_line("takes effect", &field.apply_status.label),
         detail_line("after save", &field.apply_status.detail),
@@ -712,6 +725,56 @@ pub fn default_field_detail_lines(field: &ConfigUiField) -> Vec<Line<'static>> {
         lines.push(Line::from(""));
         lines.push(Line::from(field.description.clone()));
     }
+    lines
+}
+
+#[derive(PartialEq)]
+enum FieldDetailValue<'a> {
+    Scalar(&'a str),
+    Structured(JsonValue),
+    StructuredFallback(&'a str),
+}
+
+fn structured_json(value: &str) -> Option<JsonValue> {
+    serde_json::from_str(value)
+        .ok()
+        .filter(|value| matches!(value, JsonValue::Array(_) | JsonValue::Object(_)))
+}
+
+fn field_detail_value<'a>(
+    field: &ConfigUiField,
+    fallback: &'a str,
+    preferred_json: Option<&str>,
+) -> FieldDetailValue<'a> {
+    if fallback == UNSET_CONFIG_VALUE_LABEL
+        || !matches!(field.kind.as_str(), "array" | "object" | "string_list")
+    {
+        return FieldDetailValue::Scalar(fallback);
+    }
+
+    match preferred_json
+        .and_then(structured_json)
+        .or_else(|| structured_json(fallback))
+    {
+        Some(value) => FieldDetailValue::Structured(value),
+        None => FieldDetailValue::StructuredFallback(fallback),
+    }
+}
+
+fn field_detail_value_lines(label: &str, value: &FieldDetailValue<'_>) -> Vec<Line<'static>> {
+    let value = match value {
+        FieldDetailValue::Scalar(value) => return vec![detail_line(label, value)],
+        FieldDetailValue::Structured(value) => {
+            serde_json::to_string_pretty(value).expect("serde_json::Value serializes")
+        }
+        FieldDetailValue::StructuredFallback(value) => value.to_string(),
+    };
+    let mut lines = vec![detail_line(label, "")];
+    lines.extend(
+        value
+            .lines()
+            .map(|line| styled_line(format!("  {line}"), metadata_value_style())),
+    );
     lines
 }
 
@@ -1261,6 +1324,7 @@ pub fn truncate_start(value: &str, limit: usize) -> String {
 mod tests {
     use super::*;
     use crate::test_support::{apply_status, field, model_with_fields};
+    use serde_json::json;
     use std::path::PathBuf;
 
     fn rendered_cells(line: &Line<'_>) -> Vec<String> {
@@ -1283,6 +1347,31 @@ mod tests {
 
     fn strings(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
+    }
+
+    fn built_field(
+        kind: &str,
+        current: Option<&serde_json::Value>,
+        default: Option<&serde_json::Value>,
+    ) -> ConfigUiField {
+        ConfigUiFieldSpec::new(
+            "settings",
+            "ui.test",
+            "general",
+            "",
+            Vec::new(),
+            "",
+            apply_status("after save", "Applied after saving."),
+        )
+        .build(kind, current, default)
+    }
+
+    fn detail_text(field: &ConfigUiField) -> String {
+        default_field_detail_lines(field)
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn set_list_table(model: &mut ConfigUiModel, tab: &str, columns: &[(&str, usize)]) {
@@ -1635,6 +1724,73 @@ mod tests {
             rendered_cells(&details[1]),
             vec!["path", "ui.pane_frames.rounded_corners"]
         );
+    }
+
+    // Defends: list previews stay compact while structured details retain every nested value and avoid repeating equal defaults.
+    #[test]
+    fn structured_field_details_are_complete_pretty_and_deduplicated() {
+        let long_value = "a deliberately long nested value that the detail paragraph can wrap without hiding its surrounding structure";
+        let current = json!({"nested": [{"message": long_value}, {"enabled": true}]});
+        let different_default = json!({"nested": [{"message": "short"}]});
+        let field = built_field("object", Some(&current), Some(&different_default));
+
+        let model = model_with_fields(vec![field]);
+        assert_eq!(
+            rendered_cells(&row_line_for_model(&model, UiRowRef::Field(0))),
+            vec!["after save", "ui.test", "{1 keys}"]
+        );
+
+        let details = detail_text(&model.fields[0]);
+        assert!(details.contains(&format!(
+            "current    \n  {{\n    \"nested\": [\n      {{\n        \"message\": \"{long_value}\""
+        )));
+        assert!(details.contains(
+            "default    \n  {\n    \"nested\": [\n      {\n        \"message\": \"short\""
+        ));
+        assert!(!details.contains("..."));
+
+        let values = json!([1, 2, 3, 4, 5]);
+        let same = built_field("array", Some(&values), Some(&values));
+        let same_details = detail_text(&same);
+
+        assert_eq!(same_details.matches("    1,").count(), 1);
+        assert!(same_details.contains("default    same as current"));
+    }
+
+    // Defends: non-structured details stay compact and TOML-only float values survive the structured fallback verbatim.
+    #[test]
+    fn detail_values_keep_markers_and_scalars_compact_and_special_toml_complete() {
+        let scalar = built_field("bool", Some(&json!(true)), Some(&json!(false)));
+        let scalar_details = default_field_detail_lines(&scalar)
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>();
+        assert!(scalar_details.iter().any(|line| line == "current    true"));
+        assert!(scalar_details.iter().any(|line| line == "default    false"));
+
+        let unset = built_field("array", None, None);
+        assert!(detail_text(&unset).contains("current    not set"));
+
+        let rows = build_toml_document_fields(ConfigUiTomlDocumentSpec {
+            source_id: "native",
+            tab: "native",
+            section_label: "",
+            current_toml: "limits = [inf, -inf, nan]",
+            default_toml: Some("limits = [nan]"),
+            validation: "",
+            rebuild_required: false,
+            apply_status: apply_status("after save", "Applied after saving."),
+        })
+        .expect("TOML document rows");
+        let field = rows
+            .fields
+            .iter()
+            .find(|field| field.path == "limits")
+            .expect("limits field");
+        let special_details = detail_text(field);
+
+        assert!(special_details.contains("current    \n  [inf, -inf, nan]"));
+        assert!(special_details.contains("default    \n  [nan]"));
     }
 
     // Defends: invalid field rows remain visibly exceptional even without the normal state column.
