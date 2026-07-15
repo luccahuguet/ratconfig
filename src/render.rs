@@ -4,6 +4,7 @@ use crate::model::UNSET_CONFIG_VALUE_LABEL;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::symbols::merge::MergeStrategy;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs, Wrap};
 use serde_json::Value as JsonValue;
@@ -25,6 +26,7 @@ const STATUS_ITEM_COLUMN_WIDTH: usize = 24;
 struct ConfigUiThemePalette {
     text: Color,
     muted: Color,
+    inactive_tab: Color,
     title: Color,
     accent: Color,
     success: Color,
@@ -40,6 +42,7 @@ fn config_ui_theme_palette(theme: ConfigUiTheme) -> ConfigUiThemePalette {
         ConfigUiTheme::Dark => ConfigUiThemePalette {
             text: Color::White,
             muted: Color::Gray,
+            inactive_tab: Color::Gray,
             title: Color::Cyan,
             accent: Color::Yellow,
             success: Color::Green,
@@ -52,6 +55,7 @@ fn config_ui_theme_palette(theme: ConfigUiTheme) -> ConfigUiThemePalette {
         ConfigUiTheme::Light => ConfigUiThemePalette {
             text: Color::Black,
             muted: Color::Rgb(62, 68, 78),
+            inactive_tab: Color::Black,
             title: Color::Rgb(0, 88, 132),
             accent: Color::Rgb(96, 64, 128),
             success: Color::Rgb(0, 100, 56),
@@ -307,11 +311,12 @@ fn header_metadata_line(
 }
 
 fn render_tabs(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect) {
+    let palette = config_ui_theme_palette(app.active_theme);
     frame.render_widget(
         Tabs::new(tab_labels(&app.model.tabs))
             .select(app.selected_tab)
-            .style(themed_style(fg_style(Color::Gray), app.active_theme))
-            .highlight_style(themed_style(bold_fg_style(Color::Yellow), app.active_theme)),
+            .style(fg_style(palette.inactive_tab))
+            .highlight_style(bold_fg_style(palette.accent)),
         area,
     );
 }
@@ -338,7 +343,8 @@ fn render_body(
 ) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .constraints([Constraint::Fill(1), Constraint::Fill(1)])
+        .spacing(-1)
         .split(area);
     let rows = app.visible_rows();
     app.clamp_selection_for_len(rows.len());
@@ -359,8 +365,8 @@ fn render_list(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect, rows: &[UiR
         format!("settings filtered by {}", app.search)
     };
     let block = Block::default()
-        .title(title)
-        .borders(Borders::ALL)
+        .title(themed_line(Line::from(title), app.active_theme))
+        .borders(Borders::LEFT | Borders::RIGHT)
         .border_style(border_style(app.active_theme));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -548,9 +554,10 @@ fn render_details(
         Paragraph::new(themed_lines(lines, app.active_theme))
             .block(
                 Block::default()
-                    .title("details")
-                    .borders(Borders::ALL)
-                    .border_style(border_style(app.active_theme)),
+                    .title(themed_line(Line::from("details"), app.active_theme))
+                    .borders(Borders::LEFT | Borders::RIGHT)
+                    .border_style(border_style(app.active_theme))
+                    .merge_borders(MergeStrategy::Exact),
             )
             .wrap(Wrap { trim: false }),
         area,
@@ -2040,6 +2047,7 @@ mod tests {
         ready.apply_status = apply_status("ready now", "Already active.");
         ready.apply_status.pending = false;
         let mut app = ConfigUiApp::new(model_with_fields(vec![invalid, ready]));
+        app.model.tabs.push("other".to_string());
         app.active_theme = ConfigUiTheme::Light;
 
         let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("test terminal");
@@ -2056,7 +2064,33 @@ mod tests {
         assert_eq!(rendered_cell(buffer, "Config").fg, palette.title);
         assert_eq!(rendered_cell(buffer, "state").fg, palette.metadata_key);
         assert_eq!(rendered_cell(buffer, "q quit").fg, palette.text);
-        assert_eq!(rendered_cell(buffer, "┌settings").fg, palette.border);
+        assert_eq!(buffer[(buffer.area.left(), 3)].fg, palette.border);
+        assert_eq!(rendered_cell(buffer, "settings").fg, Color::Black);
+        assert_eq!(rendered_cell(buffer, "details").fg, Color::Black);
+        assert_eq!(rendered_cell(buffer, "(1) general").fg, palette.accent);
+        assert_eq!(rendered_cell(buffer, "(2) other").fg, Color::Black);
+
+        let border_y = 20;
+        let vertical_borders = (buffer.area.left()..buffer.area.right())
+            .filter(|x| buffer[(*x, border_y)].symbol() == "│")
+            .count();
+        assert_eq!(buffer[(buffer.area.left(), border_y)].symbol(), "│");
+        assert_eq!(buffer[(buffer.area.right() - 1, border_y)].symbol(), "│");
+        assert_eq!(vertical_borders, 3);
+        for border_y in [3, 21] {
+            assert_eq!(
+                (buffer.area.left()..buffer.area.right())
+                    .filter(|x| buffer[(*x, border_y)].symbol() == "─")
+                    .count(),
+                0
+            );
+        }
+        assert!(
+            buffer
+                .content()
+                .iter()
+                .all(|cell| !matches!(cell.symbol(), "┬" | "┴"))
+        );
 
         for foreground in [
             palette.text,
