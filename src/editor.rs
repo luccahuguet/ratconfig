@@ -17,6 +17,11 @@ pub struct ConfigUiApp {
     pub active_theme: ConfigUiTheme,
     pub selected_tab: usize,
     pub selected_row: usize,
+    /// Current view outside active search.
+    ///
+    /// [`ConfigUiApp::new`] selects Core when the model contains a Core/All distinction. Models
+    /// whose views contain the same fields start in All. Normal-mode `a` toggles the view when the
+    /// selected tab has non-core fields. Search spans All without changing this saved view.
     pub settings_view: ConfigUiSettingsView,
     pub search: String,
     pub search_active: bool,
@@ -96,6 +101,9 @@ pub enum ConfigUiIntent {
 }
 
 impl ConfigUiApp {
+    /// Creates an editor and selects Core when the model contains non-core fields.
+    ///
+    /// Models with `core_fields: None` start in All because every field belongs to Core.
     pub fn new(model: ConfigUiModel) -> Self {
         let active_theme = config_ui_theme_from_model(&model);
         let settings_view = if model_has_non_core_fields(&model) {

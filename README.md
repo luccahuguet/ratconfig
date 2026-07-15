@@ -12,6 +12,7 @@ Example host integration in Yazelix: ratconfig owns the reusable tabs, rows, edi
 
 - generic config document and field model
 - tabs, visible rows, search, selection, notices, and edit state
+- Core and All visibility, per-tab counts, and search across a host-owned field inventory
 - optional host-supplied list table profiles for structured field tabs
 - staged bool toggles, scalar editing, single-select, multiselect, and default reset controls
 - host-routed file action rows and structured-field source shortcuts for native config files
@@ -25,7 +26,7 @@ Example host integration in Yazelix: ratconfig owns the reusable tabs, rows, edi
 ## What The Host Owns
 
 - loading defaults and user config
-- deciding which fields exist and how they are grouped
+- supplying the complete field inventory, choosing the Core allowlist, and grouping fields
 - validation and diagnostics
 - file IO and atomic writes
 - native config file creation and editor launching for file action rows
@@ -120,6 +121,29 @@ Hosts do not choose widths for the default list. Ratconfig sizes status and sett
 Fields with defaults expose a reset-to-default action that emits `ConfigUiIntent::UnsetField`. Hosts decide whether that means unsetting text, writing a default, validation, persistence, reloads, and apply behavior. Use `NO_CONFIG_DEFAULT_VALUE_LABEL` for manually constructed fields that have no default; builder helpers set it automatically
 
 Populate `ConfigUiModel::theme_switcher` when a committed field value should select a built-in Ratconfig theme. The switcher names one source id, one field path, and `serde_json::Value` mappings to `ConfigUiTheme::Dark` or `ConfigUiTheme::Light`; Ratconfig resolves the initial theme from model fields and switches after `ConfigUiApp::finish_successful_set_field_by_path()` or `ConfigUiApp::finish_successful_unset_field_by_path()` confirms a successful write of that source/path after any host reload. Failed host validation/writeback should not call those methods, so staged edits stay active and the theme does not change
+
+## Core And All Settings
+
+Hosts place the complete known inventory in `ConfigUiModel::fields`. Set `core_fields` to a positive allowlist of stable source/path identities when the UI should open with a focused Core view:
+
+```rust
+use ratconfig::{
+    ConfigUiFieldId, ConfigUiModel, DEFAULT_CONFIG_SOURCE_ID,
+};
+
+fn classify_core(model: &mut ConfigUiModel) {
+    model.core_fields = Some(vec![
+        ConfigUiFieldId::new(DEFAULT_CONFIG_SOURCE_ID, "core.debug"),
+        ConfigUiFieldId::new("editor", "theme"),
+    ]);
+}
+```
+
+Any field outside those identities is non-core while defaulted or unset. Ratconfig keeps explicit and invalid values in Core so active configuration and errors stay visible. `core_fields: None` treats every field as Core
+
+`ConfigUiApp` starts in Core when the model contains a Core/All distinction. It starts in All when both views contain the same fields. Normal-mode `a` toggles the selected tab between Core and All when that distinction exists. A non-empty search spans All fields without changing the saved view. The settings heading reports Core and total counts, and file actions plus advanced operational rows remain reachable in either view
+
+Generated TOML rows use the same identity contract. Hosts can classify fields returned by `build_toml_document_fields` with `ConfigUiFieldId::new(source_id, path)` without reconstructing the rows
 
 ## String-List Choices
 
@@ -224,7 +248,7 @@ When using the optional crossterm runner, the callback is invoked while the runn
 Hosts that want ratconfig to own the crossterm terminal setup, draw loop, event reads, and key conversion can enable the optional runner:
 
 ```toml
-ratconfig = { git = "https://github.com/luccahuguet/ratconfig", tag = "v4.0.0", features = ["crossterm-runner"] }
+ratconfig = { git = "https://github.com/luccahuguet/ratconfig", tag = "v5.0.0", features = ["crossterm-runner"] }
 ```
 
 ```rust,no_run
@@ -414,9 +438,9 @@ The public Ratconfig contract includes:
 
 Patch releases preserve that contract. Examples include renderer bug fixes, clearer docs, internal refactors, test changes, and behavior-preserving cleanup
 
-Minor releases add to that contract without breaking existing hosts. Examples include a new helper, an additive model field with a backwards-compatible default, a new optional feature flag, or additive documented behavior that keeps existing intents and patch semantics valid
+Minor releases add to that contract without breaking existing hosts. Examples include a new helper or type, a new optional feature flag, or additive documented behavior that keeps existing intents and patch semantics valid
 
-Major releases break or remove part of that contract. Examples include removing or renaming a public type, function, field, enum variant, or feature flag; changing `ConfigUiIntent` payload or reducer semantics in a way hosts can observe; changing TOML patch output semantics; changing migration/contract reconciliation rules; or raising the MSRV
+Major releases break or remove part of that contract. Examples include adding a required field to a directly constructed public struct; removing or renaming a public type, function, field, enum variant, or feature flag; changing `ConfigUiIntent` payload or reducer semantics in a way hosts can observe; changing TOML patch output semantics; changing migration/contract reconciliation rules; or raising the MSRV
 
 Before cutting a release:
 
@@ -427,6 +451,15 @@ Before cutting a release:
 - run feature checks when feature-gated behavior changes, such as `cargo test --no-default-features` and `cargo test --features crossterm-runner`
 - tag the release as `vX.Y.Z` after the version commit is ready
 - update downstream pinned-git consumers such as main Yazelix after the Ratconfig commit or tag is pushed
+
+### 5.0.0
+
+- `ConfigUiModel` adds the required `core_fields` field, and direct `ConfigUiApp` literals add the required `settings_view` field; `ConfigUiApp::new` selects the initial view from the model
+- Core includes allowlisted fields plus explicit and invalid configured values; All contains the host's complete inventory, non-empty search spans All without changing the saved view, and normal-mode `a` toggles views when the selected tab has a distinction
+- TOML patching, migrations, and contract-state reads share dotted-path validation and normalization while preserving operation and contract-change error context
+- Structured rows keep compact list previews while the details pane renders complete nested values and collapses equal defaults to `same as current`
+- Default field columns allocate spare width to values and measure ASCII, CJK text, and joined emoji in terminal cells
+- The light palette keeps semantic row colors readable; inactive tabs and pane headings use high-contrast text, and the borderless body uses padded content, a center gutter, and an inset tab separator
 
 ### 4.0.0
 

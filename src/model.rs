@@ -15,8 +15,12 @@ pub struct ConfigUiModel {
     pub tabs: Vec<String>,
     pub tab_list_tables: BTreeMap<String, ConfigUiListTable>,
     pub fields: Vec<ConfigUiField>,
-    /// Positive Core allowlist. `None` keeps every field in Core; explicit and invalid values
-    /// remain visible even when omitted from `Some`.
+    /// Host-owned positive Core allowlist, matched by source id and field path.
+    ///
+    /// `None` makes every field count as Core, so [`crate::ConfigUiApp`] starts in
+    /// [`ConfigUiSettingsView::All`] because there is no Core/All distinction. `Some` classifies
+    /// omitted defaulted or unset fields as non-core. Explicit and invalid values remain visible
+    /// and counted in Core even when omitted.
     pub core_fields: Option<Vec<ConfigUiFieldId>>,
     pub file_actions: Vec<ConfigUiFileAction>,
     pub sidecars: Vec<ConfigUiSidecar>,
@@ -25,13 +29,17 @@ pub struct ConfigUiModel {
     pub theme_switcher: Option<ConfigUiThemeSwitcher>,
 }
 
+/// Stable field identity used by [`ConfigUiModel::core_fields`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigUiFieldId {
+    /// Host-supplied config source id.
     pub source_id: String,
+    /// Stable field path within the source.
     pub path: String,
 }
 
 impl ConfigUiFieldId {
+    /// Creates a source/path identity for the Core allowlist.
     pub fn new(source_id: impl Into<String>, path: impl Into<String>) -> Self {
         Self {
             source_id: source_id.into(),
@@ -40,15 +48,21 @@ impl ConfigUiFieldId {
     }
 }
 
+/// Field visibility used outside active search.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigUiSettingsView {
+    /// The host allowlist plus explicit and invalid configured values.
     Core,
+    /// The complete field inventory supplied by the host.
     All,
 }
 
+/// Core and total field counts for one tab.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ConfigUiFieldCounts {
+    /// Allowlisted fields plus explicit and invalid configured values.
     pub core: usize,
+    /// Every host-supplied field on the tab.
     pub total: usize,
 }
 
@@ -109,6 +123,9 @@ pub enum UiRowRef {
     Diagnostic(usize),
 }
 
+/// Returns rows from the complete inventory for the selected tab and search.
+///
+/// Use [`visible_rows_for_tab_search_in_view`] when the caller needs Core filtering.
 pub fn visible_rows_for_tab_search(
     model: &ConfigUiModel,
     selected_tab: usize,
@@ -117,6 +134,11 @@ pub fn visible_rows_for_tab_search(
     visible_rows_for_tab_search_in_view(model, selected_tab, search, ConfigUiSettingsView::All)
 }
 
+/// Returns rows for one settings view.
+///
+/// A non-empty search spans the complete host inventory even when `view` is
+/// [`ConfigUiSettingsView::Core`]. Clearing the search restores the caller's chosen view.
+/// Advanced operational rows and file actions remain available in both views.
 pub fn visible_rows_for_tab_search_in_view(
     model: &ConfigUiModel,
     selected_tab: usize,
@@ -148,6 +170,10 @@ pub fn visible_rows_for_tab_search_in_view(
         .collect()
 }
 
+/// Counts Core and total fields on the selected tab.
+///
+/// Core includes host-allowlisted fields plus explicit and invalid configured values. Advanced
+/// operational tabs have zero field counts.
 pub fn field_counts_for_tab(model: &ConfigUiModel, selected_tab: usize) -> ConfigUiFieldCounts {
     let tab = tab_name(model, selected_tab);
     if tab == "advanced" {

@@ -541,7 +541,7 @@ dependencies = [
 
 [[package]]
 name = "ratconfig"
-version = "4.0.0"
+version = "5.0.0"
 dependencies = [
  "ratatui",
  "serde_json",
