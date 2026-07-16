@@ -22,13 +22,14 @@ pub use contract::*;
 pub use crossterm_runner::*;
 pub use editor::*;
 pub use model::{
-    ConfigUiApplyStatus, ConfigUiContractField, ConfigUiDiagnostic, ConfigUiEditBehavior,
-    ConfigUiField, ConfigUiFieldCounts, ConfigUiFieldId, ConfigUiFieldMetadata, ConfigUiFieldSpec,
-    ConfigUiFileAction, ConfigUiListColumn, ConfigUiListTable, ConfigUiMetadata, ConfigUiModel,
-    ConfigUiNativeStatus, ConfigUiPathOwner, ConfigUiSchemaField, ConfigUiSettingsView,
-    ConfigUiSidecar, ConfigUiSource, ConfigUiTheme, ConfigUiThemeMapping, ConfigUiThemeSwitcher,
-    ConfigUiTomlDocumentRows, ConfigUiTomlDocumentSpec, ConfigUiValueState,
-    DEFAULT_CONFIG_SOURCE_ID, NO_CONFIG_DEFAULT_VALUE_LABEL,
+    ConfigUiApplyStatus, ConfigUiContractField, ConfigUiDiagnostic, ConfigUiDiagnosticScope,
+    ConfigUiEditBehavior, ConfigUiField, ConfigUiFieldCounts, ConfigUiFieldId,
+    ConfigUiFieldMetadata, ConfigUiFieldSpec, ConfigUiFileAction, ConfigUiListColumn,
+    ConfigUiListTable, ConfigUiMetadata, ConfigUiModel, ConfigUiNativeStatus, ConfigUiPathOwner,
+    ConfigUiSchemaField, ConfigUiSettingsView, ConfigUiSidecar, ConfigUiSource, ConfigUiTheme,
+    ConfigUiThemeMapping, ConfigUiThemeSwitcher, ConfigUiTomlDocumentRows,
+    ConfigUiTomlDocumentSpec, ConfigUiValueState, DEFAULT_CONFIG_SOURCE_ID,
+    NO_CONFIG_DEFAULT_VALUE_LABEL,
 };
 pub use model::{
     UiRowRef, build_toml_document_fields, collect_config_ui_schema_fields,

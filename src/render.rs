@@ -106,6 +106,7 @@ impl ConfigUiApp {
         match row {
             UiRowRef::Field(index) => {
                 let field = &self.model.fields[index];
+                let state = self.model.effective_field_state(field);
                 if let Some(edit) = &self.edit
                     && edit.field_index == index
                 {
@@ -120,9 +121,9 @@ impl ConfigUiApp {
                     }
                 }
                 if is_scalar_enum_field(field) {
-                    return single_choice_field_detail_lines(field);
+                    return single_choice_field_detail_lines_with_state(field, state);
                 }
-                default_field_detail_lines(field)
+                field_detail_lines(field, state)
             }
             UiRowRef::Sidecar(index) => sidecar_detail_lines(&self.model.sidecars[index]),
             UiRowRef::FileAction(index) => {
@@ -632,10 +633,12 @@ fn row_line_for_layout(
 ) -> Line<'static> {
     match (row, layout) {
         (UiRowRef::Field(index), ListLayout::Table(table)) => {
-            list_table_row_line(table, &model.fields[index])
+            let field = &model.fields[index];
+            list_table_row_line(table, field, model.effective_field_state(field))
         }
         (UiRowRef::Field(index), layout) => {
             let field = &model.fields[index];
+            let state = model.effective_field_state(field);
             let widths = match layout {
                 ListLayout::Field(widths) => widths,
                 _ => DEFAULT_FIELD_COLUMN_WIDTHS,
@@ -645,9 +648,9 @@ fn row_line_for_layout(
                 &field.apply_status.summary,
                 apply_status_style(&field.apply_status),
                 field_display_label(field),
-                field_style(field, config_key_style()),
+                field_style(state, config_key_style()),
                 &field.current_value,
-                field_style(field, fg_style(Color::Gray)),
+                field_style(state, fg_style(Color::Gray)),
             )
         }
         (UiRowRef::Sidecar(index), _) => {
@@ -718,7 +721,11 @@ fn list_table_header_line(table: &ConfigUiListTable) -> Line<'static> {
         .collect()
 }
 
-fn list_table_row_line(table: &ConfigUiListTable, field: &ConfigUiField) -> Line<'static> {
+fn list_table_row_line(
+    table: &ConfigUiListTable,
+    field: &ConfigUiField,
+    state: ConfigUiValueState,
+) -> Line<'static> {
     table
         .columns
         .iter()
@@ -727,20 +734,24 @@ fn list_table_row_line(table: &ConfigUiListTable, field: &ConfigUiField) -> Line
             let cell = field.list_cells.get(index).map_or("", String::as_str);
             Span::styled(
                 list_table_cell(cell, column.width),
-                list_table_cell_style(field, index),
+                list_table_cell_style(field, state, index),
             )
         })
         .collect()
 }
 
-fn list_table_cell_style(field: &ConfigUiField, column_index: usize) -> Style {
+fn list_table_cell_style(
+    field: &ConfigUiField,
+    state: ConfigUiValueState,
+    column_index: usize,
+) -> Style {
     let default = match column_index {
         0 => apply_status_style(&field.apply_status),
         1 => config_key_style(),
         2 => metadata_value_style(),
         _ => fg_style(Color::Gray),
     };
-    field_style(field, default)
+    field_style(state, default)
 }
 
 fn list_table_cell(value: &str, width: usize) -> String {
@@ -846,15 +857,20 @@ fn field_title_lines(field: &ConfigUiField) -> Vec<Line<'static>> {
     lines
 }
 
-fn field_style(field: &ConfigUiField, default: Style) -> Style {
-    if field.state == ConfigUiValueState::Invalid {
-        state_style(field.state)
+fn field_style(state: ConfigUiValueState, default: Style) -> Style {
+    if state == ConfigUiValueState::Invalid {
+        state_style(state)
     } else {
         default
     }
 }
 
+/// Renders stored field state; use [`ConfigUiApp::render_details`] for scoped diagnostics.
 pub fn default_field_detail_lines(field: &ConfigUiField) -> Vec<Line<'static>> {
+    field_detail_lines(field, field.state)
+}
+
+fn field_detail_lines(field: &ConfigUiField, state: ConfigUiValueState) -> Vec<Line<'static>> {
     let current = field_detail_value(field, &field.current_value, Some(&field.edit_value));
     let has_default = field.has_default_value();
     let default = if has_default {
@@ -863,7 +879,7 @@ pub fn default_field_detail_lines(field: &ConfigUiField) -> Vec<Line<'static>> {
         FieldDetailValue::Scalar(&field.default_value)
     };
     let mut lines = field_title_lines(field);
-    lines.push(detail_line("state", state_label(field.state)));
+    lines.push(detail_line("state", state_label(state)));
     lines.extend(field_detail_value_lines("current", &current));
     if has_default && current == default {
         lines.push(detail_line("default", "same as current"));
@@ -941,10 +957,18 @@ fn field_detail_value_lines(label: &str, value: &FieldDetailValue<'_>) -> Vec<Li
     lines
 }
 
+/// Renders stored choice state; use [`ConfigUiApp::render_details`] for scoped diagnostics.
 pub fn single_choice_field_detail_lines(field: &ConfigUiField) -> Vec<Line<'static>> {
+    single_choice_field_detail_lines_with_state(field, field.state)
+}
+
+fn single_choice_field_detail_lines_with_state(
+    field: &ConfigUiField,
+    state: ConfigUiValueState,
+) -> Vec<Line<'static>> {
     let selected_value = parse_rendered_json_string(&field.current_value)
         .unwrap_or_else(|| field.current_value.clone());
-    let mut lines = default_field_detail_lines(field);
+    let mut lines = field_detail_lines(field, state);
     lines.push(Line::from(""));
     append_single_choice_options(&mut lines, field, &selected_value, None);
     lines
@@ -1120,6 +1144,18 @@ pub fn diagnostic_detail_lines(diagnostic: &ConfigUiDiagnostic) -> Vec<Line<'sta
         detail_line("status", &diagnostic.status),
         detail_line("blocking", if diagnostic.blocking { "yes" } else { "no" }),
     ];
+    match &diagnostic.scope {
+        ConfigUiDiagnosticScope::Global => lines.push(detail_line("scope", "global")),
+        ConfigUiDiagnosticScope::Source { source_id } => {
+            lines.push(detail_line("scope", "source"));
+            lines.push(detail_line("source", source_id));
+        }
+        ConfigUiDiagnosticScope::Field(identity) => {
+            lines.push(detail_line("scope", "field"));
+            lines.push(detail_line("source", &identity.source_id));
+            lines.push(detail_line("field", &identity.path));
+        }
+    }
     lines.push(Line::from(""));
     for detail in &diagnostic.detail_lines {
         lines.push(Line::from(detail.clone()));
@@ -2196,6 +2232,55 @@ mod tests {
             line.spans[2].style,
             state_style(ConfigUiValueState::Invalid)
         );
+    }
+
+    // Defends: model-derived diagnostic state reaches rows and scalar-choice details, while
+    // Advanced details identify the exact host-declared scope.
+    #[test]
+    fn scoped_blocker_renders_effective_field_state_and_scope() {
+        let mut model = test_model(ConfigUiValueState::Defaulted);
+        model.fields[0].kind = "string".to_string();
+        model.fields[0].allowed_values = strings(&["false", "true"]);
+        model.diagnostics.push(ConfigUiDiagnostic {
+            path: "core.debug_mode".to_string(),
+            status: "invalid".to_string(),
+            headline: "Invalid debug mode".to_string(),
+            blocking: true,
+            scope: ConfigUiDiagnosticScope::Field(ConfigUiFieldId::new(
+                DEFAULT_CONFIG_SOURCE_ID,
+                "core.debug_mode",
+            )),
+            detail_lines: Vec::new(),
+        });
+        let mut app = ConfigUiApp::new(model);
+
+        let row = row_line_for_model(&app.model, UiRowRef::Field(0));
+        assert_eq!(row.spans[1].style, state_style(ConfigUiValueState::Invalid));
+        assert!(
+            app.render_details(UiRowRef::Field(0))
+                .iter()
+                .any(|line| rendered_text(line) == "state      invalid")
+        );
+
+        let diagnostic_details = |app: &ConfigUiApp| {
+            app.render_details(UiRowRef::Diagnostic(0))
+                .iter()
+                .map(rendered_text)
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert!(
+            diagnostic_details(&app)
+                .contains("scope      field\nsource     config\nfield      core.debug_mode")
+        );
+
+        app.model.diagnostics[0].scope = ConfigUiDiagnosticScope::Source {
+            source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
+        };
+        assert!(diagnostic_details(&app).contains("scope      source\nsource     config"));
+
+        app.model.diagnostics[0].scope = ConfigUiDiagnosticScope::Global;
+        assert!(diagnostic_details(&app).contains("scope      global"));
     }
 
     // Defends: light roles stay readable while the borderless body keeps its spacing hierarchy.

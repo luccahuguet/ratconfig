@@ -29,7 +29,7 @@ pub struct ConfigUiModel {
     pub theme_switcher: Option<ConfigUiThemeSwitcher>,
 }
 
-/// Stable field identity used by [`ConfigUiModel::core_fields`].
+/// Stable field identity used by Core allowlists and field-scoped diagnostics.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigUiFieldId {
     /// Host-supplied config source id.
@@ -39,7 +39,7 @@ pub struct ConfigUiFieldId {
 }
 
 impl ConfigUiFieldId {
-    /// Creates a source/path identity for the Core allowlist.
+    /// Creates a source/path field identity.
     pub fn new(source_id: impl Into<String>, path: impl Into<String>) -> Self {
         Self {
             source_id: source_id.into(),
@@ -196,7 +196,7 @@ fn tab_name(model: &ConfigUiModel, selected_tab: usize) -> &str {
 
 fn field_is_visible_in_core(model: &ConfigUiModel, field: &ConfigUiField) -> bool {
     matches!(
-        field.state,
+        model.effective_field_state(field),
         ConfigUiValueState::Explicit | ConfigUiValueState::Invalid
     ) || model.core_fields.as_ref().is_none_or(|core_fields| {
         core_fields
@@ -333,7 +333,6 @@ pub struct ConfigUiFieldSpec {
     pub validation: String,
     pub rebuild_required: bool,
     pub apply_status: ConfigUiApplyStatus,
-    pub has_blocking_diagnostic: bool,
     pub edit_behavior: ConfigUiEditBehavior,
 }
 
@@ -359,7 +358,6 @@ impl ConfigUiFieldSpec {
             validation: validation.into(),
             rebuild_required: false,
             apply_status,
-            has_blocking_diagnostic: false,
             edit_behavior: ConfigUiEditBehavior::Default,
         }
     }
@@ -370,9 +368,7 @@ impl ConfigUiFieldSpec {
         current: Option<&JsonValue>,
         default: Option<&JsonValue>,
     ) -> ConfigUiField {
-        let state = if self.has_blocking_diagnostic {
-            ConfigUiValueState::Invalid
-        } else if current.is_some() {
+        let state = if current.is_some() {
             ConfigUiValueState::Explicit
         } else if default.is_some() {
             ConfigUiValueState::Defaulted
@@ -533,7 +529,48 @@ pub struct ConfigUiDiagnostic {
     pub status: String,
     pub headline: String,
     pub blocking: bool,
+    /// Host-declared routing for this diagnostic.
+    pub scope: ConfigUiDiagnosticScope,
     pub detail_lines: Vec<String>,
+}
+
+/// Host-declared routing target for a diagnostic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigUiDiagnosticScope {
+    /// Every field in the model.
+    Global,
+    /// Every field from one config source.
+    Source { source_id: String },
+    /// One exact source/path identity.
+    Field(ConfigUiFieldId),
+}
+
+impl ConfigUiModel {
+    /// Returns the field's stored state with matching blocking diagnostics applied.
+    ///
+    /// Nonblocking diagnostics never change field state. Hosts remain responsible for
+    /// classifying diagnostics and deciding whether a write is safe.
+    pub fn effective_field_state(&self, field: &ConfigUiField) -> ConfigUiValueState {
+        if field.state == ConfigUiValueState::Invalid
+            || self.diagnostics.iter().any(|diagnostic| {
+                diagnostic.blocking
+                    && match &diagnostic.scope {
+                        ConfigUiDiagnosticScope::Global => true,
+                        ConfigUiDiagnosticScope::Source { source_id } => {
+                            field.source_id == source_id.as_str()
+                        }
+                        ConfigUiDiagnosticScope::Field(identity) => {
+                            field.source_id == identity.source_id.as_str()
+                                && field.path == identity.path.as_str()
+                        }
+                    }
+            })
+        {
+            ConfigUiValueState::Invalid
+        } else {
+            field.state
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1311,7 +1348,7 @@ pub fn render_json_edit_value(value: &JsonValue) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{apply_status, field, model_with_fields};
+    use crate::test_support::{apply_status, field, field_with_source, model_with_fields};
     use serde_json::json;
 
     fn status() -> ConfigUiApplyStatus {
@@ -1381,19 +1418,16 @@ mod tests {
         assert!(selected_config_source(&model, 2).is_none());
     }
 
-    fn spec(has_blocking_diagnostic: bool) -> ConfigUiFieldSpec {
-        ConfigUiFieldSpec {
-            has_blocking_diagnostic,
-            ..ConfigUiFieldSpec::new(
-                DEFAULT_CONFIG_SOURCE_ID,
-                "ui.theme",
-                "general",
-                "Theme name",
-                vec!["light".to_string(), "dark".to_string()],
-                "must be a known theme",
-                status(),
-            )
-        }
+    fn spec() -> ConfigUiFieldSpec {
+        ConfigUiFieldSpec::new(
+            DEFAULT_CONFIG_SOURCE_ID,
+            "ui.theme",
+            "general",
+            "Theme name",
+            vec!["light".to_string(), "dark".to_string()],
+            "must be a known theme",
+            status(),
+        )
     }
 
     // Defends: schema tab extraction is reusable and always includes the advanced operational tab.
@@ -1511,29 +1545,26 @@ help = "Theme name"
         let current = json!("dark");
         let default = json!("light");
 
-        let explicit = spec(false).build("string", Some(&current), Some(&default));
+        let explicit = spec().build("string", Some(&current), Some(&default));
         assert_eq!(explicit.state, ConfigUiValueState::Explicit);
         assert_eq!(explicit.current_value, "\"dark\"");
         assert_eq!(explicit.edit_value, "\"dark\"");
         assert_eq!(explicit.default_value, "\"light\"");
         assert!(explicit.has_default_value());
 
-        let defaulted = spec(false).build("string", None, Some(&default));
+        let defaulted = spec().build("string", None, Some(&default));
         assert_eq!(defaulted.state, ConfigUiValueState::Defaulted);
         assert_eq!(defaulted.current_value, "\"light\"");
         assert!(defaulted.has_default_value());
 
-        let unset = spec(false).build("string", None, None);
+        let unset = spec().build("string", None, None);
         assert_eq!(unset.state, ConfigUiValueState::Unset);
         assert_eq!(unset.current_value, "not set");
         assert_eq!(unset.default_value, NO_CONFIG_DEFAULT_VALUE_LABEL);
         assert!(!unset.has_default_value());
 
-        let invalid = spec(true).build("string", Some(&current), Some(&default));
-        assert_eq!(invalid.state, ConfigUiValueState::Invalid);
-
         let control_value = json!("\0");
-        let control_field = spec(false).build("string", Some(&control_value), Some(&control_value));
+        let control_field = spec().build("string", Some(&control_value), Some(&control_value));
         for rendered in [
             &control_field.current_value,
             &control_field.edit_value,
@@ -1984,7 +2015,7 @@ empty = []
             sources: Vec::new(),
             tabs: vec!["general".to_string(), "advanced".to_string()],
             tab_list_tables: BTreeMap::new(),
-            fields: vec![spec(false).build("string", None, None)],
+            fields: vec![spec().build("string", None, None)],
             core_fields: None,
             file_actions: vec![
                 file_action("general", "Prompt config"),
@@ -2059,6 +2090,77 @@ empty = []
             field_counts_for_tab(&model, 0),
             ConfigUiFieldCounts { core: 3, total: 4 }
         );
+    }
+
+    // Defends: host-declared diagnostic scope invalidates only matching fields, while opaque
+    // nonblocking diagnostics stay visible without changing known field state.
+    #[test]
+    fn scoped_diagnostics_derive_field_state_without_cross_source_leaks() {
+        use crate::{ConfigUiApp, ConfigUiIntent, ConfigUiKey};
+        use ConfigUiValueState::{Defaulted, Invalid};
+
+        let mut source_a_one = field_with_source("source-a", "known.one", "string", "one", &[]);
+        let mut source_a_two = field_with_source("source-a", "known.two", "string", "two", &[]);
+        let mut source_b_one = field_with_source("source-b", "known.one", "string", "one", &[]);
+        for field in [&mut source_a_one, &mut source_a_two, &mut source_b_one] {
+            field.state = Defaulted;
+        }
+        let mut model = model_with_fields(vec![source_a_one, source_a_two, source_b_one]);
+        model.tabs.push("advanced".to_string());
+        model.core_fields = Some(Vec::new());
+        let diagnostic = |blocking, scope| ConfigUiDiagnostic {
+            path: "opaque.native".to_string(),
+            status: if blocking { "invalid" } else { "preserved" }.to_string(),
+            headline: "Native entry diagnostic".to_string(),
+            blocking,
+            scope,
+            detail_lines: Vec::new(),
+        };
+        model.diagnostics.push(diagnostic(
+            false,
+            ConfigUiDiagnosticScope::Field(ConfigUiFieldId::new("source-a", "opaque.native")),
+        ));
+        let states = |model: &ConfigUiModel| {
+            model
+                .fields
+                .iter()
+                .map(|field| model.effective_field_state(field))
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(states(&model), vec![Defaulted; 3]);
+        assert!(
+            visible_rows_for_tab_search_in_view(&model, 0, "", ConfigUiSettingsView::Core)
+                .is_empty()
+        );
+        assert_eq!(
+            visible_rows_for_tab_search(&model, 1, ""),
+            vec![UiRowRef::Diagnostic(0)]
+        );
+        let mut app = ConfigUiApp::new(model.clone());
+        app.settings_view = ConfigUiSettingsView::All;
+        assert!(matches!(
+            app.handle_key(ConfigUiKey::Enter),
+            ConfigUiIntent::BeginEdit { field_index: 0, .. }
+        ));
+
+        model.diagnostics.push(diagnostic(
+            true,
+            ConfigUiDiagnosticScope::Field(ConfigUiFieldId::new("source-a", "known.one")),
+        ));
+        assert_eq!(states(&model), vec![Invalid, Defaulted, Defaulted]);
+        assert_eq!(
+            visible_rows_for_tab_search_in_view(&model, 0, "", ConfigUiSettingsView::Core),
+            vec![UiRowRef::Field(0)]
+        );
+
+        model.diagnostics[1].scope = ConfigUiDiagnosticScope::Source {
+            source_id: "source-a".to_string(),
+        };
+        assert_eq!(states(&model), vec![Invalid, Invalid, Defaulted]);
+
+        model.diagnostics[1].scope = ConfigUiDiagnosticScope::Global;
+        assert_eq!(states(&model), vec![Invalid; 3]);
     }
 
     // Defends: omitting the allowlist preserves all-core compatibility, including empty tabs.

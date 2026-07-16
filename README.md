@@ -59,7 +59,7 @@ fn model() -> ConfigUiModel {
             owner: ConfigUiPathOwner::User,
             read_only: false,
         }],
-        tabs: vec!["general".to_string()],
+        tabs: vec!["general".to_string(), "advanced".to_string()],
         tab_list_tables: std::collections::BTreeMap::new(),
         fields: vec![ConfigUiField {
             source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
@@ -144,6 +144,47 @@ Any field outside those identities is non-core while defaulted or unset. Ratconf
 `ConfigUiApp` starts in Core when the model contains a Core/All distinction. It starts in All when both views contain the same fields. Normal-mode `a` toggles the selected tab between Core and All when that distinction exists. A non-empty search spans All fields without changing the saved view. The settings heading reports Core and total counts, and file actions plus advanced operational rows remain reachable in either view
 
 Generated TOML rows use the same identity contract. Hosts can classify fields returned by `build_toml_document_fields` with `ConfigUiFieldId::new(source_id, path)` without reconstructing the rows
+
+## Scoped Diagnostics
+
+Hosts classify every diagnostic as blocking or nonblocking and scope it globally, to one source, or to one exact `ConfigUiFieldId`. Ratconfig combines that declaration with each field's stored state through `ConfigUiModel::effective_field_state`. A matching blocking diagnostic renders the field as invalid and keeps it visible in Core; a nonblocking diagnostic remains visible on the Advanced tab without changing any field state. `schema_tabs` includes the reserved `advanced` tab; manually assembled models must include it in `tabs` for diagnostics to be reachable
+
+Use a nonblocking diagnostic for an opaque native entry that the host can preserve safely. Use field scope for one known invalid setting, source scope when one document is unsafe as a whole, and global scope only when every field is affected:
+
+```rust
+use ratconfig::{
+    ConfigUiDiagnostic, ConfigUiDiagnosticScope, ConfigUiFieldId, ConfigUiModel,
+};
+
+fn report_preserved_entry(model: &mut ConfigUiModel) {
+    model.diagnostics.push(ConfigUiDiagnostic {
+        path: "plugins.opaque-native-entry".to_string(),
+        status: "preserved".to_string(),
+        headline: "Unmodeled native entry is preserved".to_string(),
+        blocking: false,
+        scope: ConfigUiDiagnosticScope::Field(ConfigUiFieldId::new(
+            "native-config",
+            "plugins.opaque-native-entry",
+        )),
+        detail_lines: vec!["The host leaves this entry unchanged when saving.".to_string()],
+    });
+}
+
+fn report_unsafe_source(model: &mut ConfigUiModel) {
+    model.diagnostics.push(ConfigUiDiagnostic {
+        path: "native-config".to_string(),
+        status: "invalid".to_string(),
+        headline: "The native document cannot be updated safely".to_string(),
+        blocking: true,
+        scope: ConfigUiDiagnosticScope::Source {
+            source_id: "native-config".to_string(),
+        },
+        detail_lines: Vec::new(),
+    });
+}
+```
+
+Diagnostic scope routes state; it does not infer validity from `path`, parse a native format, preserve text, or authorize a write. Hosts remain responsible for deciding whether an opaque entry is valid, whether malformed input blocks a field or source, and whether a save is safe
 
 ## String-List Choices
 
