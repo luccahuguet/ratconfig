@@ -282,9 +282,9 @@ Ratconfig still does not infer product labels, schema validation, file layering,
 
 Populate `ConfigUiModel::file_actions` when the UI should show rows for host-owned native config files. Ratconfig renders label, path, state labels including `existing`, neutral `absent`, `read-only`, and `error`, plus the create-if-missing affordance, then emits `ConfigUiIntent::OpenFile` from the action row or the uniquely owned structured-field shortcut. Hosts still own file discovery, creation, editor launch, validation, reloads, and all file IO
 
-While a text field is being edited, `Ctrl+e` emits `ConfigUiIntent::EditTextExternally`. The intent carries the field index, source id, path, and staged input buffer. Hosts can write that input to a temporary file, open the user's editor, read the edited text back, apply any host-owned newline or multiline policy, then call `ConfigUiApp::apply_external_text_edit`. Ratconfig does not spawn editors, create temporary files, or save automatically; `Enter` still emits `SetField` and `Esc` still cancels the staged edit
+For a field using Ratconfig's free-form text mode, normal-mode `Enter` starts inline editing while `e` starts the same staged edit and immediately emits `ConfigUiIntent::EditTextExternally`. Inline editing supports grapheme-safe Left/Right movement, Home/End, Backspace/Delete, insertion and single-line paste at the cursor, and `Ctrl+u` to clear. `Ctrl+e` externalizes an edit already in progress. The external intent carries the field index, source id, path, and exact staged input buffer. Hosts can write that input to a temporary file, open the user's editor, read the edited text back, apply any host-owned newline or multiline policy, then call `ConfigUiApp::apply_external_text_edit`. Ratconfig does not spawn editors, create temporary files, or save automatically; `Enter` emits `SetField` and `Esc` cancels the staged edit
 
-When using the optional crossterm runner, the callback is invoked while the runner's terminal session is active; hosts that launch a full-screen editor must own any terminal restore/re-entry policy themselves, or use the lower-level editor/render APIs and own the event loop
+The optional crossterm runner enables bracketed paste and translates its key and paste events into Ratconfig's reducer vocabulary. Its callback is invoked while the runner's terminal session is active; hosts that launch a full-screen editor must own any terminal restore/re-entry policy themselves, or use the lower-level editor/render APIs and own the event loop
 
 Hosts that want ratconfig to own the crossterm terminal setup, draw loop, event reads, and key conversion can enable the optional runner:
 
@@ -492,6 +492,13 @@ Before cutting a release:
 - run feature checks when feature-gated behavior changes, such as `cargo test --no-default-features` and `cargo test --features crossterm-runner`
 - tag the release as `vX.Y.Z` after the version commit is ready
 - update downstream pinned-git consumers such as main Yazelix after the Ratconfig commit or tag is pushed
+
+### 6.0.0 (unreleased)
+
+- `ConfigUiDiagnostic` adds required global/source/field scope, and effective field validity is derived from matching blocking diagnostics instead of a duplicate field-spec flag
+- `ConfigUiEditState` adds a required grapheme-boundary cursor; `ConfigUiKey` adds Home, End, Delete, and owned paste input and is no longer `Copy`
+- Free-form fields use `Enter` for cursor-aware single-line editing and normal-mode `e` for the host-owned external editor; choice controls remain native
+- The outer-borderless body uses padded content, a single center divider, and an inset tab separator
 
 ### 5.0.0
 

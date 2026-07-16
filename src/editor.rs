@@ -11,6 +11,7 @@ use crate::model::{
 use serde_json::Value as JsonValue;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use unicode_segmentation::UnicodeSegmentation;
 
 pub struct ConfigUiApp {
     pub model: ConfigUiModel,
@@ -41,6 +42,8 @@ pub struct ConfigUiEditState {
     pub input: String,
     pub mode: ConfigUiEditMode,
     pub choice_index: usize,
+    /// Byte offset at a grapheme boundary within `input`; used by text edits only.
+    pub cursor: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,11 +53,14 @@ pub enum ConfigUiEditMode {
     MultiChoice,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigUiKey {
     Esc,
     Enter,
     Backspace,
+    Delete,
+    Home,
+    End,
     Tab,
     BackTab,
     Up,
@@ -62,6 +68,7 @@ pub enum ConfigUiKey {
     Left,
     Right,
     Char(char),
+    Paste(String),
     Ctrl(char),
 }
 
@@ -98,6 +105,75 @@ pub enum ConfigUiIntent {
         source_id: String,
         path: String,
     },
+}
+
+pub(crate) fn grapheme_boundary_at_or_before(input: &str, index: usize) -> usize {
+    let index = index.min(input.len());
+    if index == input.len() {
+        return index;
+    }
+    input
+        .grapheme_indices(true)
+        .map(|(start, _)| start)
+        .take_while(|start| *start <= index)
+        .last()
+        .unwrap_or(0)
+}
+
+fn grapheme_boundary_at_or_after(input: &str, index: usize) -> usize {
+    let index = index.min(input.len());
+    input
+        .grapheme_indices(true)
+        .map(|(start, _)| start)
+        .find(|start| *start >= index)
+        .unwrap_or(input.len())
+}
+
+fn previous_grapheme_boundary(input: &str, cursor: usize) -> usize {
+    let cursor = grapheme_boundary_at_or_before(input, cursor);
+    input[..cursor]
+        .grapheme_indices(true)
+        .next_back()
+        .map_or(0, |(start, _)| start)
+}
+
+fn next_grapheme_boundary(input: &str, cursor: usize) -> usize {
+    let cursor = grapheme_boundary_at_or_before(input, cursor);
+    input[cursor..]
+        .graphemes(true)
+        .next()
+        .map_or(cursor, |grapheme| cursor + grapheme.len())
+}
+
+fn move_cursor_left(edit: &mut ConfigUiEditState) {
+    edit.cursor = previous_grapheme_boundary(&edit.input, edit.cursor);
+}
+
+fn move_cursor_right(edit: &mut ConfigUiEditState) {
+    edit.cursor = next_grapheme_boundary(&edit.input, edit.cursor);
+}
+
+fn backspace_grapheme(edit: &mut ConfigUiEditState) {
+    let start = previous_grapheme_boundary(&edit.input, edit.cursor);
+    edit.input.drain(start..edit.cursor);
+    edit.cursor = start;
+}
+
+fn delete_grapheme(edit: &mut ConfigUiEditState) {
+    let end = next_grapheme_boundary(&edit.input, edit.cursor);
+    edit.input.drain(edit.cursor..end);
+}
+
+fn insert_char(edit: &mut ConfigUiEditState, ch: char) {
+    let cursor = edit.cursor;
+    edit.input.insert(cursor, ch);
+    edit.cursor = grapheme_boundary_at_or_after(&edit.input, cursor + ch.len_utf8());
+}
+
+fn insert_at_cursor(edit: &mut ConfigUiEditState, text: &str) {
+    let cursor = edit.cursor;
+    edit.input.insert_str(cursor, text);
+    edit.cursor = grapheme_boundary_at_or_after(&edit.input, cursor + text.len());
 }
 
 impl ConfigUiApp {
@@ -272,11 +348,13 @@ impl ConfigUiApp {
             return;
         }
         let input = edit_input_for_field(field);
+        let cursor = input.len();
         self.edit = Some(ConfigUiEditState {
             field_index,
             choice_index: initial_edit_choice_index(field, &input),
             input,
             mode: edit_mode_for_field(field),
+            cursor,
         });
     }
 
@@ -384,6 +462,7 @@ impl ConfigUiApp {
         }
 
         edit.input = input.into();
+        edit.cursor = edit.input.len();
         self.notice = None;
         Ok(())
     }
@@ -394,25 +473,42 @@ impl ConfigUiApp {
         ConfigUiIntent::None
     }
 
-    fn update_edit_input<T>(&mut self, update: impl FnOnce(&mut String) -> T) -> ConfigUiIntent {
+    fn update_text_edit(&mut self, update: impl FnOnce(&mut ConfigUiEditState)) -> ConfigUiIntent {
         self.notice = None;
         if let Some(edit) = &mut self.edit {
-            update(&mut edit.input);
+            edit.cursor = grapheme_boundary_at_or_before(&edit.input, edit.cursor);
+            update(edit);
         }
         ConfigUiIntent::None
+    }
+
+    fn insert_inline_text(&mut self, text: String) -> ConfigUiIntent {
+        if text.contains(['\r', '\n']) {
+            self.notice_error(
+                "Inline editing accepts one line; use the external editor for multiline text.",
+            );
+            return ConfigUiIntent::None;
+        }
+        self.update_text_edit(|edit| insert_at_cursor(edit, &text))
     }
 
     fn handle_search_key(&mut self, key: ConfigUiKey) {
         match key {
             ConfigUiKey::Esc | ConfigUiKey::Enter => self.search_active = false,
             ConfigUiKey::Backspace => {
-                self.search.pop();
+                let end = previous_grapheme_boundary(&self.search, self.search.len());
+                self.search.truncate(end);
             }
             ConfigUiKey::Ctrl('u' | 'U') => {
                 self.search.clear();
             }
+            ConfigUiKey::Char('\r' | '\n') => {}
             ConfigUiKey::Char(ch) => {
                 self.search.push(ch);
+                self.selected_row = 0;
+            }
+            ConfigUiKey::Paste(text) if !text.contains(['\r', '\n']) => {
+                self.search.push_str(&text);
                 self.selected_row = 0;
             }
             _ => {}
@@ -488,9 +584,19 @@ impl ConfigUiApp {
             ConfigUiKey::Esc => self.cancel_edit(),
             ConfigUiKey::Enter => self.save_edit(),
             ConfigUiKey::Ctrl('e' | 'E') => self.edit_text_externally(),
-            ConfigUiKey::Backspace => self.update_edit_input(String::pop),
-            ConfigUiKey::Ctrl('u' | 'U') => self.update_edit_input(String::clear),
-            ConfigUiKey::Char(ch) => self.update_edit_input(|input| input.push(ch)),
+            ConfigUiKey::Left => self.update_text_edit(move_cursor_left),
+            ConfigUiKey::Right => self.update_text_edit(move_cursor_right),
+            ConfigUiKey::Home => self.update_text_edit(|edit| edit.cursor = 0),
+            ConfigUiKey::End => self.update_text_edit(|edit| edit.cursor = edit.input.len()),
+            ConfigUiKey::Backspace => self.update_text_edit(backspace_grapheme),
+            ConfigUiKey::Delete => self.update_text_edit(delete_grapheme),
+            ConfigUiKey::Ctrl('u' | 'U') => self.update_text_edit(|edit| {
+                edit.input.clear();
+                edit.cursor = 0;
+            }),
+            ConfigUiKey::Char(ch @ ('\r' | '\n')) => self.insert_inline_text(ch.to_string()),
+            ConfigUiKey::Char(ch) => self.update_text_edit(|edit| insert_char(edit, ch)),
+            ConfigUiKey::Paste(text) => self.insert_inline_text(text),
             _ => ConfigUiIntent::None,
         }
     }
@@ -570,6 +676,7 @@ impl ConfigUiApp {
             } else {
                 "true".to_string()
             };
+            edit.cursor = edit.input.len();
         }
     }
 
@@ -601,6 +708,7 @@ impl ConfigUiApp {
             return;
         };
         edit.input = value.clone();
+        edit.cursor = edit.input.len();
     }
 
     fn toggle_multi_choice_edit(&mut self) {
@@ -637,6 +745,7 @@ impl ConfigUiApp {
         };
         if let Some(edit) = &mut self.edit {
             edit.input = next;
+            edit.cursor = edit.input.len();
             if let Some(value) = selected
                 && let Some(index) = string_list_choice_index(field, &edit.input, &value)
             {
@@ -665,6 +774,12 @@ impl ConfigUiApp {
         }
         if let Some((index, _)) = self.selected_structured_file_action() {
             return self.activate_file_action(index);
+        }
+        if let Some(field_index) = self.selected_field_index()
+            && edit_mode_for_field(&self.model.fields[field_index]) == ConfigUiEditMode::Text
+        {
+            self.begin_edit_field(field_index);
+            return self.edit_text_externally();
         }
         self.begin_edit_selected_field()
     }
@@ -755,21 +870,22 @@ impl ConfigUiApp {
     }
 
     fn save_edit(&mut self) -> ConfigUiIntent {
-        let Some(edit) = self.edit.clone() else {
+        let Some(edit) = self.edit.as_ref() else {
             return ConfigUiIntent::None;
         };
-        let field = self.model.fields[edit.field_index].clone();
-        let value = match parse_edit_input(&field, &edit.input) {
+        let field_index = edit.field_index;
+        let value = match parse_edit_input(&self.model.fields[field_index], &edit.input) {
             Ok(value) => value,
             Err(message) => {
                 self.notice_error(message);
                 return ConfigUiIntent::None;
             }
         };
+        let field = &self.model.fields[field_index];
         ConfigUiIntent::SetField {
-            field_index: edit.field_index,
-            source_id: field.source_id,
-            path: field.path,
+            field_index,
+            source_id: field.source_id.clone(),
+            path: field.path.clone(),
             value,
         }
     }
@@ -1280,13 +1396,14 @@ theme = "light"
         app.selected_row = 1;
         assert_eq!(
             app.handle_key(ConfigUiKey::Char('e')),
-            ConfigUiIntent::BeginEdit {
+            ConfigUiIntent::EditTextExternally {
                 field_index: 1,
                 source_id: "ui".to_string(),
                 path: "ui.title".to_string(),
+                input: "light".to_string(),
             }
         );
-        app.begin_edit_field(1);
+        assert_eq!(app.edit.as_ref().expect("text edit").cursor, "light".len());
         app.edit.as_mut().expect("edit").input = "temporary".to_string();
         assert_eq!(app.handle_key(ConfigUiKey::Ctrl('U')), ConfigUiIntent::None);
         assert!(app.edit.as_ref().expect("edit").input.is_empty());
@@ -1445,7 +1562,7 @@ theme = "light"
         assert!(app.edit.is_some());
     }
 
-    // Defends: text edit mode can delegate the staged buffer to a host-owned editor without making Ratconfig launch one.
+    // Defends: e opens free-form fields directly in the host editor, while Ctrl+e can externalize an inline staged buffer.
     #[test]
     fn text_edit_mode_emits_external_editor_intent_with_staged_input() {
         let mut model = test_model();
@@ -1459,9 +1576,20 @@ theme = "light"
 
         app.begin_edit_field(1);
         assert_eq!(app.handle_key(ConfigUiKey::Ctrl('e')), ConfigUiIntent::None);
+        app.handle_key(ConfigUiKey::Esc);
 
-        app.begin_edit_field(0);
-        app.edit.as_mut().expect("text edit").input = "temporary title".to_string();
+        assert_eq!(
+            app.handle_key(ConfigUiKey::Char('e')),
+            ConfigUiIntent::EditTextExternally {
+                field_index: 0,
+                source_id: "ui".to_string(),
+                path: "ui.title".to_string(),
+                input: "light".to_string(),
+            }
+        );
+        let edit = app.edit.as_mut().expect("text edit");
+        edit.input = "temporary title".to_string();
+        edit.cursor = edit.input.len();
         assert_eq!(
             app.handle_key(ConfigUiKey::Ctrl('e')),
             ConfigUiIntent::EditTextExternally {
@@ -1472,6 +1600,49 @@ theme = "light"
             }
         );
         assert!(app.edit.is_some());
+    }
+
+    // Defends: single-line editing operates on graphemes and supports insertion, deletion, and paste at the cursor.
+    #[test]
+    fn text_edit_keys_are_cursor_aware_and_unicode_safe() {
+        let mut model = test_model();
+        model.fields = vec![field("ui.title", "string", r#""a👩‍💻b""#, &[])];
+        let mut app = ConfigUiApp::new(model);
+        app.begin_edit_field(0);
+
+        app.handle_key(ConfigUiKey::Home);
+        app.handle_key(ConfigUiKey::Right);
+        assert_eq!(app.edit.as_ref().expect("edit").cursor, 1);
+        app.handle_key(ConfigUiKey::Delete);
+        assert_eq!(app.edit.as_ref().expect("edit").input, "ab");
+
+        app.handle_key(ConfigUiKey::Paste("👩‍💻".to_string()));
+        let edit = app.edit.as_ref().expect("edit");
+        assert_eq!(edit.input, "a👩‍💻b");
+        assert_eq!(edit.cursor, 1 + "👩‍💻".len());
+
+        app.handle_key(ConfigUiKey::Left);
+        assert_eq!(app.edit.as_ref().expect("edit").cursor, 1);
+        app.handle_key(ConfigUiKey::Right);
+        app.handle_key(ConfigUiKey::Backspace);
+        assert_eq!(app.edit.as_ref().expect("edit").input, "ab");
+        app.handle_key(ConfigUiKey::Char('Z'));
+        assert_eq!(app.edit.as_ref().expect("edit").input, "aZb");
+
+        app.handle_key(ConfigUiKey::End);
+        app.handle_key(ConfigUiKey::Right);
+        assert_eq!(app.edit.as_ref().expect("edit").cursor, 3);
+        app.handle_key(ConfigUiKey::Home);
+        app.handle_key(ConfigUiKey::Left);
+        assert_eq!(app.edit.as_ref().expect("edit").cursor, 0);
+
+        app.handle_key(ConfigUiKey::Paste("two\nlines".to_string()));
+        assert_eq!(app.edit.as_ref().expect("edit").input, "aZb");
+        assert!(app.notice.as_ref().is_some_and(|notice| notice.is_error));
+        app.notice = None;
+        app.handle_key(ConfigUiKey::Char('\r'));
+        assert_eq!(app.edit.as_ref().expect("edit").input, "aZb");
+        assert!(app.notice.as_ref().is_some_and(|notice| notice.is_error));
     }
 
     // Defends: returned host-editor text updates only the active staged buffer and still saves through normal parsing.
@@ -1492,7 +1663,9 @@ theme = "light"
 
         app.apply_external_text_edit(0, "edited title")
             .expect("apply returned text");
-        assert_eq!(app.edit.as_ref().expect("text edit").input, "edited title");
+        let edit = app.edit.as_ref().expect("text edit");
+        assert_eq!(edit.input, "edited title");
+        assert_eq!(edit.cursor, "edited title".len());
         assert_eq!(
             app.handle_key(ConfigUiKey::Enter),
             ConfigUiIntent::SetField {
@@ -1727,6 +1900,18 @@ line-number = "relative"
         assert_eq!(app.handle_key(ConfigUiKey::Backspace), ConfigUiIntent::None);
         assert_eq!(app.search, "them");
         assert_eq!(app.handle_key(ConfigUiKey::Ctrl('u')), ConfigUiIntent::None);
+        assert!(app.search.is_empty());
+        assert_eq!(
+            app.handle_key(ConfigUiKey::Paste("👩‍💻".to_string())),
+            ConfigUiIntent::None
+        );
+        assert_eq!(app.search, "👩‍💻");
+        assert_eq!(app.handle_key(ConfigUiKey::Backspace), ConfigUiIntent::None);
+        assert!(app.search.is_empty());
+        assert_eq!(
+            app.handle_key(ConfigUiKey::Char('\n')),
+            ConfigUiIntent::None
+        );
         assert!(app.search.is_empty());
         for ch in "theme".chars() {
             assert_eq!(app.handle_key(ConfigUiKey::Char(ch)), ConfigUiIntent::None);

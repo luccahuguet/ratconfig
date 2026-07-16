@@ -8,7 +8,13 @@
 //! the intent callback.
 
 use crate::{ConfigUiApp, ConfigUiIntent, ConfigUiKey, UiRowRef, draw_config_ui_with_details};
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::{
+    event::{
+        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers,
+    },
+    execute,
+};
 use ratatui::{DefaultTerminal, text::Line};
 use std::{error::Error, fmt, io};
 
@@ -52,6 +58,9 @@ fn crossterm_key_to_config_ui_key(key: KeyEvent) -> Option<ConfigUiKey> {
         KeyCode::Esc => Some(ConfigUiKey::Esc),
         KeyCode::Enter => Some(ConfigUiKey::Enter),
         KeyCode::Backspace => Some(ConfigUiKey::Backspace),
+        KeyCode::Delete => Some(ConfigUiKey::Delete),
+        KeyCode::Home => Some(ConfigUiKey::Home),
+        KeyCode::End => Some(ConfigUiKey::End),
         KeyCode::Tab => Some(ConfigUiKey::Tab),
         KeyCode::BackTab => Some(ConfigUiKey::BackTab),
         KeyCode::Up => Some(ConfigUiKey::Up),
@@ -71,6 +80,7 @@ fn handle_crossterm_event(app: &mut ConfigUiApp, event: Event) -> ConfigUiIntent
     match event {
         Event::Key(key) => crossterm_key_to_config_ui_key(key)
             .map_or(ConfigUiIntent::None, |key| app.handle_key(key)),
+        Event::Paste(text) => app.handle_key(ConfigUiKey::Paste(text)),
         _ => ConfigUiIntent::None,
     }
 }
@@ -94,10 +104,15 @@ where
     let mut terminal = ratatui::try_init().inspect_err(|_| {
         let _ = ratatui::try_restore();
     })?;
+    execute!(io::stdout(), EnableBracketedPaste).inspect_err(|_| {
+        let _ = ratatui::try_restore();
+    })?;
     let run_result = run_config_ui_terminal(&mut terminal, app, detail_lines, &mut handle_intent);
+    let paste_restore_result = execute!(io::stdout(), DisableBracketedPaste);
     let restore_result = ratatui::try_restore();
 
     run_result?;
+    paste_restore_result?;
     restore_result.map_err(CrosstermRunnerError::from)
 }
 
@@ -137,6 +152,9 @@ mod tests {
         assert_key(KeyCode::Esc, ConfigUiKey::Esc);
         assert_key(KeyCode::Enter, ConfigUiKey::Enter);
         assert_key(KeyCode::Backspace, ConfigUiKey::Backspace);
+        assert_key(KeyCode::Delete, ConfigUiKey::Delete);
+        assert_key(KeyCode::Home, ConfigUiKey::Home);
+        assert_key(KeyCode::End, ConfigUiKey::End);
         assert_key(KeyCode::Tab, ConfigUiKey::Tab);
         assert_key(KeyCode::BackTab, ConfigUiKey::BackTab);
         assert_key(KeyCode::Up, ConfigUiKey::Up);
@@ -250,6 +268,23 @@ mod tests {
             handle_crossterm_event(&mut app, Event::Resize(120, 40)),
             ConfigUiIntent::None
         );
+    }
+
+    #[test]
+    fn dispatches_bracketed_paste_to_text_edits() {
+        let mut app = ConfigUiApp::new(model_with_fields(vec![field(
+            "ui.title",
+            "string",
+            "\"title\"",
+            &[],
+        )]));
+        app.begin_edit_field(0);
+
+        assert_eq!(
+            handle_crossterm_event(&mut app, Event::Paste(" pasted".to_string())),
+            ConfigUiIntent::None
+        );
+        assert!(app.edit.as_ref().unwrap().input.ends_with(" pasted"));
     }
 
     fn assert_key(code: KeyCode, expected: ConfigUiKey) {

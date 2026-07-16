@@ -8,6 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs, Wrap};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeSet;
+use unicode_segmentation::UnicodeSegmentation;
 
 const HORIZONTAL_PADDING: u16 = 1;
 const BODY_PANE_GUTTER: u16 = 1;
@@ -345,12 +346,18 @@ fn render_body(
     area: Rect,
     detail_lines: &impl Fn(&ConfigUiApp, UiRowRef) -> Vec<Line<'static>>,
 ) {
-    let [settings_area, _, details_area] = Layout::horizontal([
+    let [settings_area, divider_area, details_area] = Layout::horizontal([
         Constraint::Fill(1),
         Constraint::Length(BODY_PANE_GUTTER),
         Constraint::Fill(1),
     ])
     .areas(area);
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::LEFT)
+            .border_style(border_style(app.active_theme)),
+        divider_area,
+    );
     let rows = app.visible_rows();
     app.clamp_selection_for_len(rows.len());
     render_list(frame, app, settings_area, &rows);
@@ -1194,7 +1201,7 @@ pub fn native_status_detail_lines(status: &ConfigUiNativeStatus) -> Vec<Line<'st
 fn render_footer(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect) {
     if let Some(edit) = &app.edit {
         let field = &app.model.fields[edit.field_index];
-        let editing = edit_status_line(field, edit);
+        let editing = edit_status_line(field, edit, area.width as usize);
         let status = app.notice.as_ref().map_or_else(
             || edit_control_line(field, edit.mode),
             |notice| notice_line(notice, area.width as usize),
@@ -1253,9 +1260,32 @@ fn notice_line(notice: &ConfigUiNotice, width: usize) -> Line<'static> {
     Line::from(Span::styled(truncate(&notice.text, width), style))
 }
 
-fn edit_status_line(field: &ConfigUiField, edit: &ConfigUiEditState) -> Line<'static> {
+fn edit_status_line(
+    field: &ConfigUiField,
+    edit: &ConfigUiEditState,
+    width: usize,
+) -> Line<'static> {
+    const MIN_VALUE_WIDTH: usize = 8;
+    const MIN_PATH_WIDTH: usize = 4;
+    let full_framing_width = terminal_width("editing: ") + terminal_width(" = ");
+    let (label, path, separator) = if edit.mode != ConfigUiEditMode::Text {
+        ("editing: ", field.path.clone(), " = ")
+    } else if width >= full_framing_width + MIN_PATH_WIDTH + MIN_VALUE_WIDTH {
+        (
+            "editing: ",
+            truncate_cells(
+                &field.path,
+                width.saturating_sub(full_framing_width + MIN_VALUE_WIDTH),
+            ),
+            " = ",
+        )
+    } else {
+        ("", String::new(), "")
+    };
+    let value_width = width
+        .saturating_sub(terminal_width(label) + terminal_width(&path) + terminal_width(separator));
     let value = match edit.mode {
-        ConfigUiEditMode::Text => format!("{}_", edit.input),
+        ConfigUiEditMode::Text => text_edit_window(&edit.input, edit.cursor, value_width),
         ConfigUiEditMode::Choice if is_scalar_enum_field(field) => {
             single_choice_status_value(field, edit)
         }
@@ -1263,11 +1293,53 @@ fn edit_status_line(field: &ConfigUiField, edit: &ConfigUiEditState) -> Line<'st
         ConfigUiEditMode::MultiChoice => multi_choice_status_value(field, edit),
     };
     Line::from(vec![
-        Span::styled("editing: ", fg_style(Color::Yellow)),
-        Span::styled(field.path.clone(), config_key_style()),
-        Span::raw(" = "),
+        Span::styled(label, fg_style(Color::Yellow)),
+        Span::styled(path, config_key_style()),
+        Span::raw(separator),
         Span::styled(value, fg_style(Color::White)),
     ])
+}
+
+fn text_edit_window(input: &str, cursor: usize, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let cursor = crate::editor::grapheme_boundary_at_or_before(input, cursor);
+    let graphemes = input.graphemes(true).collect::<Vec<_>>();
+    let cursor_index = input[..cursor].graphemes(true).count();
+    let content_width = width - 1;
+    let mut start = cursor_index;
+    let mut end = cursor_index;
+    let mut used = 0;
+
+    while start > 0 {
+        let candidate = terminal_width(graphemes[start - 1]);
+        if used + candidate > content_width / 2 {
+            break;
+        }
+        start -= 1;
+        used += candidate;
+    }
+    while end < graphemes.len() {
+        let candidate = terminal_width(graphemes[end]);
+        if used + candidate > content_width {
+            break;
+        }
+        end += 1;
+        used += candidate;
+    }
+    while start > 0 {
+        let candidate = terminal_width(graphemes[start - 1]);
+        if used + candidate > content_width {
+            break;
+        }
+        start -= 1;
+        used += candidate;
+    }
+
+    let before = graphemes[start..cursor_index].concat();
+    let after = graphemes[cursor_index..end].concat();
+    format!("{before}_{after}")
 }
 
 fn normal_control_line(app: &ConfigUiApp) -> Line<'static> {
@@ -1296,7 +1368,7 @@ fn normal_control_line(app: &ConfigUiApp) -> Line<'static> {
     } else if is_enum_string_list_field(field) {
         "Enter/e picker"
     } else {
-        "Enter/e edit"
+        "Enter inline  e editor"
     };
     setting_control_line(primary, field)
 }
@@ -1312,10 +1384,10 @@ fn setting_control_line(primary: &'static str, field: &ConfigUiField) -> Line<'s
 fn edit_control_line(field: &ConfigUiField, mode: ConfigUiEditMode) -> Line<'static> {
     match mode {
         ConfigUiEditMode::Text => raw_line([
-            "Ctrl+e editor  ",
-            "Enter save  ",
-            "Esc cancel  ",
-            "Ctrl+u clear",
+            "Enter save  Esc cancel  ",
+            "←/→ move  Home/End  Del/Backspace  ",
+            "Ctrl+u clear  ",
+            "Ctrl+e editor",
         ]),
         ConfigUiEditMode::Choice if is_scalar_enum_field(field) => raw_line([
             "hjkl/Arrows move  ",
@@ -2283,9 +2355,9 @@ mod tests {
         assert!(diagnostic_details(&app).contains("scope      global"));
     }
 
-    // Defends: light roles stay readable while the borderless body keeps its spacing hierarchy.
+    // Defends: light roles stay readable while the outer-borderless body keeps one internal divider.
     #[test]
-    fn light_theme_and_borderless_body_have_stable_rendered_contract() {
+    fn light_theme_and_divided_body_have_stable_rendered_contract() {
         let mut invalid = field("ui.invalid", "string", "broken", &[]);
         invalid.state = ConfigUiValueState::Invalid;
         let mut ready = field("ui.ready", "string", "ready-value", &[]);
@@ -2326,11 +2398,15 @@ mod tests {
         for (position, symbol) in [((1, 4), "s"), ((1, 6), "t"), ((62, 4), "d"), ((62, 6), "u")] {
             assert_eq!(buffer[position].symbol(), symbol);
         }
-        assert!((buffer.area.left()..buffer.area.right()).all(|x| buffer[(x, 5)].symbol() == " "));
+        assert!(
+            (buffer.area.left()..60)
+                .chain(61..buffer.area.right())
+                .all(|x| buffer[(x, 5)].symbol() == " ")
+        );
         let body_area = Rect::new(buffer.area.x, 4, buffer.area.width, 18);
         for y in body_area.y..body_area.bottom() {
-            assert_eq!(buffer[(60, y)].symbol(), " ");
-            assert!((body_area.left()..body_area.right()).all(|x| buffer[(x, y)].symbol() != "│"));
+            assert_eq!(buffer[(60, y)].symbol(), "│");
+            assert_eq!(buffer[(60, y)].fg, palette.border);
         }
         assert!(
             buffer
@@ -2496,6 +2572,7 @@ mod tests {
             input: field.edit_value.clone(),
             mode: ConfigUiEditMode::MultiChoice,
             choice_index: 1,
+            cursor: field.edit_value.len(),
         };
 
         assert!(multi_choice_status_value(field, &edit).contains("order status, clock"));
@@ -2525,16 +2602,56 @@ mod tests {
     // Defends: text edit controls expose the host-owned external editor path without changing picker controls.
     #[test]
     fn text_edit_controls_show_external_editor_key() {
-        let model = test_model(ConfigUiValueState::Explicit);
+        let mut model = test_model(ConfigUiValueState::Explicit);
+        model.fields[0].kind = "string".to_string();
         let field = &model.fields[0];
+        let app = ConfigUiApp::new(model.clone());
+
+        assert!(rendered_text(&normal_control_line(&app)).contains("Enter inline  e editor"));
 
         let text_controls = rendered_text(&edit_control_line(field, ConfigUiEditMode::Text));
+        assert!(text_controls.starts_with("Enter save  Esc cancel"));
         assert!(text_controls.contains("Ctrl+e editor"));
-        assert!(text_controls.contains("Enter save"));
         assert!(text_controls.contains("Ctrl+u clear"));
+        assert!(text_controls.contains("Home/End"));
+        assert!(text_controls.contains("Del/Backspace"));
 
         assert!(
             !rendered_text(&edit_control_line(field, ConfigUiEditMode::Choice)).contains("editor")
+        );
+    }
+
+    // Defends: text status keeps the cursor visible without changing existing choice status.
+    #[test]
+    fn edit_status_windows_text_without_changing_choices() {
+        assert_eq!(text_edit_window("abcdefghij", 8, 5), "gh_ij");
+        assert_eq!(text_edit_window("ab👩‍💻cd", 2, 5), "ab_👩‍💻");
+        assert_eq!(text_edit_window("ab👩‍💻cd", 2 + "👩‍💻".len(), 5), "👩‍💻_cd");
+        assert!(terminal_width(&text_edit_window("abcdefghij", 5, 4)) <= 4);
+
+        let field = field("a.very.long.setting.path", "string", "abcdefghij", &[]);
+        let edit = ConfigUiEditState {
+            field_index: 0,
+            input: "abcdefghij".to_string(),
+            mode: ConfigUiEditMode::Text,
+            choice_index: 0,
+            cursor: 8,
+        };
+        let narrow = edit_status_line(&field, &edit, 7);
+        assert_eq!(rendered_text(&narrow), "efgh_ij");
+        for width in [1, 6, 24, 40] {
+            let text = rendered_text(&edit_status_line(&field, &edit, width));
+            assert!(text.contains('_'));
+            assert!(terminal_width(&text) <= width);
+        }
+
+        let choice = ConfigUiEditState {
+            mode: ConfigUiEditMode::Choice,
+            ..edit
+        };
+        assert_eq!(
+            rendered_text(&edit_status_line(&field, &choice, 7)),
+            "editing: a.very.long.setting.path = abcdefghij"
         );
     }
 
