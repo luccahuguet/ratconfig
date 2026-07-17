@@ -1,7 +1,8 @@
 use crate::{
-    ConfigUiApplyStatus, ConfigUiField, ConfigUiFieldSpec, ConfigUiModel, ConfigUiSource,
-    DEFAULT_CONFIG_SOURCE_ID,
+    ConfigUiApplyStatus, ConfigUiCapability, ConfigUiChoice, ConfigUiField, ConfigUiFieldSpec,
+    ConfigUiModel, ConfigUiSource, ConfigUiTextEncoding, DEFAULT_CONFIG_SOURCE_ID,
 };
+use serde_json::{Value as JsonValue, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
@@ -32,18 +33,44 @@ pub(crate) fn field_with_source(
     value: &str,
     allowed: &[&str],
 ) -> ConfigUiField {
-    let value: serde_json::Value = serde_json::from_str(value)
-        .unwrap_or_else(|_| serde_json::Value::String(value.to_string()));
-    ConfigUiFieldSpec::new(
+    let value: JsonValue =
+        serde_json::from_str(value).unwrap_or_else(|_| JsonValue::String(value.to_string()));
+    let choices = allowed
+        .iter()
+        .map(|value| ConfigUiChoice::new(json!(value)))
+        .collect();
+    let capability = match kind {
+        "bool" => ConfigUiCapability::Toggle {
+            off: ConfigUiChoice::new(json!(false)),
+            on: ConfigUiChoice::new(json!(true)),
+        },
+        "string" if !allowed.is_empty() => ConfigUiCapability::Choice { choices },
+        "string_list" if !allowed.is_empty() => ConfigUiCapability::MultiChoice {
+            choices,
+            ordered: false,
+        },
+        "array" | "object" => ConfigUiCapability::ReadOnly {
+            reason: "Structured test field is read-only.".to_string(),
+            file_action_id: None,
+        },
+        "string" => ConfigUiCapability::FreeText {
+            encoding: ConfigUiTextEncoding::String,
+        },
+        _ => ConfigUiCapability::FreeText {
+            encoding: ConfigUiTextEncoding::Json,
+        },
+    };
+    let mut spec = ConfigUiFieldSpec::new(
         source_id,
         path,
         "general",
         "",
-        allowed.iter().map(|value| (*value).to_string()).collect(),
+        capability,
         "",
         after_save_status(),
-    )
-    .build(kind, Some(&value), Some(&value))
+    );
+    spec.can_unset = true;
+    spec.build(kind, Some(&value), Some(&value))
 }
 
 pub(crate) fn model_with_fields(fields: Vec<ConfigUiField>) -> ConfigUiModel {

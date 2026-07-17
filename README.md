@@ -14,8 +14,8 @@ Example host integration in Yazelix: ratconfig owns the reusable tabs, rows, edi
 - tabs, visible rows, search, selection, notices, and edit state
 - Core and All visibility, per-tab counts, and search across a host-owned field inventory
 - optional host-supplied list table profiles for structured field tabs
-- staged bool toggles, scalar editing, single-select, multiselect, and default reset controls
-- host-routed file action rows and structured-field source shortcuts for native config files
+- capability-driven toggles, free text, single-select, multiselect, and default reset controls
+- host-routed file action rows and exact field-to-action shortcuts for native config files
 - built-in dark/light UI palettes and optional model-driven theme switching
 - generic Ratatui rendering for the model
 - optional host-supplied rich detail rendering callbacks
@@ -42,9 +42,9 @@ Yazelix-specific behavior stays out of this repository, including Home Manager o
 ```rust
 use std::path::PathBuf;
 use ratconfig::{
-    ConfigUiApplyStatus, ConfigUiEditBehavior, ConfigUiField, ConfigUiFieldSnapshot,
-    ConfigUiModel, ConfigUiOverride, ConfigUiResolvedValue, ConfigUiSource,
-    DEFAULT_CONFIG_SOURCE_ID,
+    ConfigUiApplyStatus, ConfigUiCapability, ConfigUiChoice, ConfigUiField,
+    ConfigUiFieldSnapshot, ConfigUiModel, ConfigUiOverride, ConfigUiResolvedValue,
+    ConfigUiSource, DEFAULT_CONFIG_SOURCE_ID,
     toml_adapter::{TomlPatchError, set_toml_value_text},
 };
 use serde_json::json;
@@ -69,7 +69,7 @@ fn model() -> ConfigUiModel {
             section_label: String::new(),
             list_cells: Vec::new(),
             tab: "general".to_string(),
-            kind: "bool".to_string(),
+            type_label: Some("bool".to_string()),
             snapshot: ConfigUiFieldSnapshot {
                 intent: ConfigUiOverride::Explicit(json!(false)),
                 effective: Some(ConfigUiResolvedValue::new(json!(false))),
@@ -77,7 +77,6 @@ fn model() -> ConfigUiModel {
                 external_manager: None,
             },
             description: "Enable debug logging".to_string(),
-            allowed_values: Vec::new(),
             validation: "bool".to_string(),
             rebuild_required: false,
             apply_status: ConfigUiApplyStatus {
@@ -86,7 +85,11 @@ fn model() -> ConfigUiModel {
                 detail: "Reload the application to apply this value".to_string(),
                 pending: false,
             },
-            edit_behavior: ConfigUiEditBehavior::Default,
+            capability: ConfigUiCapability::Toggle {
+                off: ConfigUiChoice::new(json!(false)),
+                on: ConfigUiChoice::new(json!(true)),
+            },
+            can_unset: true,
         }],
         core_fields: None,
         file_actions: Vec::new(),
@@ -109,13 +112,13 @@ fn patch_toml() -> Result<String, TomlPatchError> {
 
 Host applications build the model from their own schema and config files, then use ratconfig editor/rendering helpers inside their terminal event loop. After an edit, the host validates and writes the patched text, reloads the model, and applies any live runtime changes it owns
 
-Construct the editor with `ConfigUiApp::try_new`. Model construction and both replacement methods validate tab routing, stable identities, source references, snapshots, diagnostics, and theme mappings before the app changes. App state is read-only through narrow accessors; hosts report persistence or validation feedback with `notice_info` and `notice_error`
+Construct the editor with `ConfigUiApp::try_new`. Model construction and both replacement methods validate tab routing, stable identities, source references, snapshots, capabilities, file actions, diagnostics, and theme mappings before the app changes. App state is read-only through narrow accessors; hosts report persistence or validation feedback with `notice_info` and `notice_error`
 
 Populate `ConfigUiModel::sources` for host-owned config documents. Sources are unique by id and can back fields on several tabs. Ratconfig renders source metadata from the selected field, renders file-action metadata from the selected action, and uses neutral metadata when neither is selected. `owner_label` is optional display text and does not grant write authority. Hosts still own discovery, loading, writes, creation policy, and validation
 
 Each field snapshot keeps four concerns separate: `intent` records whether the selected source contains an absent, explicit, or locally invalid override; `effective` records the resolved value in use; `baseline` records resolution without that override; and `external_manager` carries optional display provenance. Effective and baseline values can each include one optional `origin` label. An absent override requires effective and baseline to be identical or both unknown, while explicit and invalid snapshots may carry independent resolutions and require a present source document. Equality between an explicit value and its baseline remains explicit
 
-Use `ConfigUiField::display_label` when row and detail text should be friendlier than the stable field path. Ratconfig still uses `path` for edit intents and host write routing
+Use `ConfigUiField::display_label` when row and detail text should be friendlier than the stable field path. Ratconfig routes field intents with the stable `ConfigUiFieldId` formed from `source_id` and `path`
 
 Use `ConfigUiField::section_label` to place consecutive fields under host-defined, non-selectable headings within a tab. Ratconfig derives headings from the visible filtered rows, so empty sections disappear during search while selection and edit intents continue to address only real fields. Leave it empty to preserve the unsectioned layout
 
@@ -193,32 +196,38 @@ fn report_unsafe_source(model: &mut ConfigUiModel) {
 
 Diagnostic scope routes state; it does not infer validity from `path`, parse a native format, preserve text, or authorize a write. Hosts remain responsible for deciding whether an opaque entry is valid, whether malformed input blocks a field or source, and whether a save is safe
 
-## String-List Choices
+## Field Capabilities
 
-Use `ConfigUiFieldSpec::build_string_list` for string-list settings whose values must come from a host-defined allowed set. The same field spec builds ordinary JSON-backed rows with `build`, so presentation and policy options have one shared construction surface. `ConfigUiEditBehavior::Default` keeps edited values in allowed-value order; `ConfigUiEditBehavior::OrderedStringList` preserves selected-value order and enables reorder controls in the picker
+Every field declares one editor capability. Ratconfig never infers write authority from `type_label`, rendered syntax, a baseline, or schema metadata. `ReadOnly` supplies a nonblank reason and can name one exact `(source_id, action_id)` file action. `FreeText` chooses string or JSON encoding. `Toggle`, `Choice`, and `MultiChoice` carry exact host-approved JSON values with optional friendly labels. A mutating capability requires a writable declared source
+
+`type_label` is optional display metadata only. It can describe a host type without affecting editor selection or authorization
+
+`MultiChoice { ordered: false }` emits selected values in capability order. `ordered: true` preserves the staged order and enables picker reorder controls. Choice values and rendered labels must be unique, and the host still validates every emitted value before persistence
 
 ```rust
 use ratconfig::{
-    ConfigUiApplyStatus, ConfigUiEditBehavior, ConfigUiField, ConfigUiFieldSpec,
+    ConfigUiApplyStatus, ConfigUiCapability, ConfigUiChoice, ConfigUiField,
+    ConfigUiFieldSpec,
     toml_adapter::{TomlPatchError, set_toml_value_text},
 };
 use serde_json::Value;
 
-fn sections_field() -> Result<ConfigUiField, String> {
+fn sections_field() -> ConfigUiField {
     ConfigUiFieldSpec {
         display_label: "Layout sections".to_string(),
         section_label: "Visible content".to_string(),
-        edit_behavior: ConfigUiEditBehavior::OrderedStringList,
         ..ConfigUiFieldSpec::new(
             "settings",
             "layout.sections",
             "layout",
             "Choose visible layout sections",
-            vec![
-                "left".to_string(),
-                "center".to_string(),
-                "right".to_string(),
-            ],
+            ConfigUiCapability::MultiChoice {
+                choices: ["left", "center", "right"]
+                    .into_iter()
+                    .map(|value| ConfigUiChoice::new(serde_json::json!(value)))
+                    .collect(),
+                ordered: true,
+            },
             "known layout section ids only",
             ConfigUiApplyStatus {
                 summary: "after save".to_string(),
@@ -228,9 +237,10 @@ fn sections_field() -> Result<ConfigUiField, String> {
             },
         )
     }
-    .build_string_list(
-        Some(vec!["left".to_string(), "center".to_string()]),
-        Some(vec!["center".to_string()]),
+    .build(
+        "string list",
+        Some(&serde_json::json!(["left", "center"])),
+        Some(&serde_json::json!(["center"])),
     )
 }
 
@@ -281,54 +291,48 @@ fn patch_native_toml(raw: &str, path: &str, value: &Value) -> Result<String, Tom
 }
 ```
 
-The generated rows include tables, scalar leaves, arrays, sparse intent/effective/baseline snapshots, deterministic table/key ordering, and compact previews of complete structured values. Strings, booleans, integers, finite floats, and non-empty string arrays use the normal editable field path when the TOML key path can be represented as dotted bare keys such as `editor.line-number` and the current document can be patched safely through that path
+The generated rows include tables, scalar leaves, arrays, sparse intent/effective/baseline snapshots, deterministic table/key ordering, and compact previews of complete structured values. Inferred rows are inspection-only because TOML syntax is not enough evidence to grant edit authority. A host can replace an inferred row's capability with one backed by its schema and validation policy
 
-Complex tables, complex arrays, datetimes, quoted keys with dots, and other paths that cannot be safely represented as dotted patch paths are rendered as structured read-only rows. When exactly one file action has the same `source_id` as the selected structured field, `e` emits that action's existing `ConfigUiIntent::OpenFile` if it is available; unavailable, ambiguous, or missing ownership keeps the read-only behavior. Give each editable TOML document its own source id when its rows should open one exact file
+To route a read-only field to a source file, declare `ReadOnly { file_action_id: Some(action_id), .. }` and provide exactly one file action with the same source id and action id. Ratconfig does not guess from tab membership or from other actions owned by the source. Disabled actions remain unavailable
 
 Ratconfig still does not infer product labels, schema validation, file layering, atomic writes, reloads, or apply policy for arbitrary TOML documents
 
-Populate `ConfigUiModel::file_actions` when the UI should show rows for host-owned native config files. Ratconfig renders label, path, state labels including `existing`, neutral `absent`, `read-only`, and `error`, plus the create-if-missing affordance, then emits `ConfigUiIntent::OpenFile` from the action row or the uniquely owned structured-field shortcut. Hosts still own file discovery, creation, editor launch, validation, reloads, and all file IO
+Populate `ConfigUiModel::file_actions` when the UI should show rows for host-owned native config files. Action labels and supplied disabled reasons must be nonblank. Ratconfig renders label, path, state labels including `existing`, neutral `absent`, `read-only`, and `error`, plus the create-if-missing affordance, then emits `ConfigUiIntent::OpenFile` with stable source/action identity and the validated path/create payload. Hosts still own file discovery, creation, editor launch, validation, reloads, and all file IO
 
-For a field using Ratconfig's free-form text mode, normal-mode `Enter` starts inline editing while `e` starts the same staged edit and immediately emits `ConfigUiIntent::EditTextExternally`. Inline editing supports grapheme-safe Left/Right movement, Home/End, Backspace/Delete, insertion and single-line paste at the cursor, and `Ctrl+u` to clear. `Ctrl+e` externalizes an edit already in progress. The external intent carries the field index, source id, path, and exact staged input buffer. Hosts can write that input to a temporary file, open the user's editor, read the edited text back, apply any host-owned newline or multiline policy, then call `ConfigUiApp::apply_external_text_edit`. Ratconfig does not spawn editors, create temporary files, or save automatically; `Enter` emits `SetField` and `Esc` cancels the staged edit
+For a `FreeText` field, normal-mode `Enter` starts inline editing while `e` starts the same staged edit and immediately emits `ConfigUiIntent::EditTextExternally`. Inline editing supports grapheme-safe Left/Right movement, Home/End, Backspace/Delete, insertion and single-line paste at the cursor, and `Ctrl+u` to clear. `Ctrl+e` externalizes an edit already in progress. The external intent carries the stable field identity and exact staged input buffer. Hosts can write that input to a temporary file, open the user's editor, read the edited text back, apply any host-owned newline or multiline policy, then call `ConfigUiApp::apply_external_text_edit(&field, edited)`. Ratconfig does not spawn editors, create temporary files, or save automatically; `Enter` emits `SetField` and `Esc` cancels the staged edit
 
 The optional crossterm runner enables bracketed paste and translates its key and paste events into Ratconfig's reducer vocabulary. Its callback is invoked while the runner's terminal session is active; hosts that launch a full-screen editor must own any terminal restore/re-entry policy themselves, or use the lower-level editor/render APIs and own the event loop
 
 Hosts that want ratconfig to own the crossterm terminal setup, draw loop, event reads, and key conversion can enable the optional runner:
 
 ```toml
-ratconfig = { git = "https://github.com/luccahuguet/ratconfig", tag = "v5.0.0", features = ["crossterm-runner"] }
+ratconfig = { git = "https://github.com/luccahuguet/ratconfig", branch = "main", features = ["crossterm-runner"] }
 ```
 
 ```rust,no_run
 use ratconfig::{
-    ConfigUiApp, ConfigUiFieldId, ConfigUiIntent, ConfigUiModel, CrosstermRunnerError,
-    run_config_ui,
+    ConfigUiApp, ConfigUiIntent, ConfigUiModel, CrosstermRunnerError, run_config_ui,
 };
 use serde_json::Value;
 
 fn run_editor(mut app: ConfigUiApp) -> Result<(), CrosstermRunnerError<std::io::Error>> {
     run_config_ui(&mut app, |app, intent| {
         match intent {
-            ConfigUiIntent::BeginEdit { field_index, .. } => {
-                app.begin_edit_field(field_index);
-            }
-            ConfigUiIntent::SetField { source_id, path, value, .. } => {
-                host_validate_and_write(&source_id, &path, &value)?;
-                let field = ConfigUiFieldId::new(source_id, path);
+            ConfigUiIntent::SetField { field, value } => {
+                host_validate_and_write(&field.source_id, &field.path, &value)?;
                 let reloaded = host_reload_model()?;
                 app.replace_model_after_success(reloaded, &field)
                     .map_err(std::io::Error::other)?;
             }
-            ConfigUiIntent::UnsetField { source_id, path, .. } => {
-                host_unset(&source_id, &path)?;
-                let field = ConfigUiFieldId::new(source_id, path);
+            ConfigUiIntent::UnsetField { field } => {
+                host_unset(&field.source_id, &field.path)?;
                 let reloaded = host_reload_model()?;
                 app.replace_model_after_success(reloaded, &field)
                     .map_err(std::io::Error::other)?;
             }
-            ConfigUiIntent::EditTextExternally { field_index, input, .. } => {
+            ConfigUiIntent::EditTextExternally { field, input } => {
                 let edited = host_edit_text_buffer(&input)?;
-                if let Err(message) = app.apply_external_text_edit(field_index, edited) {
+                if let Err(message) = app.apply_external_text_edit(&field, edited) {
                     app.notice_error(message);
                 }
             }
@@ -515,6 +519,8 @@ Before cutting a release:
 ### 6.0.0 (unreleased)
 
 - `ConfigUiFieldSnapshot` separates absent/explicit/invalid override intent from optional effective and baseline resolutions, provenance, and external-management labels; the parallel string value fields and sentinel defaults are absent from the model
+- `ConfigUiCapability` is the sole editor-authorization surface for read-only, free-text, toggle, choice, and multichoice fields; `type_label` is display-only, and the intermediate `kind`, `allowed_values`, and `ConfigUiEditBehavior` field APIs are removed
+- Field intents carry `ConfigUiFieldId`, `OpenFile` carries stable source/action identity with its validated path payload, edits start inside Ratconfig without `BeginEdit`, and external editor results are applied by field identity
 - `ConfigUiApp::try_new`, `replace_model`, and `replace_model_after_success` validate complete models before mutation; app internals are read-only to hosts, reloads preserve stable selection and compatible edits by identity, and invalid replacements leave staged state untouched
 - `ConfigUiSource` is unique by id and independent of tabs, selected rows drive source headers, and `operational_tab` replaces reserved-name routing for diagnostics and status rows
 - `ConfigUiDiagnostic` adds required global/source/field scope, and effective field validity is derived from matching blocking diagnostics instead of a duplicate field-spec flag

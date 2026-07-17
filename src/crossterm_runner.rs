@@ -226,11 +226,12 @@ mod tests {
         assert_eq!(app.selected_row, 1);
         assert_eq!(
             handle_crossterm_event(&mut app, key_event(KeyCode::Char('e'), KeyModifiers::NONE)),
-            ConfigUiIntent::BeginEdit {
-                field_index: 1,
-                source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
-                path: "ui.theme".to_string(),
-            }
+            ConfigUiIntent::None
+        );
+        assert!(app.edit.is_some());
+        assert_eq!(
+            handle_crossterm_event(&mut app, key_event(KeyCode::Esc, KeyModifiers::NONE)),
+            ConfigUiIntent::None
         );
 
         app.selected_row = 0;
@@ -251,9 +252,7 @@ mod tests {
         assert_eq!(
             handle_crossterm_event(&mut app, key_event(KeyCode::Enter, KeyModifiers::NONE)),
             ConfigUiIntent::SetField {
-                field_index: 0,
-                source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
-                path: "server.enabled".to_string(),
+                field: crate::ConfigUiFieldId::new(DEFAULT_CONFIG_SOURCE_ID, "server.enabled"),
                 value: json!(true),
             }
         );
@@ -278,7 +277,7 @@ mod tests {
             "\"title\"",
             &[],
         )]));
-        app.begin_edit_field(0);
+        assert_eq!(app.handle_key(ConfigUiKey::Enter), ConfigUiIntent::None);
 
         assert_eq!(
             handle_crossterm_event(&mut app, Event::Paste(" pasted".to_string())),

@@ -1,16 +1,14 @@
 // Test lane: default
 
 use super::{
-    ConfigUiEditBehavior, ConfigUiField, ConfigUiFieldId, ConfigUiFileAction, ConfigUiModel,
-    ConfigUiSettingsView, ConfigUiTheme, UiRowRef,
+    ConfigUiCapability, ConfigUiChoice, ConfigUiField, ConfigUiFieldId, ConfigUiFileAction,
+    ConfigUiModel, ConfigUiSettingsView, ConfigUiTextEncoding, ConfigUiTheme, UiRowRef,
 };
 use crate::model::{
-    ConfigUiFieldState, config_ui_theme_for_model, field_counts_for_tab, field_current_value,
-    field_edit_value, snapshot_field_state, string_list_values_from_json,
-    validate_string_choice_value, visible_rows_for_tab_search_in_view,
+    config_ui_theme_for_model, field_counts_for_tab, render_json_edit_value,
+    visible_rows_for_tab_search_in_view,
 };
 use serde_json::Value as JsonValue;
-use std::collections::BTreeSet;
 use std::path::PathBuf;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -86,34 +84,22 @@ pub enum ConfigUiKey {
 pub enum ConfigUiIntent {
     None,
     Exit,
-    BeginEdit {
-        field_index: usize,
-        source_id: String,
-        path: String,
-    },
     OpenFile {
-        file_action_index: usize,
         source_id: String,
         action_id: String,
         path: PathBuf,
         create_if_missing: bool,
     },
     EditTextExternally {
-        field_index: usize,
-        source_id: String,
-        path: String,
+        field: ConfigUiFieldId,
         input: String,
     },
     SetField {
-        field_index: usize,
-        source_id: String,
-        path: String,
+        field: ConfigUiFieldId,
         value: JsonValue,
     },
     UnsetField {
-        field_index: usize,
-        source_id: String,
-        path: String,
+        field: ConfigUiFieldId,
     },
 }
 
@@ -281,7 +267,7 @@ impl ConfigUiApp {
             .as_ref()
             .filter(|active| completed_field != Some(&active.field_id))
             .cloned();
-        let canceled_edit = edit.as_ref().is_some_and(|active| {
+        let canceled_edit = edit.as_mut().is_some_and(|active| {
             let old = self
                 .model
                 .fields
@@ -291,7 +277,7 @@ impl ConfigUiApp {
                 .fields
                 .iter()
                 .find(|field| field.matches_id(&active.field_id));
-            !matches!((old, new), (Some(old), Some(new)) if edit_metadata_matches(old, new))
+            !matches!((old, new), (Some(old), Some(new)) if reconcile_replacement_edit(old, new, active))
         });
         if canceled_edit {
             edit = None;
@@ -332,13 +318,6 @@ impl ConfigUiApp {
             self.notice = Some(cancellation_notice(self.notice.take()));
         }
         Ok(())
-    }
-
-    fn field_index_by_id(&self, identity: &ConfigUiFieldId) -> Option<usize> {
-        self.model
-            .fields
-            .iter()
-            .position(|field| field.matches_id(identity))
     }
 
     pub(crate) fn active_edit_field(&self) -> Option<&ConfigUiField> {
@@ -462,7 +441,7 @@ impl ConfigUiApp {
         self.selected_row = self.selected_row.min(len.saturating_sub(1));
     }
 
-    pub fn selected_field_index(&self) -> Option<usize> {
+    pub(crate) fn selected_field_index(&self) -> Option<usize> {
         let row = self.visible_rows().get(self.selected_row).copied()?;
         match row {
             UiRowRef::Field(index) => Some(index),
@@ -485,17 +464,22 @@ impl ConfigUiApp {
             .map(|action| (index, action))
     }
 
-    pub(crate) fn selected_structured_file_action(&self) -> Option<(usize, &ConfigUiFileAction)> {
+    pub(crate) fn selected_capability_file_action(&self) -> Option<(usize, &ConfigUiFileAction)> {
         let field = self.selected_field()?;
-        structured_only_edit_notice(field)?;
-        let mut matches = self
-            .model
+        let ConfigUiCapability::ReadOnly {
+            file_action_id: Some(action_id),
+            ..
+        } = &field.capability
+        else {
+            return None;
+        };
+        self.model
             .file_actions
             .iter()
             .enumerate()
-            .filter(|(_, action)| action.source_id == field.source_id);
-        let action = matches.next()?;
-        matches.next().is_none().then_some(action)
+            .find(|(_, action)| {
+                action.source_id == field.source_id && action.action_id == *action_id
+            })
     }
 
     pub fn notice_info(&mut self, text: impl Into<String>) {
@@ -523,37 +507,27 @@ impl ConfigUiApp {
         self.handle_normal_key(key)
     }
 
-    pub fn begin_edit_field(&mut self, field_index: usize) {
+    fn begin_edit_field(&mut self, field_index: usize) {
         self.notice = None;
         let Some(field) = self.model.fields.get(field_index) else {
             self.notice_error("Only settings rows can be edited.");
             return;
         };
-        if let Some(message) = structured_only_edit_notice(field).map(str::to_string) {
-            self.notice_info(message);
-            return;
+        match edit_state_for_field(field) {
+            Ok(edit) => self.edit = Some(edit),
+            Err(message) => self.notice_info(message),
         }
-        let input = edit_input_for_field(field);
-        let cursor = input.len();
-        self.edit = Some(ConfigUiEditState {
-            field_id: field.id(),
-            choice_index: initial_edit_choice_index(field, &input),
-            input,
-            mode: edit_mode_for_field(field),
-            cursor,
-        });
     }
 
     pub fn apply_external_text_edit(
         &mut self,
-        field_index: usize,
+        field: &ConfigUiFieldId,
         input: impl Into<String>,
     ) -> Result<(), String> {
         let Some(edit) = &mut self.edit else {
             return Err("No text edit is active.".to_string());
         };
-        let returned_field = self.model.fields.get(field_index).map(ConfigUiField::id);
-        if returned_field.as_ref() != Some(&edit.field_id) {
+        if field != &edit.field_id {
             return Err(format!(
                 "Returned text is for a different field than the active edit {}:{}.",
                 edit.field_id.source_id, edit.field_id.path
@@ -646,7 +620,7 @@ impl ConfigUiApp {
             }
             ConfigUiKey::Enter
                 if self.selected_field().is_some_and(|field| {
-                    is_bool_field(field) && structured_only_edit_notice(field).is_none()
+                    matches!(field.capability, ConfigUiCapability::Toggle { .. })
                 }) =>
             {
                 self.notice_info("Press Space to stage this change, then Enter to save.");
@@ -709,35 +683,35 @@ impl ConfigUiApp {
         mode: ConfigUiEditMode,
     ) -> ConfigUiIntent {
         let field = self.active_edit_field();
-        let scalar_enum = field.is_some_and(is_scalar_enum_field);
-        let ordered_string_list = field.is_some_and(is_ordered_string_list_field);
+        let choice_picker = field.is_some_and(is_choice_picker);
+        let ordered_multi_choice = field.is_some_and(is_ordered_multi_choice_field);
         let multi_choice = mode == ConfigUiEditMode::MultiChoice;
         match key {
             ConfigUiKey::Esc => self.cancel_edit(),
-            ConfigUiKey::Enter if scalar_enum => {
+            ConfigUiKey::Enter if choice_picker => {
                 self.select_single_choice_edit();
                 self.save_edit()
             }
             ConfigUiKey::Enter => self.save_edit(),
-            ConfigUiKey::Char('K') if ordered_string_list => {
+            ConfigUiKey::Char('K') if ordered_multi_choice => {
                 self.notice = None;
-                self.move_ordered_string_list_edit(-1);
+                self.move_ordered_multi_choice_edit(-1);
                 ConfigUiIntent::None
             }
-            ConfigUiKey::Char('J') if ordered_string_list => {
+            ConfigUiKey::Char('J') if ordered_multi_choice => {
                 self.notice = None;
-                self.move_ordered_string_list_edit(1);
+                self.move_ordered_multi_choice_edit(1);
                 ConfigUiIntent::None
             }
             ConfigUiKey::Up | ConfigUiKey::Left | ConfigUiKey::Char('k' | 'h')
-                if scalar_enum || multi_choice =>
+                if choice_picker || multi_choice =>
             {
                 self.notice = None;
                 self.move_choice_edit(-1);
                 ConfigUiIntent::None
             }
             ConfigUiKey::Down | ConfigUiKey::Right | ConfigUiKey::Char('j' | 'l')
-                if scalar_enum || multi_choice =>
+                if choice_picker || multi_choice =>
             {
                 self.notice = None;
                 self.move_choice_edit(1);
@@ -748,7 +722,7 @@ impl ConfigUiApp {
                 self.toggle_multi_choice_edit();
                 ConfigUiIntent::None
             }
-            ConfigUiKey::Char(' ') if scalar_enum => {
+            ConfigUiKey::Char(' ') if choice_picker => {
                 self.notice = None;
                 self.select_single_choice_edit();
                 ConfigUiIntent::None
@@ -761,28 +735,21 @@ impl ConfigUiApp {
                 if !multi_choice =>
             {
                 self.notice = None;
-                self.cycle_choice_edit();
+                self.cycle_toggle_edit();
                 ConfigUiIntent::None
             }
             _ => ConfigUiIntent::None,
         }
     }
 
-    fn cycle_choice_edit(&mut self) {
-        if let Some(edit) = &mut self.edit {
-            edit.input = if edit.input.trim() == "true" {
-                "false".to_string()
-            } else {
-                "true".to_string()
-            };
-            edit.cursor = edit.input.len();
-        }
+    fn cycle_toggle_edit(&mut self) {
+        self.replace_choice_input(|field, edit| toggled_choice_input(field, &edit.input));
     }
 
     fn move_choice_edit(&mut self, delta: isize) {
         let len = self
             .active_edit_field()
-            .map_or(0, |field| field.allowed_values.len());
+            .map_or(0, |field| capability_choices(field).len());
         let Some(edit) = &mut self.edit else {
             return;
         };
@@ -800,13 +767,15 @@ impl ConfigUiApp {
 
     fn select_single_choice_edit(&mut self) {
         let Some(value) = self.active_edit_field().and_then(|field| {
-            self.edit
-                .as_ref()
-                .and_then(|edit| field.allowed_values.get(edit.choice_index))
+            self.edit.as_ref().and_then(|edit| {
+                edit_choices(field, &edit.input)
+                    .get(edit.choice_index)
+                    .copied()
+            })
         }) else {
             return;
         };
-        let value = value.clone();
+        let value = render_json_edit_value(&value.value);
         let Some(edit) = &mut self.edit else {
             return;
         };
@@ -816,13 +785,13 @@ impl ConfigUiApp {
 
     fn toggle_multi_choice_edit(&mut self) {
         self.replace_choice_input(|field, edit| {
-            toggled_string_list_input(field, &edit.input, edit.choice_index)
+            toggled_multi_choice_input(field, &edit.input, edit.choice_index)
         });
     }
 
-    fn move_ordered_string_list_edit(&mut self, delta: isize) {
+    fn move_ordered_multi_choice_edit(&mut self, delta: isize) {
         self.replace_choice_input(|field, edit| {
-            moved_ordered_string_list_input(field, &edit.input, edit.choice_index, delta)
+            moved_ordered_multi_choice_input(field, &edit.input, edit.choice_index, delta)
         });
     }
 
@@ -836,8 +805,8 @@ impl ConfigUiApp {
         let Some(field) = self.active_edit_field().cloned() else {
             return;
         };
-        let selected = if is_ordered_string_list_field(&field) {
-            string_list_choice_value(&field, &edit.input, edit.choice_index).ok()
+        let selected = if is_ordered_multi_choice_field(&field) {
+            edit_choice_value(&field, &edit.input, edit.choice_index).ok()
         } else {
             None
         };
@@ -852,24 +821,10 @@ impl ConfigUiApp {
             edit.input = next;
             edit.cursor = edit.input.len();
             if let Some(value) = selected
-                && let Some(index) = string_list_choice_index(&field, &edit.input, &value)
+                && let Some(index) = edit_choice_index(&field, &edit.input, &value)
             {
                 edit.choice_index = index;
             }
-        }
-    }
-
-    fn begin_edit_selected_field(&mut self) -> ConfigUiIntent {
-        self.notice = None;
-        let Some(field_index) = self.selected_field_index() else {
-            self.notice_error("Only settings rows can be edited.");
-            return ConfigUiIntent::None;
-        };
-        let field = &self.model.fields[field_index];
-        ConfigUiIntent::BeginEdit {
-            field_index,
-            source_id: field.source_id.clone(),
-            path: field.path.clone(),
         }
     }
 
@@ -877,16 +832,24 @@ impl ConfigUiApp {
         if let Some((index, _)) = self.selected_file_action() {
             return self.activate_file_action(index);
         }
-        if let Some((index, _)) = self.selected_structured_file_action() {
+        if let Some((index, _)) = self.selected_capability_file_action() {
             return self.activate_file_action(index);
         }
-        if let Some(field_index) = self.selected_field_index()
-            && edit_mode_for_field(&self.model.fields[field_index]) == ConfigUiEditMode::Text
-        {
-            self.begin_edit_field(field_index);
-            return self.edit_text_externally();
+        self.notice = None;
+        let Some(field_index) = self.selected_field_index() else {
+            self.notice_error("Only settings rows can be edited.");
+            return ConfigUiIntent::None;
+        };
+        let external = matches!(
+            self.model.fields[field_index].capability,
+            ConfigUiCapability::FreeText { .. }
+        );
+        self.begin_edit_field(field_index);
+        if external {
+            self.edit_text_externally()
+        } else {
+            ConfigUiIntent::None
         }
-        self.begin_edit_selected_field()
     }
 
     fn activate_selected_row(&mut self) -> ConfigUiIntent {
@@ -904,7 +867,6 @@ impl ConfigUiApp {
             return ConfigUiIntent::None;
         }
         ConfigUiIntent::OpenFile {
-            file_action_index,
             source_id: action.source_id.clone(),
             action_id: action.action_id.clone(),
             path: action.path.clone(),
@@ -919,21 +881,13 @@ impl ConfigUiApp {
         if edit.mode != ConfigUiEditMode::Text {
             return ConfigUiIntent::None;
         }
-        let Some(field_index) = self.field_index_by_id(&edit.field_id) else {
+        let input = edit.input.clone();
+        let Some(field) = self.active_edit_field().map(ConfigUiField::id) else {
             self.notice_error("Active edit field is unavailable.");
             return ConfigUiIntent::None;
         };
-        let input = edit.input.clone();
-        let field = &self.model.fields[field_index];
-        let source_id = field.source_id.clone();
-        let path = field.path.clone();
         self.notice = None;
-        ConfigUiIntent::EditTextExternally {
-            field_index,
-            source_id,
-            path,
-            input,
-        }
+        ConfigUiIntent::EditTextExternally { field, input }
     }
 
     fn quick_edit_selected_field(&mut self) -> ConfigUiIntent {
@@ -942,14 +896,15 @@ impl ConfigUiApp {
             self.notice_error("Only settings rows can be edited.");
             return ConfigUiIntent::None;
         };
-        let field = &self.model.fields[field_index];
-        if is_bool_field(field) {
-            self.begin_edit_field(field_index);
-            self.cycle_choice_edit();
-            ConfigUiIntent::None
-        } else {
-            self.begin_edit_selected_field()
+        let toggle = matches!(
+            self.model.fields[field_index].capability,
+            ConfigUiCapability::Toggle { .. }
+        );
+        self.begin_edit_field(field_index);
+        if toggle {
+            self.cycle_toggle_edit();
         }
+        ConfigUiIntent::None
     }
 
     fn return_selected_field_to_default(&mut self) -> ConfigUiIntent {
@@ -959,41 +914,30 @@ impl ConfigUiApp {
             return ConfigUiIntent::None;
         };
         let field = &self.model.fields[field_index];
-        if let Some(message) = structured_only_edit_notice(field).map(str::to_string) {
-            self.notice_info(message);
-            return ConfigUiIntent::None;
-        }
         if !field.has_baseline_value() {
             self.notice_info("This setting has no default value.");
             return ConfigUiIntent::None;
         }
-        ConfigUiIntent::UnsetField {
-            field_index,
-            source_id: field.source_id.clone(),
-            path: field.path.clone(),
-        }
+        ConfigUiIntent::UnsetField { field: field.id() }
     }
 
     fn save_edit(&mut self) -> ConfigUiIntent {
         let Some(edit) = self.edit.as_ref() else {
             return ConfigUiIntent::None;
         };
-        let Some(field_index) = self.field_index_by_id(&edit.field_id) else {
+        let Some(field) = self.active_edit_field() else {
             self.notice_error("Active edit field is unavailable.");
             return ConfigUiIntent::None;
         };
-        let value = match parse_edit_input(&self.model.fields[field_index], &edit.input) {
+        let value = match parse_edit_input(field, &edit.input) {
             Ok(value) => value,
             Err(message) => {
                 self.notice_error(message);
                 return ConfigUiIntent::None;
             }
         };
-        let field = &self.model.fields[field_index];
         ConfigUiIntent::SetField {
-            field_index,
-            source_id: field.source_id.clone(),
-            path: field.path.clone(),
+            field: field.id(),
             value,
         }
     }
@@ -1006,10 +950,51 @@ fn model_has_non_core_fields(model: &ConfigUiModel) -> bool {
     })
 }
 
-fn edit_metadata_matches(old: &ConfigUiField, new: &ConfigUiField) -> bool {
-    old.kind == new.kind
-        && old.allowed_values == new.allowed_values
-        && old.edit_behavior == new.edit_behavior
+fn edit_is_compatible(old: &ConfigUiField, new: &ConfigUiField, edit: &ConfigUiEditState) -> bool {
+    match (&old.capability, &new.capability) {
+        (
+            ConfigUiCapability::FreeText { encoding: old },
+            ConfigUiCapability::FreeText { encoding: new },
+        ) => old == new,
+        (ConfigUiCapability::Toggle { .. }, ConfigUiCapability::Toggle { .. })
+        | (ConfigUiCapability::Choice { .. }, ConfigUiCapability::Choice { .. }) => {
+            parse_choice_input(new, &edit.input)
+                .is_ok_and(|value| capability_has_value(new, &value))
+        }
+        (
+            ConfigUiCapability::MultiChoice { ordered: old, .. },
+            ConfigUiCapability::MultiChoice {
+                ordered: new_ordered,
+                ..
+            },
+        ) => old == new_ordered && parse_multi_choice_values(new, &edit.input).is_ok(),
+        _ => false,
+    }
+}
+
+fn reconcile_replacement_edit(
+    old: &ConfigUiField,
+    new: &ConfigUiField,
+    edit: &mut ConfigUiEditState,
+) -> bool {
+    if !edit_is_compatible(old, new, edit) {
+        return false;
+    }
+    let highlighted = edit_choices(old, &edit.input)
+        .get(edit.choice_index)
+        .copied();
+    let choices = edit_choices(new, &edit.input);
+    let choice_index = |value: &JsonValue| choices.iter().position(|choice| choice.value == *value);
+    edit.choice_index = highlighted
+        .and_then(|highlighted| choice_index(&highlighted.value))
+        .or_else(|| {
+            is_choice_picker(new)
+                .then(|| parse_choice_input(new, &edit.input).ok())
+                .flatten()
+                .and_then(|selected| choice_index(&selected))
+        })
+        .unwrap_or_else(|| edit.choice_index.min(choices.len().saturating_sub(1)));
+    true
 }
 
 fn cancellation_notice(existing: Option<ConfigUiNotice>) -> ConfigUiNotice {
@@ -1026,363 +1011,332 @@ fn cancellation_notice(existing: Option<ConfigUiNotice>) -> ConfigUiNotice {
     }
 }
 
-pub fn edit_input_for_field(field: &ConfigUiField) -> String {
-    let edit_value = field_edit_value(field);
-    if snapshot_field_state(field) == ConfigUiFieldState::Absent {
-        if is_bool_field(field) {
-            return "false".to_string();
+fn edit_state_for_field(field: &ConfigUiField) -> Result<ConfigUiEditState, String> {
+    let (input, mode, choice_index) = match &field.capability {
+        ConfigUiCapability::ReadOnly { reason, .. } => return Err(reason.clone()),
+        ConfigUiCapability::FreeText { encoding } => {
+            (free_text_seed(field, *encoding)?, ConfigUiEditMode::Text, 0)
         }
-        if is_scalar_enum_field(field) {
-            return field.allowed_values[0].clone();
+        ConfigUiCapability::Toggle { .. } | ConfigUiCapability::Choice { .. } => {
+            let value = direct_choice_seed(field)?;
+            let index = capability_choice_index(field, value).ok_or_else(|| {
+                format!(
+                    "{} has no editable choice for its current value.",
+                    field.path
+                )
+            })?;
+            (
+                render_json_edit_value(value),
+                ConfigUiEditMode::Choice,
+                index,
+            )
         }
-        return String::new();
-    }
-    if field.edit_behavior == ConfigUiEditBehavior::FriendlyStringList {
-        return friendly_string_list_edit_input(field);
-    }
-    if field.kind == "string" {
-        return parse_rendered_json_string(&edit_value).unwrap_or(edit_value);
-    }
-    if edit_value.is_empty() {
-        field_current_value(field)
-    } else {
-        edit_value
+        ConfigUiCapability::MultiChoice { .. } => {
+            let value = direct_choice_seed(field)?;
+            let input = render_json_edit_value(value);
+            parse_multi_choice_values(field, &input)?;
+            (input, ConfigUiEditMode::MultiChoice, 0)
+        }
+    };
+    let cursor = input.len();
+    Ok(ConfigUiEditState {
+        field_id: field.id(),
+        input,
+        mode,
+        choice_index,
+        cursor,
+    })
+}
+
+fn free_text_seed(field: &ConfigUiField, encoding: ConfigUiTextEncoding) -> Result<String, String> {
+    let value = match &field.snapshot.intent {
+        crate::ConfigUiOverride::Explicit(value) => value,
+        crate::ConfigUiOverride::Absent => match &field.snapshot.effective {
+            Some(resolved) => &resolved.value,
+            None => return Ok(String::new()),
+        },
+        crate::ConfigUiOverride::Invalid { input } => return Ok(input.clone()),
+    };
+    match (encoding, value) {
+        (ConfigUiTextEncoding::String, JsonValue::String(value)) => Ok(value.clone()),
+        (ConfigUiTextEncoding::String, _) => Err(format!(
+            "{} has a non-string value that cannot seed its string editor.",
+            field.path
+        )),
+        (ConfigUiTextEncoding::Json, value) => Ok(render_json_edit_value(value)),
     }
 }
 
-pub fn edit_mode_for_field(field: &ConfigUiField) -> ConfigUiEditMode {
-    if is_enum_string_list_field(field) {
-        ConfigUiEditMode::MultiChoice
-    } else if is_direct_choice_field(field) {
-        ConfigUiEditMode::Choice
-    } else {
-        ConfigUiEditMode::Text
+fn direct_choice_seed(field: &ConfigUiField) -> Result<&JsonValue, String> {
+    match &field.snapshot.intent {
+        crate::ConfigUiOverride::Explicit(value) => Ok(value),
+        crate::ConfigUiOverride::Absent => field
+            .snapshot
+            .effective
+            .as_ref()
+            .map(|resolved| &resolved.value)
+            .ok_or_else(|| format!("{} has no current value to edit.", field.path)),
+        crate::ConfigUiOverride::Invalid { .. } => Err(format!(
+            "{} has invalid input; remove the override or use a free-text editor.",
+            field.path
+        )),
     }
 }
 
-pub fn initial_edit_choice_index(field: &ConfigUiField, input: &str) -> usize {
-    if is_scalar_enum_field(field)
-        && let Some(index) = field
-            .allowed_values
-            .iter()
-            .position(|allowed| allowed == input)
-    {
-        return index;
-    }
-    if is_enum_string_list_field(field)
-        && let Ok(values) = parse_string_list_values(field, input)
-        && let Some(index) = values
-            .first()
-            .and_then(|value| string_list_choice_index(field, input, value))
-    {
-        return index;
-    }
-    0
-}
-
-pub fn parse_edit_input(field: &ConfigUiField, input: &str) -> Result<JsonValue, String> {
-    let trimmed = input.trim();
-    match field.kind.as_str() {
-        "bool" | "boolean" => parse_bool_input(field, trimmed),
-        "int" | "integer" => parse_i64_input(field, trimmed),
-        "float" | "number" => parse_f64_input(field, trimmed),
-        "string" => parse_string_field_input(field, input),
-        "string_list" if field.edit_behavior == ConfigUiEditBehavior::FriendlyStringList => {
-            parse_friendly_string_list_input(field, trimmed)
-        }
-        "string_list" => parse_string_list_input(field, trimmed),
-        "array" => parse_json_input(field, trimmed, "JSON array").and_then(|value| {
-            if value.is_array() {
+fn parse_edit_input(field: &ConfigUiField, input: &str) -> Result<JsonValue, String> {
+    match &field.capability {
+        ConfigUiCapability::ReadOnly { .. } => Err(format!("{} is read-only.", field.path)),
+        ConfigUiCapability::FreeText {
+            encoding: ConfigUiTextEncoding::String,
+        } => Ok(JsonValue::String(input.to_string())),
+        ConfigUiCapability::FreeText {
+            encoding: ConfigUiTextEncoding::Json,
+        } => parse_choice_input(field, input),
+        ConfigUiCapability::Toggle { .. } | ConfigUiCapability::Choice { .. } => {
+            let value = parse_choice_input(field, input)?;
+            if capability_has_value(field, &value) {
                 Ok(value)
             } else {
-                Err(format!("{} must be a JSON array.", field.path))
+                Err(format!("{} is not an available choice.", field.path))
             }
-        }),
-        "object" => parse_json_input(field, trimmed, "JSON object").and_then(|value| {
-            if value.is_object() {
-                Ok(value)
+        }
+        ConfigUiCapability::MultiChoice { choices, ordered } => {
+            let values = parse_multi_choice_values(field, input)?;
+            if *ordered {
+                Ok(JsonValue::Array(values))
             } else {
-                Err(format!("{} must be a JSON object.", field.path))
+                Ok(JsonValue::Array(
+                    choices
+                        .iter()
+                        .filter(|choice| values.contains(&choice.value))
+                        .map(|choice| choice.value.clone())
+                        .collect(),
+                ))
             }
-        }),
-        _ => parse_json_input(field, trimmed, "JSON value"),
+        }
     }
 }
 
-fn parse_bool_input(field: &ConfigUiField, input: &str) -> Result<JsonValue, String> {
-    match input {
-        "true" => Ok(JsonValue::Bool(true)),
-        "false" => Ok(JsonValue::Bool(false)),
-        _ => Err(format!("{} must be true or false.", field.path)),
+fn parse_choice_input(field: &ConfigUiField, input: &str) -> Result<JsonValue, String> {
+    serde_json::from_str(input.trim())
+        .map_err(|source| format!("{} must be valid JSON: {source}.", field.path))
+}
+
+pub(crate) fn capability_choices(field: &ConfigUiField) -> Vec<&ConfigUiChoice> {
+    match &field.capability {
+        ConfigUiCapability::Toggle { off, on } => vec![off, on],
+        ConfigUiCapability::Choice { choices }
+        | ConfigUiCapability::MultiChoice { choices, .. } => choices.iter().collect(),
+        ConfigUiCapability::ReadOnly { .. } | ConfigUiCapability::FreeText { .. } => Vec::new(),
     }
 }
 
-fn parse_i64_input(field: &ConfigUiField, input: &str) -> Result<JsonValue, String> {
-    let value = input
-        .parse::<i64>()
-        .map_err(|_| format!("{} must be an integer.", field.path))?;
-    Ok(JsonValue::Number(value.into()))
+fn capability_choice_index(field: &ConfigUiField, value: &JsonValue) -> Option<usize> {
+    capability_choices(field)
+        .iter()
+        .position(|choice| choice.value == *value)
 }
 
-fn parse_f64_input(field: &ConfigUiField, input: &str) -> Result<JsonValue, String> {
-    let value = input
-        .parse::<f64>()
-        .map_err(|_| format!("{} must be a number.", field.path))?;
-    let number = serde_json::Number::from_f64(value)
-        .ok_or_else(|| format!("{} must be a finite number.", field.path))?;
-    Ok(JsonValue::Number(number))
+fn capability_has_value(field: &ConfigUiField, value: &JsonValue) -> bool {
+    capability_choice_index(field, value).is_some()
 }
 
-fn parse_string_field_input(field: &ConfigUiField, input: &str) -> Result<JsonValue, String> {
-    let value = parse_string_input(input)
-        .map_err(|message| format!("{} must be a string: {message}.", field.path))?;
-    ensure_allowed_value(field, &value)?;
-    Ok(JsonValue::String(value))
-}
-
-fn parse_string_list_input(field: &ConfigUiField, input: &str) -> Result<JsonValue, String> {
-    let strings = parse_string_list_values(field, input)?;
-    Ok(JsonValue::Array(
-        strings.into_iter().map(JsonValue::String).collect(),
-    ))
-}
-
-fn parse_friendly_string_list_input(
+#[cfg(feature = "ui")]
+pub(crate) fn single_choice_status_value(
     field: &ConfigUiField,
-    input: &str,
-) -> Result<JsonValue, String> {
-    if input.starts_with('[') {
-        return parse_string_list_input(field, input);
-    }
-    if input.is_empty() || input.eq_ignore_ascii_case("disabled") {
-        return Ok(JsonValue::Array(Vec::new()));
-    }
-    let strings = input
-        .split(',')
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    for value in &strings {
-        ensure_allowed_value(field, value)?;
-    }
-    Ok(JsonValue::Array(
-        strings.into_iter().map(JsonValue::String).collect(),
-    ))
-}
-
-pub fn parse_string_list_values(field: &ConfigUiField, input: &str) -> Result<Vec<String>, String> {
-    let value = parse_json_input(field, input, "JSON string array")?;
-    string_list_values_from_json(&field.path, &value, &field.allowed_values)
-}
-
-fn parse_json_input(
-    field: &ConfigUiField,
-    input: &str,
-    expected: &str,
-) -> Result<JsonValue, String> {
-    serde_json::from_str::<JsonValue>(input)
-        .map_err(|source| format!("{} must be a valid {expected}: {source}.", field.path))
-}
-
-fn parse_string_input(input: &str) -> Result<String, String> {
-    let trimmed = input.trim();
-    if trimmed.starts_with('"') {
-        serde_json::from_str::<String>(trimmed).map_err(|source| source.to_string())
-    } else {
-        Ok(input.to_string())
-    }
-}
-
-pub fn parse_rendered_json_string(value: &str) -> Option<String> {
-    serde_json::from_str::<String>(value).ok()
-}
-
-fn ensure_allowed_value(field: &ConfigUiField, value: &str) -> Result<(), String> {
-    validate_string_choice_value(&field.path, value, &field.allowed_values)
-}
-
-pub fn single_choice_status_value(field: &ConfigUiField, edit: &ConfigUiEditState) -> String {
-    let highlighted = field
-        .allowed_values
-        .get(edit.choice_index)
-        .map(String::as_str)
-        .unwrap_or("none");
-    if highlighted == edit.input {
-        format!("selected {}", edit.input)
-    } else {
-        format!("selected {}, highlighted {highlighted}", edit.input)
-    }
-}
-
-pub fn multi_choice_status_value(field: &ConfigUiField, edit: &ConfigUiEditState) -> String {
-    let values = parse_string_list_values(field, &edit.input).unwrap_or_default();
-    let enabled = values.len();
-    let selected = string_list_choice_values(field, &edit.input)
+    edit: &ConfigUiEditState,
+) -> String {
+    let selected = parse_choice_input(field, &edit.input)
         .ok()
-        .and_then(|choices| choices.get(edit.choice_index).cloned())
+        .and_then(|value| choice_label_for_value(field, &value))
         .unwrap_or_else(|| "none".to_string());
-    if is_ordered_string_list_field(field) {
+    if !is_choice_picker(field) {
+        return format!("selected {selected}");
+    }
+    let highlighted = edit_choices(field, &edit.input)
+        .get(edit.choice_index)
+        .map(|choice| choice.display_label())
+        .unwrap_or_else(|| "none".to_string());
+    if highlighted == selected {
+        format!("selected {selected}")
+    } else {
+        format!("selected {selected}, highlighted {highlighted}")
+    }
+}
+
+#[cfg(feature = "ui")]
+pub(crate) fn multi_choice_status_value(field: &ConfigUiField, edit: &ConfigUiEditState) -> String {
+    let values = parse_multi_choice_values(field, &edit.input).unwrap_or_default();
+    let enabled = values.len();
+    let selected = edit_choices(field, &edit.input)
+        .get(edit.choice_index)
+        .map(|choice| choice.display_label())
+        .unwrap_or_else(|| "none".to_string());
+    if is_ordered_multi_choice_field(field) {
         return format!(
             "{enabled}/{} enabled, selected {selected}, order {}",
-            field.allowed_values.len(),
-            string_list_order_label(&values)
+            capability_choices(field).len(),
+            multi_choice_order_label(field, &values)
         );
     }
     format!(
         "{enabled}/{} enabled, selected {selected}",
-        field.allowed_values.len()
+        capability_choices(field).len()
     )
 }
 
-pub(crate) fn string_list_order_label(values: &[String]) -> String {
+#[cfg(feature = "ui")]
+pub(crate) fn multi_choice_order_label(field: &ConfigUiField, values: &[JsonValue]) -> String {
     if values.is_empty() {
         "none".to_string()
     } else {
-        values.join(", ")
+        values
+            .iter()
+            .map(|value| {
+                choice_label_for_value(field, value)
+                    .unwrap_or_else(|| render_json_edit_value(value))
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 
-pub fn toggled_string_list_input(
+fn toggled_choice_input(field: &ConfigUiField, input: &str) -> Result<String, String> {
+    let ConfigUiCapability::Toggle { off, on } = &field.capability else {
+        return Err(format!("{} is not a toggle.", field.path));
+    };
+    let current = parse_choice_input(field, input)?;
+    Ok(render_json_edit_value(if current == off.value {
+        &on.value
+    } else {
+        &off.value
+    }))
+}
+
+pub(crate) fn toggled_multi_choice_input(
     field: &ConfigUiField,
     input: &str,
     choice_index: usize,
 ) -> Result<String, String> {
-    let target = string_list_choice_value(field, input, choice_index)?;
-    let mut values = parse_string_list_values(field, input)?;
-    if values.iter().any(|value| value == &target) {
+    let target = edit_choice_value(field, input, choice_index)?;
+    let mut values = parse_multi_choice_values(field, input)?;
+    if values.contains(&target) {
         values.retain(|value| value != &target);
     } else {
         values.push(target);
     }
-    if !is_ordered_string_list_field(field) {
-        values = ordered_string_list_values(field, &values);
+    if !is_ordered_multi_choice_field(field) {
+        values = capability_choices(field)
+            .into_iter()
+            .filter(|choice| values.contains(&choice.value))
+            .map(|choice| choice.value.clone())
+            .collect();
     }
-    render_string_list_input(field, &values)
+    Ok(render_json_edit_value(&JsonValue::Array(values)))
 }
 
-fn moved_ordered_string_list_input(
+fn moved_ordered_multi_choice_input(
     field: &ConfigUiField,
     input: &str,
     choice_index: usize,
     delta: isize,
 ) -> Result<String, String> {
-    let target = string_list_choice_value(field, input, choice_index)?;
-    let mut values = parse_string_list_values(field, input)?;
-    let Some(index) = values.iter().position(|value| value == &target) else {
-        return render_string_list_input(field, &values);
-    };
-    let next = if delta < 0 {
-        index.checked_sub(1)
-    } else {
-        (index + 1 < values.len()).then_some(index + 1)
-    };
-    let Some(next) = next else {
-        return render_string_list_input(field, &values);
-    };
-    values.swap(index, next);
-    render_string_list_input(field, &values)
+    let target = edit_choice_value(field, input, choice_index)?;
+    let mut values = parse_multi_choice_values(field, input)?;
+    if let Some(index) = values.iter().position(|value| value == &target) {
+        let next = if delta < 0 {
+            index.checked_sub(1)
+        } else {
+            (index + 1 < values.len()).then_some(index + 1)
+        };
+        if let Some(next) = next {
+            values.swap(index, next);
+        }
+    }
+    Ok(render_json_edit_value(&JsonValue::Array(values)))
 }
 
-fn string_list_choice_value(
+fn edit_choice_value(
     field: &ConfigUiField,
     input: &str,
     choice_index: usize,
-) -> Result<String, String> {
-    string_list_choice_values(field, input)?
+) -> Result<JsonValue, String> {
+    edit_choices(field, input)
         .get(choice_index)
-        .cloned()
+        .map(|choice| choice.value.clone())
         .ok_or_else(|| format!("{} has no value selected.", field.path))
 }
 
-fn string_list_choice_index(field: &ConfigUiField, input: &str, value: &str) -> Option<usize> {
-    string_list_choice_values(field, input)
-        .ok()?
+fn edit_choice_index(field: &ConfigUiField, input: &str, value: &JsonValue) -> Option<usize> {
+    edit_choices(field, input)
         .iter()
-        .position(|choice| choice == value)
+        .position(|choice| choice.value == *value)
 }
 
-pub(crate) fn string_list_choice_values(
-    field: &ConfigUiField,
-    input: &str,
-) -> Result<Vec<String>, String> {
-    if !is_ordered_string_list_field(field) {
-        return Ok(field.allowed_values.clone());
+pub(crate) fn edit_choices<'a>(field: &'a ConfigUiField, input: &str) -> Vec<&'a ConfigUiChoice> {
+    let choices = capability_choices(field);
+    if !is_ordered_multi_choice_field(field) {
+        return choices;
     }
-    let mut values = parse_string_list_values(field, input)?;
-    let enabled = values.iter().cloned().collect::<BTreeSet<_>>();
-    values.extend(
-        field
-            .allowed_values
-            .iter()
-            .filter(|value| !enabled.contains(*value))
-            .cloned(),
+    let Ok(values) = parse_multi_choice_values(field, input) else {
+        return choices;
+    };
+    let mut ordered = values
+        .iter()
+        .filter_map(|value| {
+            choices
+                .iter()
+                .find(|choice| choice.value == *value)
+                .copied()
+        })
+        .collect::<Vec<_>>();
+    ordered.extend(
+        choices
+            .into_iter()
+            .filter(|choice| !values.contains(&choice.value)),
     );
+    ordered
+}
+
+fn parse_multi_choice_values(field: &ConfigUiField, input: &str) -> Result<Vec<JsonValue>, String> {
+    let value = parse_choice_input(field, input)?;
+    let JsonValue::Array(values) = value else {
+        return Err(format!("{} must be a JSON array.", field.path));
+    };
+    for (index, value) in values.iter().enumerate() {
+        if values[..index].contains(value) {
+            return Err(format!("{} contains a duplicate selection.", field.path));
+        }
+        if !capability_has_value(field, value) {
+            return Err(format!("{} contains an unavailable choice.", field.path));
+        }
+    }
     Ok(values)
 }
 
-fn render_string_list_input(field: &ConfigUiField, values: &[String]) -> Result<String, String> {
-    serde_json::to_string(values)
-        .map_err(|source| format!("Could not render {} string list: {source}.", field.path))
+#[cfg(feature = "ui")]
+pub(crate) fn choice_label_for_value(field: &ConfigUiField, value: &JsonValue) -> Option<String> {
+    capability_choices(field)
+        .into_iter()
+        .find(|choice| choice.value == *value)
+        .map(ConfigUiChoice::display_label)
 }
 
-fn ordered_string_list_values(field: &ConfigUiField, values: &[String]) -> Vec<String> {
-    let selected = values.iter().cloned().collect::<BTreeSet<_>>();
-    field
-        .allowed_values
-        .iter()
-        .filter(|value| selected.contains(*value))
-        .cloned()
-        .collect()
+pub(crate) fn is_choice_picker(field: &ConfigUiField) -> bool {
+    matches!(field.capability, ConfigUiCapability::Choice { .. })
 }
 
-pub fn is_bool_field(field: &ConfigUiField) -> bool {
-    matches!(field.kind.as_str(), "bool" | "boolean")
-}
-
-fn is_direct_choice_field(field: &ConfigUiField) -> bool {
-    is_bool_field(field) || is_scalar_enum_field(field)
-}
-
-pub fn is_scalar_enum_field(field: &ConfigUiField) -> bool {
-    field.kind == "string" && !field.allowed_values.is_empty()
-}
-
-pub fn is_enum_string_list_field(field: &ConfigUiField) -> bool {
-    field.kind == "string_list" && !field.allowed_values.is_empty()
-}
-
-pub(crate) fn is_ordered_string_list_field(field: &ConfigUiField) -> bool {
-    is_enum_string_list_field(field)
-        && field.edit_behavior == ConfigUiEditBehavior::OrderedStringList
-}
-
-pub fn structured_only_edit_notice(field: &ConfigUiField) -> Option<&str> {
-    if let ConfigUiEditBehavior::StructuredOnly { notice } = &field.edit_behavior {
-        return Some(notice.as_str());
-    }
-    if matches!(field.kind.as_str(), "array" | "object" | "string_list_map") {
-        return Some(
-            "Structured editor unavailable for this complex field; edit the source config directly.",
-        );
-    }
-    None
-}
-
-fn friendly_string_list_edit_input(field: &ConfigUiField) -> String {
-    let edit_value = field_edit_value(field);
-    serde_json::from_str::<Vec<String>>(&edit_value)
-        .map(|keys| keys.join(", "))
-        .unwrap_or(edit_value)
-}
-
-pub fn field_bool_value(field: &ConfigUiField) -> Option<bool> {
-    field_current_value(field).parse().ok()
+pub(crate) fn is_ordered_multi_choice_field(field: &ConfigUiField) -> bool {
+    matches!(
+        field.capability,
+        ConfigUiCapability::MultiChoice { ordered: true, .. }
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::field_current_value;
     #[cfg(feature = "ui")]
     use crate::row_line_for_model;
     use crate::{
@@ -1417,11 +1371,11 @@ mod tests {
             json!(true)
         );
         assert_eq!(
-            parse_edit_input(&app.model.fields[1], "dark").expect("select"),
+            parse_edit_input(&app.model.fields[1], r#""dark""#).expect("select"),
             json!("dark")
         );
         assert_eq!(
-            toggled_string_list_input(&app.model.fields[2], r#"["git"]"#, 1).expect("toggle"),
+            toggled_multi_choice_input(&app.model.fields[2], r#"["git"]"#, 1).expect("toggle"),
             r#"["git","search"]"#
         );
 
@@ -1443,20 +1397,13 @@ theme = "light"
 
         assert_eq!(app.handle_key(ConfigUiKey::Char('j')), ConfigUiIntent::None);
         assert_eq!(app.selected_row, 1);
-        assert_eq!(
-            app.handle_key(ConfigUiKey::Char('e')),
-            ConfigUiIntent::BeginEdit {
-                field_index: 1,
-                source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
-                path: "ui.theme".to_string()
-            }
-        );
+        assert_eq!(app.handle_key(ConfigUiKey::Char('e')), ConfigUiIntent::None);
+        assert!(app.edit.is_some());
+        app.handle_key(ConfigUiKey::Esc);
         assert_eq!(
             app.handle_key(ConfigUiKey::Char('u')),
             ConfigUiIntent::UnsetField {
-                field_index: 1,
-                source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
-                path: "ui.theme".to_string()
+                field: ConfigUiFieldId::new(DEFAULT_CONFIG_SOURCE_ID, "ui.theme")
             }
         );
 
@@ -1479,9 +1426,7 @@ theme = "light"
         assert_eq!(
             app.handle_key(ConfigUiKey::Enter),
             ConfigUiIntent::SetField {
-                field_index: 0,
-                source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
-                path: "server.enabled".to_string(),
+                field: ConfigUiFieldId::new(DEFAULT_CONFIG_SOURCE_ID, "server.enabled"),
                 value: json!(true),
             }
         );
@@ -1509,9 +1454,7 @@ theme = "light"
         assert_eq!(
             app.handle_key(ConfigUiKey::Enter),
             ConfigUiIntent::SetField {
-                field_index: 0,
-                source_id: "server".to_string(),
-                path: "server.enabled".to_string(),
+                field: ConfigUiFieldId::new("server", "server.enabled"),
                 value: json!(true),
             }
         );
@@ -1525,9 +1468,7 @@ theme = "light"
         assert_eq!(
             app.handle_key(ConfigUiKey::Char('e')),
             ConfigUiIntent::EditTextExternally {
-                field_index: 1,
-                source_id: "ui".to_string(),
-                path: "ui.title".to_string(),
+                field: ConfigUiFieldId::new("ui", "ui.title"),
                 input: "light".to_string(),
             }
         );
@@ -1539,9 +1480,7 @@ theme = "light"
         assert_eq!(
             app.handle_key(ConfigUiKey::Enter),
             ConfigUiIntent::SetField {
-                field_index: 1,
-                source_id: "ui".to_string(),
-                path: "ui.title".to_string(),
+                field: ConfigUiFieldId::new("ui", "ui.title"),
                 value: json!("dark"),
             }
         );
@@ -1555,9 +1494,7 @@ theme = "light"
         assert_eq!(
             app.handle_key(ConfigUiKey::Char('u')),
             ConfigUiIntent::UnsetField {
-                field_index: 1,
-                source_id: "ui".to_string(),
-                path: "ui.title".to_string(),
+                field: ConfigUiFieldId::new("ui", "ui.title"),
             }
         );
     }
@@ -1568,14 +1505,11 @@ theme = "light"
         let mut app = ConfigUiApp::new(test_model());
         app.selected_row = 1;
 
-        let expected = ConfigUiIntent::BeginEdit {
-            field_index: 1,
-            source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
-            path: "ui.theme".to_string(),
-        };
-        assert_eq!(app.handle_key(ConfigUiKey::Enter), expected);
-        assert_eq!(app.handle_key(ConfigUiKey::Char(' ')), expected);
-        assert!(app.edit.is_none());
+        assert_eq!(app.handle_key(ConfigUiKey::Enter), ConfigUiIntent::None);
+        assert!(app.edit.is_some());
+        app.handle_key(ConfigUiKey::Esc);
+        assert_eq!(app.handle_key(ConfigUiKey::Char(' ')), ConfigUiIntent::None);
+        assert!(app.edit.is_some());
     }
 
     // Defends: a host-declared theme switcher resolves the initial theme from committed model fields.
@@ -1596,24 +1530,19 @@ theme = "light"
         app.selected_row = 1;
 
         assert_eq!(app.active_theme, ConfigUiTheme::Dark);
-        app.begin_edit_field(1);
+        assert_eq!(app.handle_key(ConfigUiKey::Char('e')), ConfigUiIntent::None);
         app.edit.as_mut().expect("theme edit").choice_index = 0;
-        let ConfigUiIntent::SetField {
-            field_index,
-            source_id,
-            path,
-            value,
-        } = app.handle_key(ConfigUiKey::Enter)
-        else {
+        let ConfigUiIntent::SetField { field, value } = app.handle_key(ConfigUiKey::Enter) else {
             panic!("expected theme SetField intent");
         };
-        assert_eq!(field_index, 1);
-        assert_eq!(source_id, DEFAULT_CONFIG_SOURCE_ID);
-        assert_eq!(path, "ui.theme");
+        assert_eq!(
+            field,
+            ConfigUiFieldId::new(DEFAULT_CONFIG_SOURCE_ID, "ui.theme")
+        );
         assert_eq!(value, json!("light"));
         assert_eq!(app.active_theme, ConfigUiTheme::Dark);
 
-        let identity = ConfigUiFieldId::new(&source_id, &path);
+        let identity = field;
         let mut reloaded = app.model.clone();
         reloaded.fields.swap(0, 1);
         set_committed_value(&mut reloaded, &identity, value);
@@ -1656,20 +1585,16 @@ theme = "light"
         app.selected_row = 1;
 
         assert_eq!(app.active_theme, ConfigUiTheme::Dark);
-        let ConfigUiIntent::UnsetField {
-            field_index,
-            source_id,
-            path,
-        } = app.handle_key(ConfigUiKey::Char('u'))
-        else {
+        let ConfigUiIntent::UnsetField { field } = app.handle_key(ConfigUiKey::Char('u')) else {
             panic!("expected theme UnsetField intent");
         };
-        assert_eq!(field_index, 1);
-        assert_eq!(source_id, DEFAULT_CONFIG_SOURCE_ID);
-        assert_eq!(path, "ui.theme");
+        assert_eq!(
+            field,
+            ConfigUiFieldId::new(DEFAULT_CONFIG_SOURCE_ID, "ui.theme")
+        );
         assert_eq!(app.active_theme, ConfigUiTheme::Dark);
 
-        let identity = ConfigUiFieldId::new(&source_id, &path);
+        let identity = field;
         let mut reloaded = app.model.clone();
         reloaded.fields.swap(0, 1);
         set_unset_value(&mut reloaded, &identity);
@@ -1714,7 +1639,9 @@ theme = "light"
         let mut app = ConfigUiApp::new(model);
         app.selected_tab = 1;
         app.begin_edit_field(1);
-        app.edit.as_mut().expect("edit").input = "staged".to_string();
+        let edit = app.edit.as_mut().expect("edit");
+        edit.input = r#""dark""#.to_string();
+        edit.choice_index = 1;
         app.search = "theme".to_string();
         app.search_active = true;
         app.notice_error("Host reload warning.");
@@ -1722,6 +1649,10 @@ theme = "light"
         let mut replacement = app.model.clone();
         replacement.tabs.swap(0, 1);
         replacement.fields.swap(0, 1);
+        let ConfigUiCapability::Choice { choices } = &mut replacement.fields[0].capability else {
+            panic!("theme choice capability");
+        };
+        choices.reverse();
         app.replace_model(replacement).expect("valid replacement");
 
         assert_eq!(app.selected_tab(), 0);
@@ -1733,7 +1664,7 @@ theme = "light"
             app.edit().map(|edit| (&edit.field_id, edit.input.as_str())),
             Some((
                 &ConfigUiFieldId::new(DEFAULT_CONFIG_SOURCE_ID, "ui.theme"),
-                "staged"
+                r#""dark""#
             ))
         );
         assert_eq!(app.search(), "theme");
@@ -1742,6 +1673,13 @@ theme = "light"
         assert_eq!(
             app.notice().map(|notice| notice.text.as_str()),
             Some("Host reload warning.")
+        );
+        assert_eq!(
+            app.handle_key(ConfigUiKey::Enter),
+            ConfigUiIntent::SetField {
+                field: ConfigUiFieldId::new(DEFAULT_CONFIG_SOURCE_ID, "ui.theme"),
+                value: json!("dark"),
+            }
         );
     }
 
@@ -1789,7 +1727,7 @@ theme = "light"
     }
 
     // Defends: ordinary reloads report buffer loss without erasing an existing host failure,
-    // whether the active field disappears or its transitional editor metadata changes.
+    // whether the active field disappears or its editor capability changes.
     #[test]
     fn ordinary_replacement_cancels_incompatible_edits_and_combines_notices() {
         fn assert_canceled(
@@ -1798,7 +1736,7 @@ theme = "light"
         ) {
             let mut app = ConfigUiApp::new(replacement.clone());
             app.begin_edit_field(1);
-            app.edit.as_mut().expect("edit").input = "staged".to_string();
+            app.edit.as_mut().expect("edit").input = r#""dark""#.to_string();
             app.notice_error("Host write failed.");
             mutate(&mut replacement);
 
@@ -1815,7 +1753,10 @@ theme = "light"
             model.fields.remove(1);
         });
         assert_canceled(test_model(), |model| {
-            model.fields[1].allowed_values.push("system".to_string());
+            model.fields[1].capability = ConfigUiCapability::ReadOnly {
+                reason: "Host editor only.".to_string(),
+                file_action_id: None,
+            };
         });
     }
 
@@ -1830,7 +1771,7 @@ theme = "light"
             let mut app = ConfigUiApp::new(replacement.clone());
             let identity = app.model.fields[1].id();
             app.begin_edit_field(1);
-            app.edit.as_mut().expect("edit").input = "staged".to_string();
+            app.edit.as_mut().expect("edit").input = r#""dark""#.to_string();
             app.notice_error("Host kept this notice.");
             mutate(&mut replacement);
 
@@ -1848,10 +1789,9 @@ theme = "light"
             model.fields.remove(1);
         });
         assert_completed(test_model(), |model| {
-            model.fields[1].kind = "opaque".to_string();
-            model.fields[1].allowed_values.clear();
-            model.fields[1].edit_behavior = ConfigUiEditBehavior::StructuredOnly {
-                notice: "Use the host editor.".to_string(),
+            model.fields[1].capability = ConfigUiCapability::ReadOnly {
+                reason: "Use the host editor.".to_string(),
+                file_action_id: None,
             };
         });
     }
@@ -1918,7 +1858,7 @@ theme = "light"
         assert_eq!(app.selected_row(), 0);
         assert_eq!(
             app.handle_key(ConfigUiKey::Enter),
-            open_file_intent(0, "selected", "/tmp/selected", false)
+            open_file_intent("selected", "/tmp/selected", false)
         );
     }
 
@@ -1940,9 +1880,7 @@ theme = "light"
         assert_eq!(
             app.handle_key(ConfigUiKey::Char('e')),
             ConfigUiIntent::EditTextExternally {
-                field_index: 0,
-                source_id: "ui".to_string(),
-                path: "ui.title".to_string(),
+                field: ConfigUiFieldId::new("ui", "ui.title"),
                 input: "light".to_string(),
             }
         );
@@ -1952,9 +1890,7 @@ theme = "light"
         assert_eq!(
             app.handle_key(ConfigUiKey::Ctrl('e')),
             ConfigUiIntent::EditTextExternally {
-                field_index: 0,
-                source_id: "ui".to_string(),
-                path: "ui.title".to_string(),
+                field: ConfigUiFieldId::new("ui", "ui.title"),
                 input: "temporary title".to_string(),
             }
         );
@@ -2013,13 +1949,18 @@ theme = "light"
         ]);
         let mut app = ConfigUiApp::new(model);
 
-        assert!(app.apply_external_text_edit(0, "ignored").is_err());
+        let title = ConfigUiFieldId::new("ui", "ui.title");
+        let enabled = ConfigUiFieldId::new("server", "server.enabled");
+        assert!(app.apply_external_text_edit(&title, "ignored").is_err());
 
         app.begin_edit_field(0);
-        assert!(app.apply_external_text_edit(1, "wrong field").is_err());
+        assert!(
+            app.apply_external_text_edit(&enabled, "wrong field")
+                .is_err()
+        );
         assert_eq!(app.edit.as_ref().expect("text edit").input, "light");
 
-        app.apply_external_text_edit(0, "edited title")
+        app.apply_external_text_edit(&title, "edited title")
             .expect("apply returned text");
         let edit = app.edit.as_ref().expect("text edit");
         assert_eq!(edit.input, "edited title");
@@ -2027,17 +1968,15 @@ theme = "light"
         assert_eq!(
             app.handle_key(ConfigUiKey::Enter),
             ConfigUiIntent::SetField {
-                field_index: 0,
-                source_id: "ui".to_string(),
-                path: "ui.title".to_string(),
+                field: title,
                 value: json!("edited title"),
             }
         );
     }
 
-    // Defends: generic TOML document rows reuse the normal structured edit intent route.
+    // Defends: inferred TOML rows do not gain write authority from scalar syntax.
     #[test]
-    fn toml_document_scalar_rows_emit_standard_set_field_intents() {
+    fn toml_document_scalar_rows_remain_read_only() {
         let document = build_toml_document_fields(ConfigUiTomlDocumentSpec {
             source_id: "helix",
             tab: "native",
@@ -2065,23 +2004,12 @@ line-number = "relative"
         let mut app = ConfigUiApp::new(model);
         app.selected_row = field_index;
 
-        assert_eq!(
-            app.handle_key(ConfigUiKey::Enter),
-            ConfigUiIntent::BeginEdit {
-                field_index,
-                source_id: "helix".to_string(),
-                path: "editor.line-number".to_string(),
-            }
-        );
-        app.begin_edit_field(field_index);
-        assert_eq!(
-            app.handle_key(ConfigUiKey::Enter),
-            ConfigUiIntent::SetField {
-                field_index,
-                source_id: "helix".to_string(),
-                path: "editor.line-number".to_string(),
-                value: json!("relative"),
-            }
+        assert_eq!(app.handle_key(ConfigUiKey::Enter), ConfigUiIntent::None);
+        assert!(app.edit().is_none());
+        assert!(
+            app.notice().is_some_and(|notice| {
+                notice.text.contains("No editor capability was declared")
+            })
         );
     }
 
@@ -2098,9 +2026,7 @@ line-number = "relative"
         assert_eq!(
             app.handle_key(ConfigUiKey::Char('u')),
             ConfigUiIntent::UnsetField {
-                field_index: 0,
-                source_id: "ui".to_string(),
-                path: "ui.theme".to_string(),
+                field: ConfigUiFieldId::new("ui", "ui.theme"),
             }
         );
 
@@ -2112,9 +2038,9 @@ line-number = "relative"
         );
     }
 
-    // Defends: typed edit parsing and allowed-value checks stay reusable rather than Yazelix-specific.
+    // Defends: capability parsing preserves exact host values and text encodings.
     #[test]
-    fn edit_parser_uses_field_type_and_allowed_values() {
+    fn edit_parser_obeys_declared_capabilities() {
         let bool_field = field("server.enabled", "bool", "false", &[]);
         assert_eq!(
             parse_edit_input(&bool_field, "true").expect("bool"),
@@ -2124,10 +2050,10 @@ line-number = "relative"
 
         let enum_field = field("ui.theme", "string", "\"light\"", &["light", "dark"]);
         assert_eq!(
-            parse_edit_input(&enum_field, "dark").expect("enum"),
+            parse_edit_input(&enum_field, r#""dark""#).expect("enum"),
             json!("dark")
         );
-        assert!(parse_edit_input(&enum_field, "wide").is_err());
+        assert!(parse_edit_input(&enum_field, r#""wide""#).is_err());
 
         let list_field = field(
             "plugins.enabled",
@@ -2140,42 +2066,189 @@ line-number = "relative"
             json!(["git", "search"])
         );
         assert_eq!(
-            parse_edit_input(&list_field, r#"["search","git"]"#).expect("ordered list"),
-            json!(["search", "git"])
+            parse_edit_input(&list_field, r#"["search","git"]"#).expect("unordered list"),
+            json!(["git", "search"])
         );
         assert!(parse_edit_input(&list_field, r#"["unknown"]"#).is_err());
+        assert!(parse_edit_input(&list_field, r#"["git","git"]"#).is_err());
 
-        let mut friendly_list_field = list_field.clone();
-        friendly_list_field.edit_behavior = ConfigUiEditBehavior::FriendlyStringList;
+        let string_field = field("ui.title", "string", r#""title""#, &[]);
         assert_eq!(
-            parse_edit_input(&friendly_list_field, "search, git").expect("friendly list"),
-            json!(["search", "git"])
+            parse_edit_input(&string_field, "search, git").expect("free string"),
+            json!("search, git")
         );
-        assert!(parse_edit_input(&friendly_list_field, "search, unknown").is_err());
+    }
+
+    // Defends: display type text cannot grant editing, while a declared toggle can use any two
+    // exact JSON values instead of being restricted to booleans.
+    #[test]
+    fn capability_not_type_label_authorizes_toggle_editing() {
+        let mut display_bool = field("display.bool", "bool", "false", &[]);
+        display_bool.capability = ConfigUiCapability::ReadOnly {
+            reason: "Managed by the host.".to_string(),
+            file_action_id: None,
+        };
+        let mut app = ConfigUiApp::new(model_with_fields(vec![display_bool]));
+
+        assert_eq!(app.handle_key(ConfigUiKey::Char(' ')), ConfigUiIntent::None);
+        assert!(app.edit().is_none());
+        assert_eq!(
+            app.notice().map(|notice| notice.text.as_str()),
+            Some("Managed by the host.")
+        );
+
+        let mut encoded = field("service.mode", "string", r#""disabled""#, &[]);
+        encoded.capability = ConfigUiCapability::Toggle {
+            off: ConfigUiChoice::new(json!("disabled")),
+            on: ConfigUiChoice {
+                value: json!("enabled"),
+                label: Some("Enabled".to_string()),
+            },
+        };
+        let mut app = ConfigUiApp::new(model_with_fields(vec![encoded]));
+
+        assert_eq!(app.handle_key(ConfigUiKey::Char(' ')), ConfigUiIntent::None);
+        assert_eq!(
+            app.edit().expect("encoded toggle edit").input,
+            r#""enabled""#
+        );
+        #[cfg(feature = "ui")]
+        assert_eq!(
+            single_choice_status_value(&app.model.fields[0], app.edit().expect("toggle edit")),
+            "selected Enabled"
+        );
+        assert_eq!(
+            app.handle_key(ConfigUiKey::Enter),
+            ConfigUiIntent::SetField {
+                field: ConfigUiFieldId::new(DEFAULT_CONFIG_SOURCE_ID, "service.mode"),
+                value: json!("enabled"),
+            }
+        );
+    }
+
+    // Defends: free-text creation starts empty only for an unknown absent value and never coerces
+    // a known value that is incompatible with the declared encoding.
+    #[test]
+    fn free_text_seeds_preserve_sparse_state_and_encoding() {
+        let mut absent = field("ui.title", "string", r#""default""#, &[]);
+        absent.snapshot.intent = ConfigUiOverride::Absent;
+        absent.snapshot.effective = None;
+        absent.snapshot.baseline = None;
+        assert_eq!(
+            edit_state_for_field(&absent)
+                .expect("empty creation edit")
+                .input,
+            ""
+        );
+
+        let mut incompatible = absent.clone();
+        incompatible.snapshot.intent = ConfigUiOverride::Explicit(json!(12));
+        incompatible.snapshot.effective = Some(ConfigUiResolvedValue::new(json!(12)));
+        assert!(
+            edit_state_for_field(&incompatible)
+                .expect_err("string editor must reject a number seed")
+                .contains("non-string value")
+        );
+
+        incompatible.capability = ConfigUiCapability::FreeText {
+            encoding: ConfigUiTextEncoding::Json,
+        };
+        assert_eq!(
+            edit_state_for_field(&incompatible)
+                .expect("JSON editor accepts any JSON value")
+                .input,
+            "12"
+        );
+    }
+
+    // Defends: reload compatibility is capability-specific and never reinterprets a staged buffer
+    // under a different editor contract.
+    #[test]
+    fn staged_edit_compatibility_is_exact() {
+        let choice = field("ui.theme", "string", r#""light""#, &["light", "dark"]);
+        let edit = edit_state_for_field(&choice).expect("choice edit");
+        assert!(edit_is_compatible(&choice, &choice, &edit));
+
+        let mut missing = choice.clone();
+        missing.capability = ConfigUiCapability::Choice {
+            choices: vec![ConfigUiChoice::new(json!("dark"))],
+        };
+        assert!(!edit_is_compatible(&choice, &missing, &edit));
+
+        let mut toggle = choice.clone();
+        toggle.capability = ConfigUiCapability::Toggle {
+            off: ConfigUiChoice::new(json!("light")),
+            on: ConfigUiChoice::new(json!("dark")),
+        };
+        assert!(!edit_is_compatible(&choice, &toggle, &edit));
+
+        let string_text = field("ui.title", "string", r#""title""#, &[]);
+        let text_edit = edit_state_for_field(&string_text).expect("text edit");
+        let mut json_text = string_text.clone();
+        json_text.capability = ConfigUiCapability::FreeText {
+            encoding: ConfigUiTextEncoding::Json,
+        };
+        assert!(!edit_is_compatible(&string_text, &json_text, &text_edit));
+
+        let ordered = field(
+            "plugins.enabled",
+            "string_list",
+            r#"["git"]"#,
+            &["git", "search"],
+        );
+        let multi_edit = edit_state_for_field(&ordered).expect("multichoice edit");
+        let mut reordered = ordered.clone();
+        if let ConfigUiCapability::MultiChoice { ordered, .. } = &mut reordered.capability {
+            *ordered = true;
+        }
+        assert!(!edit_is_compatible(&ordered, &reordered, &multi_edit));
+
+        let mut highlighted_removed = multi_edit;
+        highlighted_removed.choice_index = 1;
+        let mut reduced = ordered.clone();
+        let ConfigUiCapability::MultiChoice { choices, .. } = &mut reduced.capability else {
+            panic!("multichoice capability");
+        };
+        choices.pop();
+        assert!(reconcile_replacement_edit(
+            &ordered,
+            &reduced,
+            &mut highlighted_removed
+        ));
+        assert_eq!(highlighted_removed.choice_index, 0);
+        assert_eq!(highlighted_removed.input, r#"["git"]"#);
     }
 
     // Defends: edit initialization follows sparse state rather than confusing invalid input with
     // display text, while bools and scalar enums keep their native choice modes.
     #[test]
-    fn edit_helpers_use_choice_modes_for_bool_and_enum() {
+    fn edit_initialization_uses_sparse_state_and_capabilities() {
         let bool_field = field("server.enabled", "bool", "true", &[]);
-        assert_eq!(field_bool_value(&bool_field), Some(true));
-        assert_eq!(edit_mode_for_field(&bool_field), ConfigUiEditMode::Choice);
+        let bool_edit = edit_state_for_field(&bool_field).expect("toggle edit");
+        assert_eq!(bool_edit.input, "true");
+        assert_eq!(bool_edit.mode, ConfigUiEditMode::Choice);
 
         let enum_field = field("ui.theme", "string", "\"light\"", &["light", "dark"]);
-        assert_eq!(edit_input_for_field(&enum_field), "light");
-        assert_eq!(edit_mode_for_field(&enum_field), ConfigUiEditMode::Choice);
+        let enum_edit = edit_state_for_field(&enum_field).expect("choice edit");
+        assert_eq!(enum_edit.input, r#""light""#);
+        assert_eq!(enum_edit.mode, ConfigUiEditMode::Choice);
 
         let mut invalid_field = field("server.port", "int", "80", &[]);
         invalid_field.snapshot.intent = ConfigUiOverride::Invalid {
             input: "not set".to_string(),
         };
-        assert_eq!(edit_input_for_field(&invalid_field), "not set");
+        assert_eq!(
+            edit_state_for_field(&invalid_field)
+                .expect("invalid free-text edit")
+                .input,
+            "not set"
+        );
     }
 
-    // Defends: default string-list multiselect remains set-like and canonicalizes selected values to allowed-value order.
+    // Defends: unordered multichoice remains set-like and canonicalizes selected values to
+    // capability order.
     #[test]
-    fn default_string_list_multiselect_keeps_allowed_value_order() {
+    fn unordered_multichoice_keeps_capability_order() {
         let field = field(
             "widgets.enabled",
             "string_list",
@@ -2184,38 +2257,45 @@ line-number = "relative"
         );
 
         assert_eq!(
-            toggled_string_list_input(&field, r#"["status"]"#, 0).expect("toggle clock"),
+            toggled_multi_choice_input(&field, r#"["status"]"#, 0).expect("toggle clock"),
             r#"["clock","status"]"#
         );
     }
 
-    // Defends: ordered string-list editing is opt-in and preserves config order when toggling selected ids.
+    // Defends: ordered multichoice editing is opt-in and preserves config order when toggling
+    // selected values.
     #[test]
-    fn ordered_string_list_multiselect_preserves_order_when_toggling() {
+    fn ordered_multichoice_preserves_order_when_toggling() {
         let mut field = field(
             "widgets.enabled",
             "string_list",
             r#"["status","clock"]"#,
             &["clock", "status", "mode"],
         );
-        field.edit_behavior = ConfigUiEditBehavior::OrderedStringList;
+        if let ConfigUiCapability::MultiChoice { ordered, .. } = &mut field.capability {
+            *ordered = true;
+        }
 
-        assert!(is_ordered_string_list_field(&field));
-        assert_eq!(edit_mode_for_field(&field), ConfigUiEditMode::MultiChoice);
+        assert!(is_ordered_multi_choice_field(&field));
         assert_eq!(
-            toggled_string_list_input(&field, r#"["status","clock"]"#, 2).expect("toggle mode"),
+            edit_state_for_field(&field).expect("ordered edit").mode,
+            ConfigUiEditMode::MultiChoice
+        );
+        assert_eq!(
+            toggled_multi_choice_input(&field, r#"["status","clock"]"#, 2).expect("toggle mode"),
             r#"["status","clock","mode"]"#
         );
         assert_eq!(
-            toggled_string_list_input(&field, r#"["status","clock","mode"]"#, 1)
+            toggled_multi_choice_input(&field, r#"["status","clock","mode"]"#, 1)
                 .expect("remove clock"),
             r#"["status","mode"]"#
         );
     }
 
-    // Defends: ordered string-list fields can move enabled ids without changing default multiselect semantics.
+    // Defends: ordered multichoice fields can move enabled values without changing unordered
+    // semantics.
     #[test]
-    fn ordered_string_list_reducer_reorders_enabled_values() {
+    fn ordered_multichoice_reducer_reorders_enabled_values() {
         let mut model = test_model();
         model.fields = vec![field(
             "widgets.enabled",
@@ -2223,7 +2303,9 @@ line-number = "relative"
             r#"["status","clock"]"#,
             &["clock", "status", "mode"],
         )];
-        model.fields[0].edit_behavior = ConfigUiEditBehavior::OrderedStringList;
+        if let ConfigUiCapability::MultiChoice { ordered, .. } = &mut model.fields[0].capability {
+            *ordered = true;
+        }
         let mut app = ConfigUiApp::new(model);
 
         app.begin_edit_field(0);
@@ -2239,9 +2321,7 @@ line-number = "relative"
         assert_eq!(
             app.handle_key(ConfigUiKey::Enter),
             ConfigUiIntent::SetField {
-                field_index: 0,
-                source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
-                path: "widgets.enabled".to_string(),
+                field: ConfigUiFieldId::new(DEFAULT_CONFIG_SOURCE_ID, "widgets.enabled"),
                 value: json!(["status", "clock"]),
             }
         );
@@ -2435,13 +2515,10 @@ line-number = "relative"
         assert_eq!(app.visible_rows().len(), 3);
         assert_eq!(app.handle_key(ConfigUiKey::Char('j')), ConfigUiIntent::None);
         assert_eq!(app.selected_row, 1);
+        assert_eq!(app.handle_key(ConfigUiKey::Char('e')), ConfigUiIntent::None);
         assert_eq!(
-            app.handle_key(ConfigUiKey::Char('e')),
-            ConfigUiIntent::BeginEdit {
-                field_index: 1,
-                source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
-                path: "ui.theme".to_string(),
-            }
+            app.edit.as_ref().map(|edit| &edit.field_id),
+            Some(&ConfigUiFieldId::new(DEFAULT_CONFIG_SOURCE_ID, "ui.theme"))
         );
     }
 
@@ -2459,13 +2536,11 @@ line-number = "relative"
         assert_eq!(app.handle_key(ConfigUiKey::Char('l')), ConfigUiIntent::None);
         assert_eq!(app.edit.as_ref().expect("single edit").choice_index, 1);
         assert_eq!(app.handle_key(ConfigUiKey::Char(' ')), ConfigUiIntent::None);
-        assert_eq!(app.edit.as_ref().expect("single edit").input, "dark");
+        assert_eq!(app.edit.as_ref().expect("single edit").input, r#""dark""#);
         assert_eq!(
             app.handle_key(ConfigUiKey::Enter),
             ConfigUiIntent::SetField {
-                field_index: 1,
-                source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
-                path: "ui.theme".to_string(),
+                field: ConfigUiFieldId::new(DEFAULT_CONFIG_SOURCE_ID, "ui.theme"),
                 value: json!("dark"),
             }
         );
@@ -2478,9 +2553,7 @@ line-number = "relative"
         assert_eq!(
             app.handle_key(ConfigUiKey::Enter),
             ConfigUiIntent::SetField {
-                field_index: 2,
-                source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
-                path: "plugins.enabled".to_string(),
+                field: ConfigUiFieldId::new(DEFAULT_CONFIG_SOURCE_ID, "plugins.enabled"),
                 value: json!(["git", "search"]),
             }
         );
@@ -2573,14 +2646,8 @@ line-number = "relative"
         }
     }
 
-    fn open_file_intent(
-        file_action_index: usize,
-        action_id: &str,
-        path: &str,
-        create_if_missing: bool,
-    ) -> ConfigUiIntent {
+    fn open_file_intent(action_id: &str, path: &str, create_if_missing: bool) -> ConfigUiIntent {
         ConfigUiIntent::OpenFile {
-            file_action_index,
             source_id: "native".to_string(),
             action_id: action_id.to_string(),
             path: PathBuf::from(path),
@@ -2588,12 +2655,14 @@ line-number = "relative"
         }
     }
 
-    // Defends: e on a structured field opens only its uniquely matching host-owned source file.
+    // Defends: a read-only field opens the exact host-declared action even when its source has
+    // other file actions.
     #[test]
-    fn structured_field_edit_opens_unique_source_file_action() {
+    fn read_only_field_opens_its_declared_file_action() {
         let mut structured = field_with_source("native", "editor.rulers", "bool", "true", &[]);
-        structured.edit_behavior = ConfigUiEditBehavior::StructuredOnly {
-            notice: "Edit the source file directly.".to_string(),
+        structured.capability = ConfigUiCapability::ReadOnly {
+            reason: "Edit the source file directly.".to_string(),
+            file_action_id: Some("settings".to_string()),
         };
         let mut model = model_with_fields(vec![structured]);
         model.file_actions = vec![file_action("settings", "/tmp/settings", true, true)];
@@ -2601,23 +2670,21 @@ line-number = "relative"
 
         assert_eq!(
             app.handle_key(ConfigUiKey::Char('e')),
-            open_file_intent(0, "settings", "/tmp/settings", false)
+            open_file_intent("settings", "/tmp/settings", false)
         );
-        for key in [ConfigUiKey::Enter, ConfigUiKey::Char('u')] {
-            assert_eq!(app.handle_key(key), ConfigUiIntent::None);
-            assert_eq!(
-                app.notice.as_ref().map(|notice| notice.text.as_str()),
-                Some("Edit the source file directly.")
-            );
-        }
+        assert_eq!(app.handle_key(ConfigUiKey::Enter), ConfigUiIntent::None);
+        assert_eq!(
+            app.notice.as_ref().map(|notice| notice.text.as_str()),
+            Some("Edit the source file directly.")
+        );
 
         app.model
             .file_actions
             .push(file_action("other", "/tmp/other", true, true));
-        assert!(matches!(
+        assert_eq!(
             app.handle_key(ConfigUiKey::Char('e')),
-            ConfigUiIntent::BeginEdit { .. }
-        ));
+            open_file_intent("settings", "/tmp/settings", false)
+        );
     }
 
     // Defends: file action rows emit stable host-owned open intents for existing and missing files.
@@ -2633,13 +2700,13 @@ line-number = "relative"
 
         assert_eq!(
             app.handle_key(ConfigUiKey::Enter),
-            open_file_intent(0, "existing", "/tmp/acme/existing.toml", false)
+            open_file_intent("existing", "/tmp/acme/existing.toml", false)
         );
 
         app.selected_row = 1;
         assert_eq!(
             app.handle_key(ConfigUiKey::Char(' ')),
-            open_file_intent(1, "missing", "/tmp/acme/missing.toml", true)
+            open_file_intent("missing", "/tmp/acme/missing.toml", true)
         );
     }
 

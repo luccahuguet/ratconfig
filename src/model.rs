@@ -268,6 +268,53 @@ pub struct ConfigUiResolvedValue {
     pub origin: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigUiChoice {
+    pub value: JsonValue,
+    pub label: Option<String>,
+}
+
+impl ConfigUiChoice {
+    pub fn new(value: JsonValue) -> Self {
+        Self { value, label: None }
+    }
+
+    pub(crate) fn display_label(&self) -> String {
+        self.label.clone().unwrap_or_else(|| match &self.value {
+            JsonValue::String(value) => value.clone(),
+            value => render_json_edit_value(value),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigUiTextEncoding {
+    String,
+    Json,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigUiCapability {
+    ReadOnly {
+        reason: String,
+        file_action_id: Option<String>,
+    },
+    FreeText {
+        encoding: ConfigUiTextEncoding,
+    },
+    Toggle {
+        off: ConfigUiChoice,
+        on: ConfigUiChoice,
+    },
+    Choice {
+        choices: Vec<ConfigUiChoice>,
+    },
+    MultiChoice {
+        choices: Vec<ConfigUiChoice>,
+        ordered: bool,
+    },
+}
+
 impl ConfigUiResolvedValue {
     pub fn new(value: JsonValue) -> Self {
         Self {
@@ -285,14 +332,15 @@ pub struct ConfigUiField {
     pub section_label: String,
     pub list_cells: Vec<String>,
     pub tab: String,
-    pub kind: String,
+    /// Optional display-only type text. This never authorizes editing.
+    pub type_label: Option<String>,
     pub snapshot: ConfigUiFieldSnapshot,
     pub description: String,
-    pub allowed_values: Vec<String>,
     pub validation: String,
     pub rebuild_required: bool,
     pub apply_status: ConfigUiApplyStatus,
-    pub edit_behavior: ConfigUiEditBehavior,
+    pub capability: ConfigUiCapability,
+    pub can_unset: bool,
 }
 
 /// Host-owned config file action row.
@@ -348,19 +396,6 @@ pub(crate) fn field_current_value(field: &ConfigUiField) -> String {
     }
 }
 
-pub(crate) fn field_edit_value(field: &ConfigUiField) -> String {
-    match &field.snapshot.intent {
-        ConfigUiOverride::Invalid { input } => input.clone(),
-        ConfigUiOverride::Explicit(value) => render_field_edit_value(field, value),
-        ConfigUiOverride::Absent => field
-            .snapshot
-            .effective
-            .as_ref()
-            .map(|resolved| render_field_edit_value(field, &resolved.value))
-            .unwrap_or_default(),
-    }
-}
-
 pub(crate) fn field_baseline_value(field: &ConfigUiField) -> Option<String> {
     field
         .snapshot
@@ -371,14 +406,14 @@ pub(crate) fn field_baseline_value(field: &ConfigUiField) -> Option<String> {
 
 fn render_field_value(field: &ConfigUiField, value: &JsonValue) -> String {
     match value {
-        JsonValue::String(value) if field.kind != "string" => value.clone(),
+        JsonValue::String(value) if field.type_label.as_deref() != Some("string") => value.clone(),
         _ => render_json_value(value),
     }
 }
 
 fn render_field_edit_value(field: &ConfigUiField, value: &JsonValue) -> String {
     match value {
-        JsonValue::String(value) if field.kind != "string" => value.clone(),
+        JsonValue::String(value) if field.type_label.as_deref() != Some("string") => value.clone(),
         _ => render_json_edit_value(value),
     }
 }
@@ -392,11 +427,11 @@ pub struct ConfigUiFieldSpec {
     pub list_cells: Vec<String>,
     pub tab: String,
     pub description: String,
-    pub allowed_values: Vec<String>,
     pub validation: String,
     pub rebuild_required: bool,
     pub apply_status: ConfigUiApplyStatus,
-    pub edit_behavior: ConfigUiEditBehavior,
+    pub capability: ConfigUiCapability,
+    pub can_unset: bool,
 }
 
 impl ConfigUiFieldSpec {
@@ -405,7 +440,7 @@ impl ConfigUiFieldSpec {
         path: impl Into<String>,
         tab: impl Into<String>,
         description: impl Into<String>,
-        allowed_values: Vec<String>,
+        capability: ConfigUiCapability,
         validation: impl Into<String>,
         apply_status: ConfigUiApplyStatus,
     ) -> Self {
@@ -417,17 +452,17 @@ impl ConfigUiFieldSpec {
             list_cells: Vec::new(),
             tab: tab.into(),
             description: description.into(),
-            allowed_values,
             validation: validation.into(),
             rebuild_required: false,
             apply_status,
-            edit_behavior: ConfigUiEditBehavior::Default,
+            capability,
+            can_unset: false,
         }
     }
 
     pub fn build(
         self,
-        kind: impl Into<String>,
+        type_label: impl Into<String>,
         current: Option<&JsonValue>,
         default: Option<&JsonValue>,
     ) -> ConfigUiField {
@@ -443,7 +478,7 @@ impl ConfigUiFieldSpec {
             section_label: self.section_label,
             list_cells: self.list_cells,
             tab: self.tab,
-            kind: kind.into(),
+            type_label: Some(type_label.into()),
             snapshot: ConfigUiFieldSnapshot {
                 intent,
                 effective,
@@ -451,37 +486,12 @@ impl ConfigUiFieldSpec {
                 external_manager: None,
             },
             description: self.description,
-            allowed_values: self.allowed_values,
             validation: self.validation,
             rebuild_required: self.rebuild_required,
             apply_status: self.apply_status,
-            edit_behavior: self.edit_behavior,
+            capability: self.capability,
+            can_unset: self.can_unset,
         }
-    }
-
-    pub fn build_string_list(
-        self,
-        current: Option<Vec<String>>,
-        default: Option<Vec<String>>,
-    ) -> Result<ConfigUiField, String> {
-        if self.allowed_values.is_empty() {
-            return Err(format!(
-                "{} must define at least one allowed string-list value.",
-                self.path
-            ));
-        }
-        for values in [current.as_deref(), default.as_deref()]
-            .into_iter()
-            .flatten()
-        {
-            for value in values {
-                validate_string_choice_value(&self.path, value, &self.allowed_values)?;
-            }
-        }
-
-        let current = current.as_deref().map(string_list_values_json);
-        let default = default.as_deref().map(string_list_values_json);
-        Ok(self.build("string_list", current.as_ref(), default.as_ref()))
     }
 }
 
@@ -551,14 +561,6 @@ pub fn build_toml_document_fields(
         list_table: toml_document_list_table(),
         fields,
     })
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ConfigUiEditBehavior {
-    Default,
-    FriendlyStringList,
-    OrderedStringList,
-    StructuredOnly { notice: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -658,13 +660,20 @@ impl ConfigUiModel {
                     field.source_id, field.path
                 ));
             }
+            validate_optional_label("field type_label", field.type_label.as_deref())?;
             validate_snapshot(field)?;
+            validate_capability(field, source, &self.file_actions)?;
         }
 
         let mut action_ids = BTreeSet::new();
         for action in &self.file_actions {
             require_nonblank("file action source_id", &action.source_id)?;
             require_nonblank("file action action_id", &action.action_id)?;
+            require_nonblank("file action label", &action.label)?;
+            validate_optional_label(
+                "file action disabled_reason",
+                action.disabled_reason.as_deref(),
+            )?;
             if !tabs.contains(action.tab.as_str()) {
                 return Err(format!(
                     "file action {} uses unknown tab {}",
@@ -832,7 +841,7 @@ pub(crate) fn set_field_state_for_test(field: &mut ConfigUiField, state: ConfigU
         }
         ConfigUiFieldState::Invalid => {
             field.snapshot.intent = ConfigUiOverride::Invalid {
-                input: field_edit_value(field),
+                input: render_field_edit_value(field, &value),
             };
         }
     }
@@ -888,6 +897,86 @@ fn validate_snapshot(field: &ConfigUiField) -> Result<(), String> {
             "absent field {} must have identical effective and baseline resolutions or neither",
             field.path
         ));
+    }
+    Ok(())
+}
+
+fn validate_capability(
+    field: &ConfigUiField,
+    source: &ConfigUiSource,
+    file_actions: &[ConfigUiFileAction],
+) -> Result<(), String> {
+    if source.read_only && !matches!(field.capability, ConfigUiCapability::ReadOnly { .. }) {
+        return Err(format!(
+            "field {} has a mutating capability on read-only source {}",
+            field.path, field.source_id
+        ));
+    }
+    match &field.capability {
+        ConfigUiCapability::ReadOnly {
+            reason,
+            file_action_id,
+        } => {
+            require_nonblank("read-only reason", reason)?;
+            if let Some(action_id) = file_action_id {
+                require_nonblank("read-only file_action_id", action_id)?;
+                if file_actions
+                    .iter()
+                    .filter(|action| {
+                        action.source_id == field.source_id && action.action_id == *action_id
+                    })
+                    .count()
+                    != 1
+                {
+                    return Err(format!(
+                        "field {} read-only action ({}, {}) must resolve exactly once",
+                        field.path, field.source_id, action_id
+                    ));
+                }
+            }
+        }
+        ConfigUiCapability::FreeText { .. } => {}
+        ConfigUiCapability::Toggle { off, on } => {
+            if off.value == on.value {
+                return Err(format!(
+                    "field {} toggle values must be distinct",
+                    field.path
+                ));
+            }
+            validate_choices(field, [off, on])?;
+        }
+        ConfigUiCapability::Choice { choices }
+        | ConfigUiCapability::MultiChoice { choices, .. } => {
+            validate_choices(field, choices)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_choices<'a>(
+    field: &ConfigUiField,
+    choices: impl IntoIterator<Item = &'a ConfigUiChoice>,
+) -> Result<(), String> {
+    let choices = choices.into_iter().collect::<Vec<_>>();
+    if choices.is_empty() {
+        return Err(format!(
+            "field {} choice capability must define at least one choice",
+            field.path
+        ));
+    }
+    let mut labels = BTreeSet::new();
+    for (index, choice) in choices.iter().enumerate() {
+        let label = choice.display_label();
+        require_nonblank("choice label", &label)?;
+        if choices[..index]
+            .iter()
+            .any(|previous| previous.value == choice.value)
+        {
+            return Err(format!("field {} choice values must be unique", field.path));
+        }
+        if !labels.insert(label) {
+            return Err(format!("field {} choice labels must be unique", field.path));
+        }
     }
     Ok(())
 }
@@ -1229,16 +1318,13 @@ fn toml_document_entry_field(
     entry: TomlDocumentEntry,
 ) -> Result<ConfigUiField, String> {
     let display_path = toml_document_display_path(&entry.segments);
-    let patch_path = toml_document_patch_path(current.as_table(), &entry.segments);
-    let field_path = patch_path.as_deref().unwrap_or(&display_path).to_string();
+    let path_is_patchable = toml_document_path_is_patchable(current.as_table(), &entry.segments);
     let observed = entry
         .current
         .as_ref()
         .or(entry.default.as_ref())
         .expect("TOML entries are observed in at least one document");
-    let kind = toml_document_field_kind(observed);
     let type_label = toml_document_type_label(observed);
-    let editable = patch_path.is_some() && toml_document_value_is_editable(observed);
     let intent = entry
         .current
         .as_ref()
@@ -1258,15 +1344,15 @@ fn toml_document_entry_field(
         .as_ref()
         .map(toml_document_snapshot_value)
         .map(ConfigUiResolvedValue::new);
-    let validation = if !editable || spec.validation.trim().is_empty() {
-        toml_document_validation_label(type_label, editable).to_string()
+    let validation = if spec.validation.trim().is_empty() {
+        "read-only inferred TOML value".to_string()
     } else {
         spec.validation.to_string()
     };
 
     Ok(ConfigUiField {
         source_id: spec.source_id.to_string(),
-        path: field_path,
+        path: display_path.clone(),
         display_label: display_path.clone(),
         section_label: spec.section_label.to_string(),
         list_cells: vec![
@@ -1278,7 +1364,7 @@ fn toml_document_entry_field(
             default_cell,
         ],
         tab: spec.tab.to_string(),
-        kind: kind.to_string(),
+        type_label: Some(type_label.to_string()),
         snapshot: ConfigUiFieldSnapshot {
             intent,
             effective: Some(ConfigUiResolvedValue::new(toml_document_snapshot_value(
@@ -1287,35 +1373,27 @@ fn toml_document_entry_field(
             baseline,
             external_manager: None,
         },
-        description: toml_document_description(
-            &display_path,
-            type_label,
-            editable,
-            patch_path.is_some(),
-        ),
-        allowed_values: Vec::new(),
+        description: toml_document_description(&display_path, type_label, path_is_patchable),
         validation,
         rebuild_required: spec.rebuild_required,
         apply_status: spec.apply_status.clone(),
-        edit_behavior: if editable {
-            ConfigUiEditBehavior::Default
-        } else {
-            ConfigUiEditBehavior::StructuredOnly {
-                notice: toml_document_read_only_notice(patch_path.is_some()).to_string(),
-            }
+        capability: ConfigUiCapability::ReadOnly {
+            reason: "No editor capability was declared for this inferred TOML row.".to_string(),
+            file_action_id: None,
         },
+        can_unset: false,
     })
 }
 
-fn toml_document_patch_path(root: &TomlEditTable, segments: &[String]) -> Option<String> {
+fn toml_document_path_is_patchable(root: &TomlEditTable, segments: &[String]) -> bool {
     if segments.is_empty()
         || !segments
             .iter()
             .all(|segment| is_toml_document_bare_key(segment))
     {
-        return None;
+        return false;
     }
-    toml_document_parent_path_is_patchable(root, segments).then(|| segments.join("."))
+    toml_document_parent_path_is_patchable(root, segments)
 }
 
 fn is_toml_document_bare_key(segment: &str) -> bool {
@@ -1373,29 +1451,8 @@ fn toml_document_key_label(segments: &[String], type_label: &str) -> String {
     }
 }
 
-fn toml_document_value_is_editable(value: &TomlValue) -> bool {
-    matches!(
-        value,
-        TomlValue::String(_) | TomlValue::Integer(_) | TomlValue::Boolean(_)
-    ) || matches!(value, TomlValue::Float(value) if value.is_finite())
-        || toml_document_string_list(value)
-}
-
 fn toml_document_string_list(value: &TomlValue) -> bool {
     matches!(value, TomlValue::Array(values) if !values.is_empty() && values.iter().all(|value| matches!(value, TomlValue::String(_))))
-}
-
-fn toml_document_field_kind(value: &TomlValue) -> &'static str {
-    match value {
-        TomlValue::String(_) => "string",
-        TomlValue::Integer(_) => "int",
-        TomlValue::Float(_) => "float",
-        TomlValue::Boolean(_) => "bool",
-        TomlValue::Array(_) if toml_document_string_list(value) => "string_list",
-        TomlValue::Array(_) => "array",
-        TomlValue::Table(_) => "object",
-        TomlValue::Datetime(_) => "datetime",
-    }
 }
 
 fn toml_document_type_label(value: &TomlValue) -> &'static str {
@@ -1425,48 +1482,19 @@ fn toml_document_snapshot_value(value: &TomlValue) -> JsonValue {
         .unwrap_or_else(|_| JsonValue::String(toml_document_render_value(value)))
 }
 
-fn toml_document_validation_label(type_label: &str, editable: bool) -> &'static str {
-    if editable {
-        match type_label {
-            "string list" => "TOML array of strings",
-            "boolean" => "TOML boolean",
-            "integer" => "TOML integer",
-            "float" => "TOML float",
-            "string" => "TOML string",
-            _ => "TOML value",
-        }
-    } else {
-        "read-only in generic TOML document view"
-    }
-}
-
 fn toml_document_description(
     display_path: &str,
     type_label: &str,
-    editable: bool,
     path_is_patchable: bool,
 ) -> String {
-    if editable {
-        return format!(
-            "Generic TOML {type_label} value at {display_path}. Hosts validate, write, reload, and apply this source."
-        );
-    }
     if path_is_patchable {
         format!(
-            "Generic TOML {type_label} value at {display_path}. Complex TOML values are shown for inspection; edit the source file for structured changes."
+            "Generic TOML {type_label} value at {display_path}. Inferred rows are inspection-only until the host declares an editor capability."
         )
     } else {
         format!(
             "Generic TOML {type_label} value at {display_path}. This path cannot be represented as a safe dotted TOML patch path; edit the source file directly."
         )
-    }
-}
-
-fn toml_document_read_only_notice(path_is_patchable: bool) -> &'static str {
-    if path_is_patchable {
-        "Complex TOML values are read-only in this generic view; edit the source file directly."
-    } else {
-        "This TOML path cannot be edited safely through dotted path patching; edit the source file directly."
     }
 }
 
@@ -1641,10 +1669,6 @@ pub(crate) fn validate_string_choice_value(
     ))
 }
 
-fn string_list_values_json(values: &[String]) -> JsonValue {
-    JsonValue::Array(values.iter().cloned().map(JsonValue::String).collect())
-}
-
 pub fn render_json_value(value: &JsonValue) -> String {
     match value {
         JsonValue::Null => "null".to_string(),
@@ -1779,7 +1803,6 @@ mod tests {
         assert!(model_with_fields(vec![invalid.clone()]).validate().is_ok());
         assert_eq!(snapshot_field_state(&invalid), ConfigUiFieldState::Invalid);
         assert_eq!(field_current_value(&invalid), "not-a-number");
-        assert_eq!(field_edit_value(&invalid), "not-a-number");
         assert_eq!(field_baseline_value(&invalid).as_deref(), Some("2"));
 
         let mut independent = field("independent", "string", r#""intent""#, &[]);
@@ -1877,17 +1900,31 @@ mod tests {
             .push(action("standalone", "open", "general"));
         invalid(model, "duplicate file action identity");
 
-        let mut model = base.clone();
-        model.file_actions = vec![action("standalone", "open", "missing")];
-        invalid(model, "uses unknown tab");
+        let invalid_action = |action, expected| {
+            let mut model = base.clone();
+            model.file_actions = vec![action];
+            invalid(model, expected);
+        };
+        invalid_action(action("standalone", "open", "missing"), "uses unknown tab");
+        invalid_action(
+            action("", "open", "general"),
+            "file action source_id must not be blank",
+        );
+        invalid_action(
+            action("standalone", " ", "general"),
+            "file action action_id must not be blank",
+        );
 
-        let mut model = base.clone();
-        model.file_actions = vec![action("", "open", "general")];
-        invalid(model, "file action source_id must not be blank");
+        let mut blank_label = action("standalone", "open", "general");
+        blank_label.label.clear();
+        invalid_action(blank_label, "file action label must not be blank");
 
-        let mut model = base.clone();
-        model.file_actions = vec![action("standalone", " ", "general")];
-        invalid(model, "file action action_id must not be blank");
+        let mut blank_reason = action("standalone", "open", "general");
+        blank_reason.disabled_reason = Some(" ".to_string());
+        invalid_action(
+            blank_reason,
+            "file action disabled_reason must not be blank",
+        );
 
         let mut model = base.clone();
         model.operational_tab = Some("missing".to_string());
@@ -2006,6 +2043,87 @@ mod tests {
         invalid(model, "mapping values must be unique");
     }
 
+    // Defends: capability declarations are complete, unambiguous, and cannot grant mutation on a
+    // source that the host marked read-only.
+    #[test]
+    fn model_validation_rejects_invalid_capability_authority_and_shapes() {
+        fn invalid(model: ConfigUiModel, expected: &str) {
+            let error = model.validate().expect_err("model should be invalid");
+            assert!(
+                error.contains(expected),
+                "expected {error:?} to contain {expected:?}"
+            );
+        }
+
+        fn choice(value: JsonValue, label: Option<&str>) -> ConfigUiChoice {
+            ConfigUiChoice {
+                value,
+                label: label.map(str::to_string),
+            }
+        }
+
+        let base = model_with_fields(vec![field("known", "string", r#""value""#, &[])]);
+
+        let mut model = base.clone();
+        model.sources[0].read_only = true;
+        invalid(model, "mutating capability on read-only source");
+
+        let mut model = base.clone();
+        model.fields[0].capability = ConfigUiCapability::ReadOnly {
+            reason: " ".to_string(),
+            file_action_id: None,
+        };
+        invalid(model, "read-only reason must not be blank");
+
+        let mut model = base.clone();
+        model.fields[0].capability = ConfigUiCapability::ReadOnly {
+            reason: "Use the source file.".to_string(),
+            file_action_id: Some(" ".to_string()),
+        };
+        invalid(model, "read-only file_action_id must not be blank");
+
+        let mut model = base.clone();
+        model.fields[0].capability = ConfigUiCapability::ReadOnly {
+            reason: "Use the source file.".to_string(),
+            file_action_id: Some("open".to_string()),
+        };
+        invalid(model, "must resolve exactly once");
+
+        let mut model = base.clone();
+        model.fields[0].capability = ConfigUiCapability::Toggle {
+            off: ConfigUiChoice::new(json!("same")),
+            on: ConfigUiChoice::new(json!("same")),
+        };
+        invalid(model, "toggle values must be distinct");
+
+        let mut model = base.clone();
+        model.fields[0].capability = ConfigUiCapability::Choice {
+            choices: Vec::new(),
+        };
+        invalid(model, "must define at least one choice");
+
+        let mut model = base.clone();
+        model.fields[0].capability = ConfigUiCapability::Choice {
+            choices: vec![choice(json!(1), Some("one")), choice(json!(1), Some("uno"))],
+        };
+        invalid(model, "choice values must be unique");
+
+        let mut model = base.clone();
+        model.fields[0].capability = ConfigUiCapability::Choice {
+            choices: vec![
+                choice(json!(1), Some("same")),
+                choice(json!(2), Some("same")),
+            ],
+        };
+        invalid(model, "choice labels must be unique");
+
+        let mut model = base;
+        model.fields[0].capability = ConfigUiCapability::Choice {
+            choices: vec![choice(json!(1), Some("\t"))],
+        };
+        invalid(model, "choice label must not be blank");
+    }
+
     // Defends: optional provenance and ownership labels are either absent or meaningful.
     #[test]
     fn model_validation_rejects_blank_optional_labels() {
@@ -2050,7 +2168,12 @@ mod tests {
             "ui.theme",
             "general",
             "Theme name",
-            vec!["light".to_string(), "dark".to_string()],
+            ConfigUiCapability::Choice {
+                choices: vec![
+                    ConfigUiChoice::new(json!("light")),
+                    ConfigUiChoice::new(json!("dark")),
+                ],
+            },
             "must be a known theme",
             status(),
         )
@@ -2177,7 +2300,6 @@ help = "Theme name"
             ConfigUiFieldState::Explicit
         );
         assert_eq!(field_current_value(&explicit), "\"dark\"");
-        assert_eq!(field_edit_value(&explicit), "\"dark\"");
         assert_eq!(
             field_baseline_value(&explicit).as_deref(),
             Some("\"light\"")
@@ -2202,7 +2324,6 @@ help = "Theme name"
         let control_field = spec().build("string", Some(&control_value), Some(&control_value));
         for rendered in [
             field_current_value(&control_field),
-            field_edit_value(&control_field),
             field_baseline_value(&control_field).expect("baseline"),
         ] {
             assert_eq!(
@@ -2221,13 +2342,18 @@ help = "Theme name"
             section_label: "Plugins".to_string(),
             list_cells: vec!["plugins".to_string(), "5 enabled".to_string()],
             rebuild_required: true,
-            edit_behavior: ConfigUiEditBehavior::FriendlyStringList,
             ..ConfigUiFieldSpec::new(
                 "settings",
                 "plugins.enabled",
                 "advanced",
                 "Enabled plugin list",
-                vec!["git".to_string()],
+                ConfigUiCapability::MultiChoice {
+                    choices: ["git", "search", "preview", "terminal", "theme"]
+                        .into_iter()
+                        .map(|value| ConfigUiChoice::new(json!(value)))
+                        .collect(),
+                    ordered: false,
+                },
                 "known plugins only",
                 status(),
             )
@@ -2241,21 +2367,18 @@ help = "Theme name"
         assert_eq!(field.list_cells, vec!["plugins", "5 enabled"]);
         assert_eq!(field.tab, "advanced");
         assert_eq!(field_current_value(&field), "[5 items]");
-        assert_eq!(
-            field_edit_value(&field),
-            r#"["git","search","preview","terminal","theme"]"#
-        );
+        assert_eq!(field.snapshot.intent, ConfigUiOverride::Explicit(current));
         assert!(field.rebuild_required);
-        assert_eq!(
-            field.edit_behavior,
-            ConfigUiEditBehavior::FriendlyStringList
-        );
+        assert!(matches!(
+            field.capability,
+            ConfigUiCapability::MultiChoice { ordered: false, .. }
+        ));
         assert_eq!(field.apply_status.summary, "after save");
     }
 
-    // Defends: hosts can build allowed string-list choice fields without hand-assembling JSON row specs.
+    // Defends: hosts can build exact-value multichoice fields without a parallel kind contract.
     #[test]
-    fn string_list_choice_helper_builds_ordered_field() {
+    fn field_spec_builds_ordered_multichoice() {
         let field = ConfigUiFieldSpec {
             display_label: "Enabled widgets".to_string(),
             section_label: "Widgets".to_string(),
@@ -2266,20 +2389,22 @@ help = "Theme name"
                 "widgets.enabled",
                 "widgets",
                 "Enabled widget ids",
-                vec![
-                    "clock".to_string(),
-                    "status".to_string(),
-                    "mode".to_string(),
-                ],
+                ConfigUiCapability::MultiChoice {
+                    choices: ["clock", "status", "mode"]
+                        .into_iter()
+                        .map(|value| ConfigUiChoice::new(json!(value)))
+                        .collect(),
+                    ordered: true,
+                },
                 "known widget ids only",
                 status(),
             )
         }
-        .build_string_list(
-            Some(vec!["status".to_string(), "clock".to_string()]),
-            Some(vec!["clock".to_string()]),
-        )
-        .expect("valid string-list field");
+        .build(
+            "string list",
+            Some(&json!(["status", "clock"])),
+            Some(&json!(["clock"])),
+        );
 
         assert_eq!(field.source_id, "settings");
         assert_eq!(field.path, "widgets.enabled");
@@ -2287,15 +2412,17 @@ help = "Theme name"
         assert_eq!(field.section_label, "Widgets");
         assert_eq!(field.list_cells, vec!["widgets", "2 selected"]);
         assert_eq!(field.tab, "widgets");
-        assert_eq!(field.kind, "string_list");
+        assert_eq!(field.type_label.as_deref(), Some("string list"));
         assert_eq!(field_current_value(&field), r#"["status","clock"]"#);
-        assert_eq!(field_edit_value(&field), r#"["status","clock"]"#);
         assert_eq!(
             field_baseline_value(&field).as_deref(),
             Some(r#"["clock"]"#)
         );
         assert_eq!(snapshot_field_state(&field), ConfigUiFieldState::Explicit);
-        assert_eq!(field.allowed_values, vec!["clock", "status", "mode"]);
+        assert!(matches!(
+            field.capability,
+            ConfigUiCapability::MultiChoice { ordered: true, .. }
+        ));
         assert!(field.rebuild_required);
     }
 
@@ -2324,24 +2451,6 @@ help = "Theme name"
                 .expect_err("unknown value")
                 .contains("must be one of: clock, status")
         );
-    }
-
-    // Defends: the choice helper fails fast when no choice ids are available.
-    #[test]
-    fn string_list_choice_helper_requires_allowed_values() {
-        let error = ConfigUiFieldSpec::new(
-            "settings",
-            "widgets.enabled",
-            "widgets",
-            "",
-            Vec::new(),
-            "",
-            status(),
-        )
-        .build_string_list(None, None)
-        .expect_err("missing choices");
-
-        assert!(error.contains("must define at least one allowed string-list value"));
     }
 
     // Defends: arbitrary TOML document rows are deterministic and expose table grouping without host-declared fields.
@@ -2412,15 +2521,13 @@ normal = "block"
                 r#"{"cursor-shape":{"normal":"block"},"line-number":"absolute","plugins":["git"],"true-color":true}"#,
             ]
         );
-        assert_eq!(
-            table.edit_behavior,
-            ConfigUiEditBehavior::StructuredOnly {
-                notice: "Complex TOML values are read-only in this generic view; edit the source file directly.".to_string(),
-            }
-        );
+        assert!(matches!(
+            table.capability,
+            ConfigUiCapability::ReadOnly { .. }
+        ));
 
         let line_number = toml_field(&rows, "editor.line-number");
-        assert_eq!(line_number.kind, "string");
+        assert_eq!(line_number.type_label.as_deref(), Some("string"));
         assert_eq!(
             line_number.list_cells,
             vec![
@@ -2433,12 +2540,14 @@ normal = "block"
             ]
         );
         assert_eq!(field_current_value(line_number), "\"relative\"");
-        assert_eq!(field_edit_value(line_number), "\"relative\"");
         assert_eq!(
             field_baseline_value(line_number).as_deref(),
             Some("\"absolute\"")
         );
-        assert_eq!(line_number.edit_behavior, ConfigUiEditBehavior::Default);
+        assert!(matches!(
+            line_number.capability,
+            ConfigUiCapability::ReadOnly { .. }
+        ));
     }
 
     // Defends: default TOML documents can supply defaulted rows without a host schema.
@@ -2483,14 +2592,14 @@ rulers = [80]
         );
 
         let rulers = toml_field(&rows, "editor.rulers");
-        assert_eq!(rulers.kind, "array");
+        assert_eq!(rulers.type_label.as_deref(), Some("array"));
         assert_eq!(field_current_value(rulers), "[80,100]");
         assert_eq!(field_baseline_value(rulers).as_deref(), Some("[80]"));
         assert_eq!(rulers.list_cells[5], "[80]");
-        assert_eq!(rulers.validation, "read-only in generic TOML document view");
+        assert_eq!(rulers.validation, "read-only inferred TOML value");
         assert!(matches!(
-            rulers.edit_behavior,
-            ConfigUiEditBehavior::StructuredOnly { .. }
+            rulers.capability,
+            ConfigUiCapability::ReadOnly { .. }
         ));
 
         let limits = toml_field(&rows, "editor.limits");
@@ -2499,12 +2608,12 @@ rulers = [80]
         let limit = toml_field(&rows, "editor.limit");
         assert_eq!(field_current_value(limit), "inf");
         assert!(matches!(
-            limit.edit_behavior,
-            ConfigUiEditBehavior::StructuredOnly { .. }
+            limit.capability,
+            ConfigUiCapability::ReadOnly { .. }
         ));
     }
 
-    // Defends: host validation text applies to editable TOML document rows without hiding read-only complex-row limits.
+    // Defends: host validation text remains display metadata without authorizing inferred rows.
     #[test]
     fn toml_document_helper_preserves_read_only_validation_for_complex_rows() {
         let rows = build_toml_document_fields(ConfigUiTomlDocumentSpec {
@@ -2527,7 +2636,11 @@ rulers = [80, 100]
         assert_eq!(line_number.validation, "host validates before writing");
 
         let rulers = toml_field(&rows, "editor.rulers");
-        assert_eq!(rulers.validation, "read-only in generic TOML document view");
+        assert_eq!(rulers.validation, "host validates before writing");
+        assert!(matches!(
+            rulers.capability,
+            ConfigUiCapability::ReadOnly { .. }
+        ));
     }
 
     // Defends: quoted or otherwise non-dotted TOML paths remain inspectable instead of becoming unsafe edit routes.
@@ -2560,8 +2673,8 @@ rulers = [80, 100]
             ]
         );
         assert!(matches!(
-            field.edit_behavior,
-            ConfigUiEditBehavior::StructuredOnly { .. }
+            field.capability,
+            ConfigUiCapability::ReadOnly { .. }
         ));
     }
 
@@ -2576,20 +2689,17 @@ package = { name = "ratconfig", enabled = true }
         );
 
         let name = toml_field(&rows, "package.name");
-        assert_eq!(name.kind, "string");
+        assert_eq!(name.type_label.as_deref(), Some("string"));
         assert_eq!(field_current_value(name), "\"ratconfig\"");
-        assert_eq!(field_edit_value(name), "\"ratconfig\"");
         assert_eq!(field_baseline_value(name), None);
-        assert_eq!(name.validation, "read-only in generic TOML document view");
-        assert_eq!(
-            name.edit_behavior,
-            ConfigUiEditBehavior::StructuredOnly {
-                notice: "This TOML path cannot be edited safely through dotted path patching; edit the source file directly.".to_string(),
-            }
-        );
+        assert_eq!(name.validation, "read-only inferred TOML value");
+        assert!(matches!(
+            name.capability,
+            ConfigUiCapability::ReadOnly { .. }
+        ));
     }
 
-    // Defends: only non-empty arbitrary TOML string lists infer editable string-list semantics.
+    // Defends: inferred TOML syntax remains display-only, including string lists.
     #[test]
     fn toml_document_helper_infers_only_non_empty_string_lists() {
         let rows = toml_document_rows(
@@ -2602,16 +2712,18 @@ empty = []
         );
         let plugins = toml_field(&rows, "shell.plugins");
 
-        assert_eq!(plugins.kind, "string_list");
+        assert_eq!(plugins.type_label.as_deref(), Some("string list"));
         assert_eq!(field_current_value(plugins), r#"["git","status"]"#);
-        assert_eq!(field_edit_value(plugins), r#"["git","status"]"#);
-        assert_eq!(plugins.edit_behavior, ConfigUiEditBehavior::Default);
+        assert!(matches!(
+            plugins.capability,
+            ConfigUiCapability::ReadOnly { .. }
+        ));
 
         let empty = toml_field(&rows, "shell.empty");
-        assert_eq!(empty.kind, "array");
+        assert_eq!(empty.type_label.as_deref(), Some("array"));
         assert!(matches!(
-            empty.edit_behavior,
-            ConfigUiEditBehavior::StructuredOnly { .. }
+            empty.capability,
+            ConfigUiCapability::ReadOnly { .. }
         ));
     }
 
@@ -2788,10 +2900,8 @@ empty = []
         );
         let mut app = ConfigUiApp::new(model.clone());
         app.settings_view = ConfigUiSettingsView::All;
-        assert!(matches!(
-            app.handle_key(ConfigUiKey::Enter),
-            ConfigUiIntent::BeginEdit { field_index: 0, .. }
-        ));
+        assert_eq!(app.handle_key(ConfigUiKey::Enter), ConfigUiIntent::None);
+        assert!(app.edit().is_some());
 
         model.diagnostics.push(diagnostic(
             true,

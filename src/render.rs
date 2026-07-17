@@ -11,7 +11,6 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs, Wrap};
 use serde_json::Value as JsonValue;
-use std::collections::BTreeSet;
 use unicode_segmentation::UnicodeSegmentation;
 
 const HORIZONTAL_PADDING: u16 = 1;
@@ -118,7 +117,7 @@ impl ConfigUiApp {
                     && field.matches_id(&edit.field_id)
                 {
                     match edit.mode {
-                        ConfigUiEditMode::Choice if is_scalar_enum_field(field) => {
+                        ConfigUiEditMode::Choice => {
                             return single_choice_detail_lines(field, edit);
                         }
                         ConfigUiEditMode::MultiChoice => {
@@ -127,7 +126,10 @@ impl ConfigUiApp {
                         _ => {}
                     }
                 }
-                if is_scalar_enum_field(field) {
+                if matches!(
+                    field.capability,
+                    ConfigUiCapability::Toggle { .. } | ConfigUiCapability::Choice { .. }
+                ) {
                     return single_choice_field_detail_lines_with_state(field, state);
                 }
                 field_detail_lines(field, state)
@@ -955,16 +957,25 @@ fn field_detail_lines(field: &ConfigUiField, state: ConfigUiFieldState) -> Vec<L
     } else {
         lines.extend(field_detail_value_lines("default", &default));
     }
+    if let Some(type_label) = &field.type_label {
+        lines.push(detail_line("type", type_label));
+    }
     lines.extend([
-        detail_line("type", &field.kind),
         detail_line("takes effect", &field.apply_status.label),
         detail_line("after save", &field.apply_status.detail),
     ]);
     if !field.validation.is_empty() {
         lines.push(detail_line("validation", &field.validation));
     }
-    if !field.allowed_values.is_empty() && !is_scalar_enum_field(field) {
-        lines.push(detail_line("allowed", &field.allowed_values.join(", ")));
+    if matches!(field.capability, ConfigUiCapability::MultiChoice { .. }) {
+        lines.push(detail_line(
+            "allowed",
+            &capability_choices(field)
+                .into_iter()
+                .map(ConfigUiChoice::display_label)
+                .collect::<Vec<_>>()
+                .join(", "),
+        ));
     }
     if field.rebuild_required {
         lines.push(detail_line("rebuild", "required"));
@@ -994,9 +1005,13 @@ fn field_detail_value<'a>(
     fallback: &'a str,
     preferred_json: Option<&JsonValue>,
 ) -> FieldDetailValue<'a> {
-    if fallback == UNSET_CONFIG_VALUE_LABEL
-        || !matches!(field.kind.as_str(), "array" | "object" | "string_list")
-    {
+    let structured = preferred_json
+        .is_some_and(|value| matches!(value, JsonValue::Array(_) | JsonValue::Object(_)))
+        || matches!(
+            field.type_label.as_deref(),
+            Some("array" | "object" | "string_list" | "string list" | "table")
+        );
+    if fallback == UNSET_CONFIG_VALUE_LABEL || !structured {
         return FieldDetailValue::Scalar(fallback);
     }
 
@@ -1036,11 +1051,10 @@ fn single_choice_field_detail_lines_with_state(
     field: &ConfigUiField,
     state: ConfigUiFieldState,
 ) -> Vec<Line<'static>> {
-    let current = field_current_value(field);
-    let selected_value = parse_rendered_json_string(&current).unwrap_or(current);
+    let selected_value = field_current_json_value(field);
     let mut lines = field_detail_lines(field, state);
     lines.push(Line::from(""));
-    append_single_choice_options(&mut lines, field, &selected_value, None);
+    append_single_choice_options(&mut lines, field, selected_value, None);
     lines
 }
 
@@ -1048,19 +1062,22 @@ pub fn single_choice_detail_lines(
     field: &ConfigUiField,
     edit: &ConfigUiEditState,
 ) -> Vec<Line<'static>> {
-    let selected_value = edit.input.as_str();
+    let selected_value = serde_json::from_str::<JsonValue>(&edit.input).ok();
     let mut lines = field_title_lines(field);
-    lines.push(detail_line("selected", selected_value));
+    lines.push(detail_line(
+        "selected",
+        &selected_value
+            .as_ref()
+            .and_then(|value| choice_label_for_value(field, value))
+            .unwrap_or_else(|| "none".to_string()),
+    ));
     lines.push(Line::from(""));
 
     append_single_choice_options(
         &mut lines,
         field,
-        selected_value,
-        Some(
-            edit.choice_index
-                .min(field.allowed_values.len().saturating_sub(1)),
-        ),
+        selected_value.as_ref(),
+        is_choice_picker(field).then_some(edit.choice_index),
     );
 
     lines
@@ -1069,14 +1086,14 @@ pub fn single_choice_detail_lines(
 fn append_single_choice_options(
     lines: &mut Vec<Line<'static>>,
     field: &ConfigUiField,
-    selected_value: &str,
+    selected_value: Option<&JsonValue>,
     highlighted_index: Option<usize>,
 ) {
-    for (index, value) in field.allowed_values.iter().enumerate() {
+    for (index, choice) in capability_choices(field).into_iter().enumerate() {
         let highlighted = highlighted_index == Some(index);
-        let selected = value == selected_value;
+        let selected = selected_value == Some(&choice.value);
         lines.push(choice_option_line(
-            value,
+            &choice.display_label(),
             highlighted,
             selected,
             ("(x) ", "( ) "),
@@ -1088,28 +1105,30 @@ pub fn multi_choice_detail_lines(
     field: &ConfigUiField,
     edit: &ConfigUiEditState,
 ) -> Vec<Line<'static>> {
-    let enabled_values = parse_string_list_values(field, &edit.input).unwrap_or_default();
-    let enabled_set = enabled_values.iter().cloned().collect::<BTreeSet<_>>();
+    let enabled_values = serde_json::from_str::<Vec<JsonValue>>(&edit.input).unwrap_or_default();
     let mut lines = field_title_lines(field);
     lines.push(detail_line(
         "enabled",
-        &format!("{}/{}", enabled_set.len(), field.allowed_values.len()),
+        &format!(
+            "{}/{}",
+            enabled_values.len(),
+            capability_choices(field).len()
+        ),
     ));
-    if is_ordered_string_list_field(field) {
+    if is_ordered_multi_choice_field(field) {
         lines.push(detail_line(
             "order",
-            &string_list_order_label(&enabled_values),
+            &multi_choice_order_label(field, &enabled_values),
         ));
     }
     lines.push(Line::from(""));
 
-    let choices = string_list_choice_values(field, &edit.input)
-        .unwrap_or_else(|_| field.allowed_values.clone());
-    for (index, value) in choices.iter().enumerate() {
+    let choices = edit_choices(field, &edit.input);
+    for (index, choice) in choices.iter().enumerate() {
         let selected = index == edit.choice_index.min(choices.len().saturating_sub(1));
-        let enabled = enabled_set.contains(value);
+        let enabled = enabled_values.contains(&choice.value);
         lines.push(choice_option_line(
-            value,
+            &choice.display_label(),
             selected,
             enabled,
             ("[x] ", "[ ] "),
@@ -1333,9 +1352,8 @@ fn edit_status_line(
     const MIN_VALUE_WIDTH: usize = 8;
     const MIN_PATH_WIDTH: usize = 4;
     let full_framing_width = terminal_width("editing: ") + terminal_width(" = ");
-    let (label, path, separator) = if edit.mode != ConfigUiEditMode::Text {
-        ("editing: ", field.path.clone(), " = ")
-    } else if width >= full_framing_width + MIN_PATH_WIDTH + MIN_VALUE_WIDTH {
+    let (label, path, separator) = if width >= full_framing_width + MIN_PATH_WIDTH + MIN_VALUE_WIDTH
+    {
         (
             "editing: ",
             truncate_cells(
@@ -1351,12 +1369,10 @@ fn edit_status_line(
         .saturating_sub(terminal_width(label) + terminal_width(&path) + terminal_width(separator));
     let value = match edit.mode {
         ConfigUiEditMode::Text => text_edit_window(&edit.input, edit.cursor, value_width),
-        ConfigUiEditMode::Choice if is_scalar_enum_field(field) => {
-            single_choice_status_value(field, edit)
-        }
-        ConfigUiEditMode::Choice => edit.input.clone(),
+        ConfigUiEditMode::Choice => single_choice_status_value(field, edit),
         ConfigUiEditMode::MultiChoice => multi_choice_status_value(field, edit),
     };
+    let value = truncate_cells(&value, value_width);
     Line::from(vec![
         Span::styled(label, fg_style(Color::Yellow)),
         Span::styled(path, config_key_style()),
@@ -1418,31 +1434,30 @@ fn normal_control_line(app: &ConfigUiApp) -> Line<'static> {
     let Some(field) = app.selected_field() else {
         return Line::from("Select a setting row to edit");
     };
-    let primary = if structured_only_edit_notice(field).is_some() {
-        let Some((_, action)) = app.selected_structured_file_action() else {
-            return Line::from("structured view only");
-        };
-        if action.disabled_reason.is_some() {
-            return Line::from("file action unavailable");
+    let primary = match &field.capability {
+        ConfigUiCapability::ReadOnly { reason, .. } => {
+            match app.selected_capability_file_action() {
+                Some((_, action)) if action.disabled_reason.is_none() => {
+                    format!("e open {}", action.label)
+                }
+                Some(_) => "file action unavailable".to_string(),
+                None => format!("read-only: {reason}"),
+            }
         }
-        return Line::from(format!("e open {}", action.label));
-    } else if is_bool_field(field) {
-        "Space stage  e edit"
-    } else if is_scalar_enum_field(field) {
-        "Enter/e/Space picker"
-    } else if is_enum_string_list_field(field) {
-        "Enter/e picker"
-    } else {
-        "Enter inline  e editor"
+        ConfigUiCapability::Toggle { .. } => "Space stage  e edit".to_string(),
+        ConfigUiCapability::Choice { .. } | ConfigUiCapability::MultiChoice { .. } => {
+            "Enter/e/Space picker".to_string()
+        }
+        ConfigUiCapability::FreeText { .. } => "Enter inline  e editor".to_string(),
     };
-    setting_control_line(primary, field)
+    setting_control_line(&primary, field)
 }
 
-fn setting_control_line(primary: &'static str, field: &ConfigUiField) -> Line<'static> {
+fn setting_control_line(primary: &str, field: &ConfigUiField) -> Line<'static> {
     if field.has_baseline_value() {
-        raw_line([primary, "  u reset default"])
+        Line::from(format!("{primary}  u reset default"))
     } else {
-        Line::from(primary)
+        Line::from(primary.to_string())
     }
 }
 
@@ -1454,14 +1469,14 @@ fn edit_control_line(field: &ConfigUiField, mode: ConfigUiEditMode) -> Line<'sta
             "Ctrl+u clear  ",
             "Ctrl+e editor",
         ]),
-        ConfigUiEditMode::Choice if is_scalar_enum_field(field) => raw_line([
+        ConfigUiEditMode::Choice if is_choice_picker(field) => raw_line([
             "hjkl/Arrows move  ",
             "Space select  ",
             "Enter save  ",
             "Esc cancel",
         ]),
         ConfigUiEditMode::Choice => raw_line(["Space toggle  ", "Enter save  ", "Esc cancel"]),
-        ConfigUiEditMode::MultiChoice if is_ordered_string_list_field(field) => raw_line([
+        ConfigUiEditMode::MultiChoice if is_ordered_multi_choice_field(field) => raw_line([
             "hjkl/Arrows move  ",
             "Space toggle  ",
             "J/K reorder  ",
@@ -1684,6 +1699,14 @@ mod tests {
             .collect()
     }
 
+    fn rendered_lines(lines: &[Line<'_>]) -> String {
+        lines
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn render_app(terminal: &mut Terminal<TestBackend>, app: &mut ConfigUiApp) -> String {
         terminal
             .draw(|frame| draw_config_ui(frame, app))
@@ -1748,7 +1771,10 @@ mod tests {
             "ui.test",
             "general",
             "",
-            Vec::new(),
+            ConfigUiCapability::ReadOnly {
+                reason: "Test field is read-only.".to_string(),
+                file_action_id: None,
+            },
             "",
             apply_status("after save", "Applied after saving."),
         )
@@ -1756,11 +1782,7 @@ mod tests {
     }
 
     fn detail_text(field: &ConfigUiField) -> String {
-        default_field_detail_lines(field)
-            .iter()
-            .map(rendered_text)
-            .collect::<Vec<_>>()
-            .join("\n")
+        rendered_lines(&default_field_detail_lines(field))
     }
 
     fn set_list_table(model: &mut ConfigUiModel, tab: &str, columns: &[(&str, usize)]) {
@@ -2012,6 +2034,10 @@ mod tests {
         ];
         model.fields[1].snapshot.intent = ConfigUiOverride::Absent;
         model.fields[1].snapshot.effective = model.fields[1].snapshot.baseline.clone();
+        model.fields[1].capability = ConfigUiCapability::ReadOnly {
+            reason: "Managed declaratively.".to_string(),
+            file_action_id: None,
+        };
         let mut app = ConfigUiApp::new(model);
         app.selected_row = 1;
 
@@ -2331,13 +2357,14 @@ mod tests {
         assert!(!resolved_details.contains("\"requested\": true"));
 
         let mut choice = built_field("string", Some(&json!("requested")), None);
-        choice.allowed_values = strings(&["requested", "applied"]);
+        choice.capability = ConfigUiCapability::Choice {
+            choices: ["requested", "applied"]
+                .into_iter()
+                .map(|value| ConfigUiChoice::new(json!(value)))
+                .collect(),
+        };
         choice.snapshot.effective = Some(ConfigUiResolvedValue::new(json!("applied")));
-        let choice_details = single_choice_field_detail_lines(&choice)
-            .iter()
-            .map(rendered_text)
-            .collect::<Vec<_>>()
-            .join("\n");
+        let choice_details = rendered_lines(&single_choice_field_detail_lines(&choice));
         assert!(choice_details.contains("(x) applied"));
         assert!(!choice_details.contains("(x) requested"));
     }
@@ -2399,8 +2426,12 @@ mod tests {
     #[test]
     fn scoped_blocker_renders_effective_field_state_and_scope() {
         let mut model = test_model(ConfigUiFieldState::Inherited);
-        model.fields[0].kind = "string".to_string();
-        model.fields[0].allowed_values = strings(&["false", "true"]);
+        model.fields[0].capability = ConfigUiCapability::Choice {
+            choices: ["false", "true"]
+                .into_iter()
+                .map(|value| ConfigUiChoice::new(json!(value)))
+                .collect(),
+        };
         model.diagnostics.push(ConfigUiDiagnostic {
             path: "core.debug_mode".to_string(),
             status: "invalid".to_string(),
@@ -2422,13 +2453,8 @@ mod tests {
                 .any(|line| rendered_text(line) == "state      invalid")
         );
 
-        let diagnostic_details = |app: &ConfigUiApp| {
-            app.render_details(UiRowRef::Diagnostic(0))
-                .iter()
-                .map(rendered_text)
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
+        let diagnostic_details =
+            |app: &ConfigUiApp| rendered_lines(&app.render_details(UiRowRef::Diagnostic(0)));
         assert!(
             diagnostic_details(&app)
                 .contains("scope      field\nsource     config\nfield      core.debug_mode")
@@ -2608,55 +2634,67 @@ mod tests {
         assert!(!rendered_text(&normal_control_line(&app)).contains("reset default"));
 
         app.model.fields[0].source_id = "native".to_string();
-        app.model.fields[0].kind = "bool".to_string();
         app.model.fields[0].snapshot.baseline = Some(ConfigUiResolvedValue::new(json!([80])));
-        app.model.fields[0].edit_behavior = ConfigUiEditBehavior::StructuredOnly {
-            notice: "Edit the source file directly.".to_string(),
+        app.model.fields[0].capability = ConfigUiCapability::ReadOnly {
+            reason: "Edit the source file directly.".to_string(),
+            file_action_id: Some("open_native".to_string()),
         };
         app.model.file_actions = vec![file_action(true, false, false, None)];
         assert_eq!(
             rendered_text(&normal_control_line(&app)),
-            "e open Native config"
+            "e open Native config  u reset default"
         );
         app.model.file_actions[0].disabled_reason = Some("Unavailable.".to_string());
         assert_eq!(
             rendered_text(&normal_control_line(&app)),
-            "file action unavailable"
+            "file action unavailable  u reset default"
         );
     }
 
     // Defends: boolean controls distinguish normal-mode staging from edit-mode persistence.
     #[test]
     fn boolean_controls_show_space_to_stage_and_enter_to_save() {
-        let app = ConfigUiApp::new(test_model(ConfigUiFieldState::Explicit));
-        let field = app.selected_field().expect("boolean field");
+        let mut model = test_model(ConfigUiFieldState::Explicit);
+        let ConfigUiCapability::Toggle { off, on } = &mut model.fields[0].capability else {
+            panic!("boolean toggle capability");
+        };
+        off.label = Some("Disabled".to_string());
+        on.label = Some("Enabled".to_string());
+        let mut app = ConfigUiApp::new(model);
 
         let normal = rendered_text(&normal_control_line(&app));
         assert!(normal.contains("Space stage"));
         assert!(!normal.contains("Enter/Space stage"));
 
+        let details = |app: &ConfigUiApp| rendered_lines(&app.render_details(UiRowRef::Field(0)));
+        assert!(details(&app).contains("  (x) Disabled\n  ( ) Enabled"));
+
+        assert_eq!(app.handle_key(ConfigUiKey::Char(' ')), ConfigUiIntent::None);
+        assert!(details(&app).contains("  ( ) Disabled\n  (x) Enabled"));
+
+        let field = app.selected_field().expect("boolean field");
         let editing = rendered_text(&edit_control_line(field, ConfigUiEditMode::Choice));
         assert!(editing.contains("Space toggle"));
         assert!(editing.contains("Enter save"));
         assert!(editing.contains("Esc cancel"));
     }
 
-    // Defends: ordered string-list editing exposes selected order and the generic reorder command.
+    // Defends: ordered multichoice editing exposes selected order and the generic reorder command.
     #[test]
     fn ordered_multichoice_rendering_shows_order_controls() {
         let mut model = test_model(ConfigUiFieldState::Explicit);
         let field = &mut model.fields[0];
-        field.kind = "string_list".to_string();
         let value = json!(["status", "clock"]);
         field.snapshot.intent = ConfigUiOverride::Explicit(value.clone());
-        field.snapshot.effective = Some(ConfigUiResolvedValue::new(value));
-        field.allowed_values = vec![
-            "clock".to_string(),
-            "status".to_string(),
-            "mode".to_string(),
-        ];
-        field.edit_behavior = ConfigUiEditBehavior::OrderedStringList;
-        let input = crate::model::field_edit_value(field);
+        field.snapshot.effective = Some(ConfigUiResolvedValue::new(value.clone()));
+        field.capability = ConfigUiCapability::MultiChoice {
+            choices: ["clock", "status", "mode"]
+                .into_iter()
+                .map(|value| ConfigUiChoice::new(json!(value)))
+                .collect(),
+            ordered: true,
+        };
+        let input = value.to_string();
         let edit = ConfigUiEditState {
             field_id: field.id(),
             input: input.clone(),
@@ -2693,7 +2731,9 @@ mod tests {
     #[test]
     fn text_edit_controls_show_external_editor_key() {
         let mut model = test_model(ConfigUiFieldState::Explicit);
-        model.fields[0].kind = "string".to_string();
+        model.fields[0].capability = ConfigUiCapability::FreeText {
+            encoding: ConfigUiTextEncoding::String,
+        };
         let field = &model.fields[0];
         let app = ConfigUiApp::new(model.clone());
 
@@ -2711,38 +2751,52 @@ mod tests {
         );
     }
 
-    // Defends: text status keeps the cursor visible without changing existing choice status.
+    // Defends: text status keeps the cursor visible while choices use friendly labels instead of
+    // raw encoded values.
     #[test]
-    fn edit_status_windows_text_without_changing_choices() {
+    fn edit_status_windows_text_and_labels_exact_choices() {
         assert_eq!(text_edit_window("abcdefghij", 8, 5), "gh_ij");
         assert_eq!(text_edit_window("ab👩‍💻cd", 2, 5), "ab_👩‍💻");
         assert_eq!(text_edit_window("ab👩‍💻cd", 2 + "👩‍💻".len(), 5), "👩‍💻_cd");
         assert!(terminal_width(&text_edit_window("abcdefghij", 5, 4)) <= 4);
 
-        let field = field("a.very.long.setting.path", "string", "abcdefghij", &[]);
+        let text_field = field("a.very.long.setting.path", "string", "abcdefghij", &[]);
         let edit = ConfigUiEditState {
-            field_id: field.id(),
+            field_id: text_field.id(),
             input: "abcdefghij".to_string(),
             mode: ConfigUiEditMode::Text,
             choice_index: 0,
             cursor: 8,
         };
-        let narrow = edit_status_line(&field, &edit, 7);
+        let narrow = edit_status_line(&text_field, &edit, 7);
         assert_eq!(rendered_text(&narrow), "efgh_ij");
         for width in [1, 6, 24, 40] {
-            let text = rendered_text(&edit_status_line(&field, &edit, width));
+            let text = rendered_text(&edit_status_line(&text_field, &edit, width));
             assert!(text.contains('_'));
             assert!(terminal_width(&text) <= width);
         }
 
+        let choice_field = field(
+            "a.very.long.setting.path",
+            "string",
+            r#""light""#,
+            &["light", "dark"],
+        );
         let choice = ConfigUiEditState {
+            field_id: choice_field.id(),
+            input: r#""light""#.to_string(),
             mode: ConfigUiEditMode::Choice,
-            ..edit
+            choice_index: 0,
+            cursor: 0,
         };
         assert_eq!(
-            rendered_text(&edit_status_line(&field, &choice, 7)),
-            "editing: a.very.long.setting.path = abcdefghij"
+            rendered_text(&edit_status_line(&choice_field, &choice, 80)),
+            "editing: a.very.long.setting.path = selected light"
         );
+        for width in [1, 6, 24, 40] {
+            let text = rendered_text(&edit_status_line(&choice_field, &choice, width));
+            assert!(terminal_width(&text) <= width);
+        }
     }
 
     fn file_action(
