@@ -2,7 +2,8 @@
 
 use super::{
     ConfigUiCapability, ConfigUiChoice, ConfigUiField, ConfigUiFieldId, ConfigUiFileAction,
-    ConfigUiModel, ConfigUiSettingsView, ConfigUiTextEncoding, ConfigUiTheme, UiRowRef,
+    ConfigUiModel, ConfigUiOverride, ConfigUiSettingsView, ConfigUiTextEncoding, ConfigUiTheme,
+    UiRowRef,
 };
 use crate::model::{
     config_ui_theme_for_model, field_counts_for_tab, render_json_edit_value,
@@ -453,6 +454,22 @@ impl ConfigUiApp {
         self.model.fields.get(self.selected_field_index()?)
     }
 
+    /// Reports whether normal-mode input may remove this field's override.
+    pub(crate) fn can_unset_field(&self, field: &ConfigUiField) -> bool {
+        !self.search_active
+            && self.edit.is_none()
+            && field.can_unset
+            && matches!(
+                field.snapshot.intent,
+                ConfigUiOverride::Explicit(_) | ConfigUiOverride::Invalid { .. }
+            )
+            && self
+                .model
+                .sources
+                .iter()
+                .any(|source| source.id == field.source_id && !source.read_only)
+    }
+
     pub(crate) fn selected_file_action(&self) -> Option<(usize, &ConfigUiFileAction)> {
         let UiRowRef::FileAction(index) = self.visible_rows().get(self.selected_row).copied()?
         else {
@@ -628,7 +645,7 @@ impl ConfigUiApp {
             }
             ConfigUiKey::Enter | ConfigUiKey::Char(' ') => self.activate_selected_row(),
             ConfigUiKey::Char('e') => self.edit_or_activate_selected_row(),
-            ConfigUiKey::Char('u') => self.return_selected_field_to_default(),
+            ConfigUiKey::Char('u') => self.unset_selected_field(),
             ConfigUiKey::Char(ch @ '1'..='9') => {
                 let index = usize::from(ch as u8 - b'1');
                 if index < self.model.tabs.len() {
@@ -907,18 +924,17 @@ impl ConfigUiApp {
         ConfigUiIntent::None
     }
 
-    fn return_selected_field_to_default(&mut self) -> ConfigUiIntent {
+    fn unset_selected_field(&mut self) -> ConfigUiIntent {
         self.notice = None;
-        let Some(field_index) = self.selected_field_index() else {
-            self.notice_error("Only settings rows can be returned to default.");
+        let Some(field) = self
+            .selected_field()
+            .filter(|field| self.can_unset_field(field))
+            .map(ConfigUiField::id)
+        else {
+            self.notice_info("This row cannot be reset.");
             return ConfigUiIntent::None;
         };
-        let field = &self.model.fields[field_index];
-        if !field.has_baseline_value() {
-            self.notice_info("This setting has no default value.");
-            return ConfigUiIntent::None;
-        }
-        ConfigUiIntent::UnsetField { field: field.id() }
+        ConfigUiIntent::UnsetField { field }
     }
 
     fn save_edit(&mut self) -> ConfigUiIntent {
@@ -2013,29 +2029,63 @@ line-number = "relative"
         );
     }
 
-    // Defends: return-to-default stays on the host-owned unset intent and is unavailable without a default.
+    // Defends: reset removes only an authorized present override; capability and baseline
+    // knowledge do not grant or revoke that independent source operation.
     #[test]
-    fn return_to_default_requires_default_value() {
-        let mut model = model_with_fields(vec![
-            field_with_source("ui", "ui.theme", "string", "\"custom\"", &[]),
-            field_with_source("scratch", "scratch.note", "string", "\"custom\"", &[]),
-        ]);
-        model.fields[1].snapshot.baseline = None;
-        let mut app = ConfigUiApp::new(model);
+    fn reset_availability_follows_override_authority_and_source_writability() {
+        let identity = ConfigUiFieldId::new("ui", "ui.theme");
+        let mut explicit = field_with_source("ui", "ui.theme", "string", "\"custom\"", &[]);
+        explicit.snapshot.baseline = None;
+        explicit.capability = ConfigUiCapability::ReadOnly {
+            reason: "Edit values elsewhere.".to_string(),
+            file_action_id: None,
+        };
+        let mut app = ConfigUiApp::new(model_with_fields(vec![explicit.clone()]));
 
         assert_eq!(
             app.handle_key(ConfigUiKey::Char('u')),
             ConfigUiIntent::UnsetField {
-                field: ConfigUiFieldId::new("ui", "ui.theme"),
+                field: identity.clone(),
+            }
+        );
+        app.notice_error("Host rejected reset.");
+        assert_eq!(
+            app.handle_key(ConfigUiKey::Char('u')),
+            ConfigUiIntent::UnsetField {
+                field: identity.clone(),
             }
         );
 
+        complete_unset(&mut app, identity.clone());
+        assert_eq!(app.handle_key(ConfigUiKey::Char('u')), ConfigUiIntent::None);
+
+        let mut invalid = explicit.clone();
+        invalid.snapshot.intent = ConfigUiOverride::Invalid {
+            input: "not valid".to_string(),
+        };
+        let mut app = ConfigUiApp::new(model_with_fields(vec![invalid]));
+        assert_eq!(
+            app.handle_key(ConfigUiKey::Char('u')),
+            ConfigUiIntent::UnsetField {
+                field: identity.clone(),
+            }
+        );
+
+        let mut forbidden = explicit.clone();
+        forbidden.can_unset = false;
+        let mut app = ConfigUiApp::new(model_with_fields(vec![forbidden]));
+        assert_eq!(app.handle_key(ConfigUiKey::Char('u')), ConfigUiIntent::None);
+
+        let mut read_only_model = model_with_fields(vec![explicit.clone()]);
+        read_only_model.sources[0].read_only = true;
+        let mut app = ConfigUiApp::new(read_only_model);
+        assert_eq!(app.handle_key(ConfigUiKey::Char('u')), ConfigUiIntent::None);
+
+        let mut action_model = model_with_fields(vec![explicit]);
+        action_model.file_actions = vec![file_action("open", "/tmp/settings", true, true)];
+        let mut app = ConfigUiApp::new(action_model);
         app.selected_row = 1;
         assert_eq!(app.handle_key(ConfigUiKey::Char('u')), ConfigUiIntent::None);
-        assert_eq!(
-            app.notice.as_ref().map(|notice| notice.text.as_str()),
-            Some("This setting has no default value.")
-        );
     }
 
     // Defends: capability parsing preserves exact host values and text encodings.
@@ -2458,24 +2508,29 @@ line-number = "relative"
         assert_eq!((app.selected_tab, app.selected_row), (0, 2));
     }
 
-    // Regression: digit shortcuts remain ordinary text while search or scalar text editing is active.
+    // Regression: normal-mode shortcuts remain ordinary text while search or scalar text editing
+    // is active.
     #[test]
-    fn numbered_tab_digits_remain_search_and_edit_input() {
+    fn normal_shortcuts_remain_search_and_edit_input() {
         let mut model = model_with_fields(vec![field("ui.scale", "integer", "1", &[])]);
         model.tabs = vec!["general".to_string(), "advanced".to_string()];
         let mut app = ConfigUiApp::new(model);
 
         app.search_active = true;
+        assert!(!app.can_unset_field(&app.model.fields[0]));
+        assert_eq!(app.handle_key(ConfigUiKey::Char('u')), ConfigUiIntent::None);
         assert_eq!(app.handle_key(ConfigUiKey::Char('2')), ConfigUiIntent::None);
-        assert_eq!(app.search, "2");
+        assert_eq!(app.search, "u2");
         assert_eq!(app.selected_tab, 0);
 
         app.search_active = false;
         app.search.clear();
         app.begin_edit_field(0);
+        assert!(!app.can_unset_field(&app.model.fields[0]));
+        assert_eq!(app.handle_key(ConfigUiKey::Char('u')), ConfigUiIntent::None);
         assert_eq!(app.handle_key(ConfigUiKey::Char('2')), ConfigUiIntent::None);
         assert_eq!(app.handle_key(ConfigUiKey::Char('a')), ConfigUiIntent::None);
-        assert_eq!(app.edit.as_ref().expect("text edit").input, "12a");
+        assert_eq!(app.edit.as_ref().expect("text edit").input, "1u2a");
         assert_eq!(app.selected_tab, 0);
     }
 

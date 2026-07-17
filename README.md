@@ -128,7 +128,7 @@ Populate `ConfigUiModel::tab_list_tables` and matching `ConfigUiField::list_cell
 
 Hosts do not choose widths for the default list. Ratconfig sizes status and setting from every row in the selected tab, then gives the remaining cells to value; search and selection leave column starts unchanged
 
-Fields with a known baseline expose a reset-to-default action that emits `ConfigUiIntent::UnsetField`. Hosts decide whether that means unsetting text, validation, persistence, reloads, and apply behavior. A missing baseline is represented by `snapshot.baseline: None`; no string sentinel is used
+`ConfigUiField::can_unset` declares host authorization to remove an override independently of editor capability and baseline knowledge. Ratconfig exposes that action only when the flag is true for `Explicit` or `Invalid` intent on a writable source, and emits `ConfigUiIntent::UnsetField`. A known baseline can preview the inherited result, while `snapshot.baseline: None` keeps that result unknown without blocking an authorized unset
 
 Populate `ConfigUiModel::theme_switcher` when a committed field value should select a built-in Ratconfig theme. The switcher names one `ConfigUiFieldId` and maps exact `serde_json::Value` values to `ConfigUiTheme::Dark` or `ConfigUiTheme::Light`. `try_new` resolves the initial theme from the field's effective snapshot. After a successful host write and reload, call `replace_model_after_success(reloaded, &field_id)`; the validated replacement becomes committed truth and only a matching staged edit is cleared. Failed host validation or persistence should report a notice without replacing the model, which preserves the staged buffer
 
@@ -521,6 +521,7 @@ Before cutting a release:
 - `ConfigUiFieldSnapshot` separates absent/explicit/invalid override intent from optional effective and baseline resolutions, provenance, and external-management labels; the parallel string value fields and sentinel defaults are absent from the model
 - `ConfigUiCapability` is the sole editor-authorization surface for read-only, free-text, toggle, choice, and multichoice fields; `type_label` is display-only, and the intermediate `kind`, `allowed_values`, and `ConfigUiEditBehavior` field APIs are removed
 - Field intents carry `ConfigUiFieldId`, `OpenFile` carries stable source/action identity with its validated path payload, edits start inside Ratconfig without `BeginEdit`, and external editor results are applied by field identity
+- Normal-mode `u` emits `UnsetField` only for an `Explicit` or `Invalid` override with host-declared unset authority on a writable source; editor capability and baseline availability remain independent
 - `ConfigUiApp::try_new`, `replace_model`, and `replace_model_after_success` validate complete models before mutation; app internals are read-only to hosts, reloads preserve stable selection and compatible edits by identity, and invalid replacements leave staged state untouched
 - `ConfigUiSource` is unique by id and independent of tabs, selected rows drive source headers, and `operational_tab` replaces reserved-name routing for diagnostics and status rows
 - `ConfigUiDiagnostic` adds required global/source/field scope, and effective field validity is derived from matching blocking diagnostics instead of a duplicate field-spec flag

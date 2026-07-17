@@ -1434,7 +1434,7 @@ fn normal_control_line(app: &ConfigUiApp) -> Line<'static> {
     let Some(field) = app.selected_field() else {
         return Line::from("Select a setting row to edit");
     };
-    let primary = match &field.capability {
+    let mut primary = match &field.capability {
         ConfigUiCapability::ReadOnly { reason, .. } => {
             match app.selected_capability_file_action() {
                 Some((_, action)) if action.disabled_reason.is_none() => {
@@ -1450,15 +1450,10 @@ fn normal_control_line(app: &ConfigUiApp) -> Line<'static> {
         }
         ConfigUiCapability::FreeText { .. } => "Enter inline  e editor".to_string(),
     };
-    setting_control_line(&primary, field)
-}
-
-fn setting_control_line(primary: &str, field: &ConfigUiField) -> Line<'static> {
-    if field.has_baseline_value() {
-        Line::from(format!("{primary}  u reset default"))
-    } else {
-        Line::from(primary.to_string())
+    if app.can_unset_field(field) {
+        primary.push_str("  u reset default");
     }
+    Line::from(primary)
 }
 
 fn edit_control_line(field: &ConfigUiField, mode: ConfigUiEditMode) -> Line<'static> {
@@ -2624,22 +2619,22 @@ mod tests {
         assert_eq!(span_width(&line, 1), STATUS_ITEM_COLUMN_WIDTH);
     }
 
-    // Defends: normal controls expose only actions available for the selected row.
+    // Defends: normal controls derive reset visibility from override/source authority instead of
+    // baseline knowledge or editor capability.
     #[test]
     fn normal_controls_follow_selected_row_capabilities() {
-        let mut app = ConfigUiApp::new(test_model(ConfigUiFieldState::Explicit));
+        let mut model = test_model(ConfigUiFieldState::Explicit);
+        model.fields[0].snapshot.baseline = None;
+        let mut app = ConfigUiApp::new(model);
         assert!(rendered_text(&normal_control_line(&app)).contains("u reset default"));
 
-        app.model.fields[0].snapshot.baseline = None;
-        assert!(!rendered_text(&normal_control_line(&app)).contains("reset default"));
-
-        app.model.fields[0].source_id = "native".to_string();
-        app.model.fields[0].snapshot.baseline = Some(ConfigUiResolvedValue::new(json!([80])));
         app.model.fields[0].capability = ConfigUiCapability::ReadOnly {
             reason: "Edit the source file directly.".to_string(),
             file_action_id: Some("open_native".to_string()),
         };
-        app.model.file_actions = vec![file_action(true, false, false, None)];
+        let mut action = file_action(true, false, false, None);
+        action.source_id = DEFAULT_CONFIG_SOURCE_ID.to_string();
+        app.model.file_actions = vec![action];
         assert_eq!(
             rendered_text(&normal_control_line(&app)),
             "e open Native config  u reset default"
@@ -2649,6 +2644,19 @@ mod tests {
             rendered_text(&normal_control_line(&app)),
             "file action unavailable  u reset default"
         );
+
+        app.model.fields[0].can_unset = false;
+        assert!(!rendered_text(&normal_control_line(&app)).contains("reset default"));
+
+        app.model.fields[0].can_unset = true;
+        app.model.fields[0].snapshot.intent = ConfigUiOverride::Absent;
+        app.model.fields[0].snapshot.effective = None;
+        assert!(!rendered_text(&normal_control_line(&app)).contains("reset default"));
+
+        app.model.fields[0].snapshot.intent = ConfigUiOverride::Explicit(json!(false));
+        app.model.fields[0].snapshot.effective = Some(ConfigUiResolvedValue::new(json!(false)));
+        app.model.sources[0].read_only = true;
+        assert!(!rendered_text(&normal_control_line(&app)).contains("reset default"));
     }
 
     // Defends: boolean controls distinguish normal-mode staging from edit-mode persistence.
