@@ -1,12 +1,13 @@
 // Test lane: default
 
 use super::{
-    ConfigUiEditBehavior, ConfigUiField, ConfigUiFileAction, ConfigUiModel, ConfigUiSettingsView,
-    ConfigUiTheme, UiRowRef, field_counts_for_tab, visible_rows_for_tab_search_in_view,
+    ConfigUiEditBehavior, ConfigUiField, ConfigUiFieldId, ConfigUiFileAction, ConfigUiModel,
+    ConfigUiSettingsView, ConfigUiTheme, UiRowRef,
 };
 use crate::model::{
-    UNSET_CONFIG_VALUE_LABEL, config_ui_theme_from_model, string_list_values_from_json,
-    validate_string_choice_value,
+    ConfigUiFieldState, config_ui_theme_for_model, field_counts_for_tab, field_current_value,
+    field_edit_value, snapshot_field_state, string_list_values_from_json,
+    validate_string_choice_value, visible_rows_for_tab_search_in_view,
 };
 use serde_json::Value as JsonValue;
 use std::collections::BTreeSet;
@@ -14,20 +15,20 @@ use std::path::PathBuf;
 use unicode_segmentation::UnicodeSegmentation;
 
 pub struct ConfigUiApp {
-    pub model: ConfigUiModel,
-    pub active_theme: ConfigUiTheme,
-    pub selected_tab: usize,
-    pub selected_row: usize,
+    pub(crate) model: ConfigUiModel,
+    pub(crate) active_theme: ConfigUiTheme,
+    pub(crate) selected_tab: usize,
+    pub(crate) selected_row: usize,
     /// Current view outside active search.
     ///
-    /// [`ConfigUiApp::new`] selects Core when the model contains a Core/All distinction. Models
+    /// [`ConfigUiApp::try_new`] selects Core when the model contains a Core/All distinction. Models
     /// whose views contain the same fields start in All. Normal-mode `a` toggles the view when the
     /// selected tab has non-core fields. Search spans All without changing this saved view.
-    pub settings_view: ConfigUiSettingsView,
-    pub search: String,
-    pub search_active: bool,
-    pub edit: Option<ConfigUiEditState>,
-    pub notice: Option<ConfigUiNotice>,
+    pub(crate) settings_view: ConfigUiSettingsView,
+    pub(crate) search: String,
+    pub(crate) search_active: bool,
+    pub(crate) edit: Option<ConfigUiEditState>,
+    pub(crate) notice: Option<ConfigUiNotice>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,7 +39,7 @@ pub struct ConfigUiNotice {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigUiEditState {
-    pub field_index: usize,
+    pub field_id: ConfigUiFieldId,
     pub input: String,
     pub mode: ConfigUiEditMode,
     pub choice_index: usize,
@@ -51,6 +52,15 @@ pub enum ConfigUiEditMode {
     Text,
     Choice,
     MultiChoice,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ConfigUiRowId {
+    Field(ConfigUiFieldId),
+    FileAction {
+        source_id: String,
+        action_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,17 +187,18 @@ fn insert_at_cursor(edit: &mut ConfigUiEditState, text: &str) {
 }
 
 impl ConfigUiApp {
-    /// Creates an editor and selects Core when the model contains non-core fields.
+    /// Validates a model and creates an editor.
     ///
     /// Models with `core_fields: None` start in All because every field belongs to Core.
-    pub fn new(model: ConfigUiModel) -> Self {
-        let active_theme = config_ui_theme_from_model(&model);
+    pub fn try_new(model: ConfigUiModel) -> Result<Self, String> {
+        model.validate()?;
+        let active_theme = config_ui_theme_for_model(&model, ConfigUiTheme::Dark);
         let settings_view = if model_has_non_core_fields(&model) {
             ConfigUiSettingsView::Core
         } else {
             ConfigUiSettingsView::All
         };
-        Self {
+        Ok(Self {
             model,
             active_theme,
             selected_tab: 0,
@@ -197,7 +208,189 @@ impl ConfigUiApp {
             search_active: false,
             edit: None,
             notice: None,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new(model: ConfigUiModel) -> Self {
+        Self::try_new(model).expect("test model must be valid")
+    }
+
+    pub fn model(&self) -> &ConfigUiModel {
+        &self.model
+    }
+
+    pub fn active_theme(&self) -> ConfigUiTheme {
+        self.active_theme
+    }
+
+    pub fn selected_tab(&self) -> usize {
+        self.selected_tab
+    }
+
+    pub fn selected_row(&self) -> usize {
+        self.selected_row
+    }
+
+    pub fn settings_view(&self) -> ConfigUiSettingsView {
+        self.settings_view
+    }
+
+    pub fn search(&self) -> &str {
+        &self.search
+    }
+
+    pub fn search_active(&self) -> bool {
+        self.search_active
+    }
+
+    pub fn edit(&self) -> Option<&ConfigUiEditState> {
+        self.edit.as_ref()
+    }
+
+    pub fn notice(&self) -> Option<&ConfigUiNotice> {
+        self.notice.as_ref()
+    }
+
+    pub fn replace_model(&mut self, model: ConfigUiModel) -> Result<(), String> {
+        self.replace_model_inner(model, None)
+    }
+
+    pub fn replace_model_after_success(
+        &mut self,
+        model: ConfigUiModel,
+        completed_field: &ConfigUiFieldId,
+    ) -> Result<(), String> {
+        self.replace_model_inner(model, Some(completed_field))
+    }
+
+    fn replace_model_inner(
+        &mut self,
+        model: ConfigUiModel,
+        completed_field: Option<&ConfigUiFieldId>,
+    ) -> Result<(), String> {
+        model.validate()?;
+
+        let selected = self
+            .visible_rows()
+            .get(self.selected_row)
+            .and_then(|row| self.row_id(*row));
+        let selected_tab = self.model.tabs[self.selected_tab].clone();
+        let mut edit = self
+            .edit
+            .as_ref()
+            .filter(|active| completed_field != Some(&active.field_id))
+            .cloned();
+        let canceled_edit = edit.as_ref().is_some_and(|active| {
+            let old = self
+                .model
+                .fields
+                .iter()
+                .find(|field| field.matches_id(&active.field_id));
+            let new = model
+                .fields
+                .iter()
+                .find(|field| field.matches_id(&active.field_id));
+            !matches!((old, new), (Some(old), Some(new)) if edit_metadata_matches(old, new))
+        });
+        if canceled_edit {
+            edit = None;
         }
+
+        let active_theme = config_ui_theme_for_model(&model, self.active_theme);
+        let settings_view = if self.settings_view == ConfigUiSettingsView::Core
+            && !model_has_non_core_fields(&model)
+        {
+            ConfigUiSettingsView::All
+        } else {
+            self.settings_view
+        };
+
+        self.model = model;
+        self.active_theme = active_theme;
+        self.settings_view = settings_view;
+        self.edit = edit;
+        self.selected_tab = selected
+            .as_ref()
+            .and_then(|identity| self.tab_for_row_id(identity))
+            .or_else(|| {
+                self.model
+                    .tabs
+                    .iter()
+                    .position(|candidate| candidate == &selected_tab)
+            })
+            .unwrap_or(0);
+        let rows = self.visible_rows();
+        self.selected_row = selected
+            .as_ref()
+            .and_then(|identity| {
+                rows.iter()
+                    .position(|row| self.row_id(*row).as_ref() == Some(identity))
+            })
+            .unwrap_or_else(|| self.selected_row.min(rows.len().saturating_sub(1)));
+        if canceled_edit {
+            self.notice = Some(cancellation_notice(self.notice.take()));
+        }
+        Ok(())
+    }
+
+    fn field_index_by_id(&self, identity: &ConfigUiFieldId) -> Option<usize> {
+        self.model
+            .fields
+            .iter()
+            .position(|field| field.matches_id(identity))
+    }
+
+    pub(crate) fn active_edit_field(&self) -> Option<&ConfigUiField> {
+        let identity = &self.edit.as_ref()?.field_id;
+        self.model
+            .fields
+            .iter()
+            .find(|field| field.matches_id(identity))
+    }
+
+    fn row_id(&self, row: UiRowRef) -> Option<ConfigUiRowId> {
+        match row {
+            UiRowRef::Field(index) => self
+                .model
+                .fields
+                .get(index)
+                .map(|field| ConfigUiRowId::Field(field.id())),
+            UiRowRef::FileAction(index) => {
+                self.model
+                    .file_actions
+                    .get(index)
+                    .map(|action| ConfigUiRowId::FileAction {
+                        source_id: action.source_id.clone(),
+                        action_id: action.action_id.clone(),
+                    })
+            }
+            UiRowRef::Sidecar(_) | UiRowRef::NativeStatus(_) | UiRowRef::Diagnostic(_) => None,
+        }
+    }
+
+    fn tab_for_row_id(&self, identity: &ConfigUiRowId) -> Option<usize> {
+        let tab = match identity {
+            ConfigUiRowId::Field(identity) => self
+                .model
+                .fields
+                .iter()
+                .find(|field| field.matches_id(identity))
+                .map(|field| field.tab.as_str()),
+            ConfigUiRowId::FileAction {
+                source_id,
+                action_id,
+            } => self
+                .model
+                .file_actions
+                .iter()
+                .find(|action| action.source_id == *source_id && action.action_id == *action_id)
+                .map(|action| action.tab.as_str()),
+        }?;
+        self.model
+            .tabs
+            .iter()
+            .position(|candidate| candidate == tab)
     }
 
     pub fn visible_rows(&self) -> Vec<UiRowRef> {
@@ -235,18 +428,14 @@ impl ConfigUiApp {
 
     pub fn next_tab(&mut self) {
         let len = self.model.tabs.len();
-        if len > 0 {
-            self.selected_tab = (self.selected_tab + 1) % len;
-            self.selected_row = 0;
-        }
+        self.selected_tab = (self.selected_tab + 1) % len;
+        self.selected_row = 0;
     }
 
     pub fn previous_tab(&mut self) {
         let len = self.model.tabs.len();
-        if len > 0 {
-            self.selected_tab = (self.selected_tab + len - 1) % len;
-            self.selected_row = 0;
-        }
+        self.selected_tab = (self.selected_tab + len - 1) % len;
+        self.selected_row = 0;
     }
 
     pub fn move_down(&mut self) {
@@ -266,9 +455,6 @@ impl ConfigUiApp {
     }
 
     pub fn clamp_selection(&mut self) {
-        if self.selected_tab >= self.model.tabs.len() {
-            self.selected_tab = 0;
-        }
         self.clamp_selection_for_len(self.visible_rows().len());
     }
 
@@ -350,97 +536,12 @@ impl ConfigUiApp {
         let input = edit_input_for_field(field);
         let cursor = input.len();
         self.edit = Some(ConfigUiEditState {
-            field_index,
+            field_id: field.id(),
             choice_index: initial_edit_choice_index(field, &input),
             input,
             mode: edit_mode_for_field(field),
             cursor,
         });
-    }
-
-    pub fn finish_successful_write(&mut self) {
-        let Some(edit) = self.edit.take() else {
-            return;
-        };
-        if let Some(field) = self.model.fields.get(edit.field_index)
-            && let Ok(value) = parse_edit_input(field, &edit.input)
-        {
-            let source_id = field.source_id.clone();
-            let path = field.path.clone();
-            self.switch_theme_for_field_value(&source_id, &path, &value);
-        }
-    }
-
-    pub fn finish_successful_set_field(&mut self, field_index: usize, value: &JsonValue) {
-        if let Some((source_id, path)) = self.field_source_path(field_index) {
-            self.switch_theme_for_field_value(&source_id, &path, value);
-        }
-        self.clear_edit_for_field(field_index);
-    }
-
-    pub fn finish_successful_set_field_by_path(
-        &mut self,
-        source_id: &str,
-        path: &str,
-        value: &JsonValue,
-    ) {
-        self.switch_theme_for_field_value(source_id, path, value);
-        self.edit = None;
-    }
-
-    pub fn finish_successful_unset_field(&mut self, field_index: usize) {
-        if let Some(field) = self.model.fields.get(field_index) {
-            let source_id = field.source_id.clone();
-            let path = field.path.clone();
-            if let Some(value) = default_field_value(field) {
-                self.switch_theme_for_field_value(&source_id, &path, &value);
-            }
-        }
-        self.clear_edit_for_field(field_index);
-    }
-
-    pub fn finish_successful_unset_field_by_path(&mut self, source_id: &str, path: &str) {
-        if let Some(value) = self.default_field_value_by_path(source_id, path) {
-            self.switch_theme_for_field_value(source_id, path, &value);
-        }
-        self.edit = None;
-    }
-
-    fn default_field_value_by_path(&self, source_id: &str, path: &str) -> Option<JsonValue> {
-        self.model
-            .fields
-            .iter()
-            .find(|field| field.source_id == source_id && field.path == path)
-            .and_then(default_field_value)
-    }
-
-    fn field_source_path(&self, field_index: usize) -> Option<(String, String)> {
-        self.model
-            .fields
-            .get(field_index)
-            .map(|field| (field.source_id.clone(), field.path.clone()))
-    }
-
-    fn clear_edit_for_field(&mut self, field_index: usize) {
-        if self
-            .edit
-            .as_ref()
-            .is_some_and(|edit| edit.field_index == field_index)
-        {
-            self.edit = None;
-        }
-    }
-
-    fn switch_theme_for_field_value(&mut self, source_id: &str, path: &str, value: &JsonValue) {
-        let Some(switcher) = self.model.theme_switcher.as_ref() else {
-            return;
-        };
-        if switcher.source_id != source_id || switcher.field_path != path {
-            return;
-        }
-        if let Some(theme) = switcher.theme_for_value(value) {
-            self.active_theme = theme;
-        }
     }
 
     pub fn apply_external_text_edit(
@@ -451,10 +552,11 @@ impl ConfigUiApp {
         let Some(edit) = &mut self.edit else {
             return Err("No text edit is active.".to_string());
         };
-        if edit.field_index != field_index {
+        let returned_field = self.model.fields.get(field_index).map(ConfigUiField::id);
+        if returned_field.as_ref() != Some(&edit.field_id) {
             return Err(format!(
-                "Returned text is for field index {field_index}, but the active edit is for field index {}.",
-                edit.field_index
+                "Returned text is for a different field than the active edit {}:{}.",
+                edit.field_id.source_id, edit.field_id.path
             ));
         }
         if edit.mode != ConfigUiEditMode::Text {
@@ -606,10 +708,7 @@ impl ConfigUiApp {
         key: ConfigUiKey,
         mode: ConfigUiEditMode,
     ) -> ConfigUiIntent {
-        let field = self
-            .edit
-            .as_ref()
-            .and_then(|edit| self.model.fields.get(edit.field_index));
+        let field = self.active_edit_field();
         let scalar_enum = field.is_some_and(is_scalar_enum_field);
         let ordered_string_list = field.is_some_and(is_ordered_string_list_field);
         let multi_choice = mode == ConfigUiEditMode::MultiChoice;
@@ -681,10 +780,12 @@ impl ConfigUiApp {
     }
 
     fn move_choice_edit(&mut self, delta: isize) {
+        let len = self
+            .active_edit_field()
+            .map_or(0, |field| field.allowed_values.len());
         let Some(edit) = &mut self.edit else {
             return;
         };
-        let len = self.model.fields[edit.field_index].allowed_values.len();
         if len == 0 {
             return;
         }
@@ -698,16 +799,18 @@ impl ConfigUiApp {
     }
 
     fn select_single_choice_edit(&mut self) {
+        let Some(value) = self.active_edit_field().and_then(|field| {
+            self.edit
+                .as_ref()
+                .and_then(|edit| field.allowed_values.get(edit.choice_index))
+        }) else {
+            return;
+        };
+        let value = value.clone();
         let Some(edit) = &mut self.edit else {
             return;
         };
-        let Some(value) = self.model.fields[edit.field_index]
-            .allowed_values
-            .get(edit.choice_index)
-        else {
-            return;
-        };
-        edit.input = value.clone();
+        edit.input = value;
         edit.cursor = edit.input.len();
     }
 
@@ -730,13 +833,15 @@ impl ConfigUiApp {
         let Some(edit) = self.edit.as_ref() else {
             return;
         };
-        let field = &self.model.fields[edit.field_index];
-        let selected = if is_ordered_string_list_field(field) {
-            string_list_choice_value(field, &edit.input, edit.choice_index).ok()
+        let Some(field) = self.active_edit_field().cloned() else {
+            return;
+        };
+        let selected = if is_ordered_string_list_field(&field) {
+            string_list_choice_value(&field, &edit.input, edit.choice_index).ok()
         } else {
             None
         };
-        let next = match next_input(field, edit) {
+        let next = match next_input(&field, edit) {
             Ok(next) => next,
             Err(message) => {
                 self.notice_error(message);
@@ -747,7 +852,7 @@ impl ConfigUiApp {
             edit.input = next;
             edit.cursor = edit.input.len();
             if let Some(value) = selected
-                && let Some(index) = string_list_choice_index(field, &edit.input, &value)
+                && let Some(index) = string_list_choice_index(&field, &edit.input, &value)
             {
                 edit.choice_index = index;
             }
@@ -814,12 +919,12 @@ impl ConfigUiApp {
         if edit.mode != ConfigUiEditMode::Text {
             return ConfigUiIntent::None;
         }
-        let field_index = edit.field_index;
-        let input = edit.input.clone();
-        let Some(field) = self.model.fields.get(field_index) else {
+        let Some(field_index) = self.field_index_by_id(&edit.field_id) else {
             self.notice_error("Active edit field is unavailable.");
             return ConfigUiIntent::None;
         };
+        let input = edit.input.clone();
+        let field = &self.model.fields[field_index];
         let source_id = field.source_id.clone();
         let path = field.path.clone();
         self.notice = None;
@@ -858,7 +963,7 @@ impl ConfigUiApp {
             self.notice_info(message);
             return ConfigUiIntent::None;
         }
-        if !field.has_default_value() {
+        if !field.has_baseline_value() {
             self.notice_info("This setting has no default value.");
             return ConfigUiIntent::None;
         }
@@ -873,7 +978,10 @@ impl ConfigUiApp {
         let Some(edit) = self.edit.as_ref() else {
             return ConfigUiIntent::None;
         };
-        let field_index = edit.field_index;
+        let Some(field_index) = self.field_index_by_id(&edit.field_id) else {
+            self.notice_error("Active edit field is unavailable.");
+            return ConfigUiIntent::None;
+        };
         let value = match parse_edit_input(&self.model.fields[field_index], &edit.input) {
             Ok(value) => value,
             Err(message) => {
@@ -892,22 +1000,35 @@ impl ConfigUiApp {
 }
 
 fn model_has_non_core_fields(model: &ConfigUiModel) -> bool {
-    (0..model.tabs.len().max(1)).any(|tab| {
+    (0..model.tabs.len()).any(|tab| {
         let counts = field_counts_for_tab(model, tab);
         counts.core < counts.total
     })
 }
 
-fn default_field_value(field: &ConfigUiField) -> Option<JsonValue> {
-    if field.has_default_value() {
-        serde_json::from_str(&field.default_value).ok()
-    } else {
-        None
+fn edit_metadata_matches(old: &ConfigUiField, new: &ConfigUiField) -> bool {
+    old.kind == new.kind
+        && old.allowed_values == new.allowed_values
+        && old.edit_behavior == new.edit_behavior
+}
+
+fn cancellation_notice(existing: Option<ConfigUiNotice>) -> ConfigUiNotice {
+    let reason = "Edit canceled after reload because the field disappeared or its editor changed.";
+    match existing {
+        Some(existing) => ConfigUiNotice {
+            text: format!("{reason} {}", existing.text),
+            is_error: true,
+        },
+        None => ConfigUiNotice {
+            text: reason.to_string(),
+            is_error: true,
+        },
     }
 }
 
 pub fn edit_input_for_field(field: &ConfigUiField) -> String {
-    if field.current_value == UNSET_CONFIG_VALUE_LABEL {
+    let edit_value = field_edit_value(field);
+    if snapshot_field_state(field) == ConfigUiFieldState::Absent {
         if is_bool_field(field) {
             return "false".to_string();
         }
@@ -920,13 +1041,12 @@ pub fn edit_input_for_field(field: &ConfigUiField) -> String {
         return friendly_string_list_edit_input(field);
     }
     if field.kind == "string" {
-        return parse_rendered_json_string(&field.current_value)
-            .unwrap_or_else(|| field.current_value.clone());
+        return parse_rendered_json_string(&edit_value).unwrap_or(edit_value);
     }
-    if field.edit_value.is_empty() {
-        field.current_value.clone()
+    if edit_value.is_empty() {
+        field_current_value(field)
     } else {
-        field.edit_value.clone()
+        edit_value
     }
 }
 
@@ -1250,13 +1370,14 @@ pub fn structured_only_edit_notice(field: &ConfigUiField) -> Option<&str> {
 }
 
 fn friendly_string_list_edit_input(field: &ConfigUiField) -> String {
-    serde_json::from_str::<Vec<String>>(&field.edit_value)
+    let edit_value = field_edit_value(field);
+    serde_json::from_str::<Vec<String>>(&edit_value)
         .map(|keys| keys.join(", "))
-        .unwrap_or_else(|_| field.edit_value.clone())
+        .unwrap_or(edit_value)
 }
 
 pub fn field_bool_value(field: &ConfigUiField) -> Option<bool> {
-    field.current_value.parse().ok()
+    field_current_value(field).parse().ok()
 }
 
 #[cfg(test)]
@@ -1265,9 +1386,9 @@ mod tests {
     #[cfg(feature = "ui")]
     use crate::row_line_for_model;
     use crate::{
-        ConfigUiFieldId, ConfigUiTheme, ConfigUiThemeMapping, ConfigUiThemeSwitcher,
-        ConfigUiTomlDocumentSpec, ConfigUiValueState, DEFAULT_CONFIG_SOURCE_ID,
-        build_toml_document_fields,
+        ConfigUiFieldId, ConfigUiFieldState, ConfigUiOverride, ConfigUiResolvedValue,
+        ConfigUiTheme, ConfigUiThemeMapping, ConfigUiThemeSwitcher, ConfigUiTomlDocumentSpec,
+        DEFAULT_CONFIG_SOURCE_ID, build_toml_document_fields,
         test_support::{after_save_status, field, field_with_source, model_with_fields},
     };
     #[cfg(feature = "ui")]
@@ -1347,7 +1468,7 @@ theme = "light"
 
         assert_eq!(app.handle_key(ConfigUiKey::Enter), ConfigUiIntent::None);
         assert!(app.edit.is_none());
-        assert_eq!(app.model.fields[0].current_value, "false");
+        assert_eq!(field_current_value(&app.model.fields[0]), "false");
         assert_eq!(
             app.notice.as_ref().map(|notice| notice.text.as_str()),
             Some("Press Space to stage this change, then Enter to save.")
@@ -1364,18 +1485,21 @@ theme = "light"
                 value: json!(true),
             }
         );
-        app.finish_successful_write();
+        complete_set(
+            &mut app,
+            ConfigUiFieldId::new(DEFAULT_CONFIG_SOURCE_ID, "server.enabled"),
+            json!(true),
+        );
         assert_eq!(app.handle_key(ConfigUiKey::Esc), ConfigUiIntent::Exit);
     }
 
     // Defends: edit intents carry source identity and completed writes return to normal routing.
     #[test]
     fn edit_intents_preserve_selected_field_source() {
-        let mut model = test_model();
-        model.fields = vec![
+        let mut model = model_with_fields(vec![
             field_with_source("server", "server.enabled", "bool", "false", &[]),
             field_with_source("ui", "ui.title", "string", "\"light\"", &[]),
-        ];
+        ]);
         model.fields[0].display_label = "Server enabled".to_string();
         model.fields[1].display_label = "Window title".to_string();
         let mut app = ConfigUiApp::new(model);
@@ -1391,7 +1515,11 @@ theme = "light"
                 value: json!(true),
             }
         );
-        app.finish_successful_write();
+        complete_set(
+            &mut app,
+            ConfigUiFieldId::new("server", "server.enabled"),
+            json!(true),
+        );
 
         app.selected_row = 1;
         assert_eq!(
@@ -1418,7 +1546,11 @@ theme = "light"
             }
         );
 
-        app.finish_successful_write();
+        complete_set(
+            &mut app,
+            ConfigUiFieldId::new("ui", "ui.title"),
+            json!("dark"),
+        );
         assert!(app.edit.is_none());
         assert_eq!(
             app.handle_key(ConfigUiKey::Char('u')),
@@ -1481,32 +1613,35 @@ theme = "light"
         assert_eq!(value, json!("light"));
         assert_eq!(app.active_theme, ConfigUiTheme::Dark);
 
-        app.model.fields.swap(0, 1);
-        app.finish_successful_set_field_by_path(&source_id, &path, &value);
+        let identity = ConfigUiFieldId::new(&source_id, &path);
+        let mut reloaded = app.model.clone();
+        reloaded.fields.swap(0, 1);
+        set_committed_value(&mut reloaded, &identity, value);
+        app.replace_model_after_success(reloaded, &identity)
+            .expect("valid committed reload");
 
         assert_eq!(app.active_theme, ConfigUiTheme::Light);
         assert!(app.edit.is_none());
     }
 
-    // Defends: the already-published index completion methods keep switching themes for current model fields.
+    // Defends: replacement completion resolves themes only from the reloaded committed snapshot.
     #[test]
-    fn successful_theme_completion_by_index_switches_theme() {
+    fn successful_theme_completion_uses_reloaded_snapshot() {
         let mut model = test_model();
         model.fields[1] = field("ui.theme", "string", "\"dark\"", &["light", "dark"]);
-        model.fields[1].default_value = "\"light\"".to_string();
+        model.fields[1].snapshot.baseline = Some(ConfigUiResolvedValue::new(json!("light")));
         model.theme_switcher = Some(theme_switcher());
         let mut app = ConfigUiApp::new(model);
+        let identity = ConfigUiFieldId::new(DEFAULT_CONFIG_SOURCE_ID, "ui.theme");
 
         assert_eq!(app.active_theme, ConfigUiTheme::Dark);
-        let value = json!("light");
-        app.finish_successful_set_field(1, &value);
+        complete_set(&mut app, identity.clone(), json!("light"));
         assert_eq!(app.active_theme, ConfigUiTheme::Light);
 
-        let value = json!("dark");
-        app.finish_successful_set_field(1, &value);
+        complete_set(&mut app, identity.clone(), json!("dark"));
         assert_eq!(app.active_theme, ConfigUiTheme::Dark);
 
-        app.finish_successful_unset_field(1);
+        complete_unset(&mut app, identity);
         assert_eq!(app.active_theme, ConfigUiTheme::Light);
     }
 
@@ -1515,7 +1650,7 @@ theme = "light"
     fn successful_theme_field_unset_switches_to_default_theme() {
         let mut model = test_model();
         model.fields[1] = field("ui.theme", "string", "\"dark\"", &["light", "dark"]);
-        model.fields[1].default_value = "\"light\"".to_string();
+        model.fields[1].snapshot.baseline = Some(ConfigUiResolvedValue::new(json!("light")));
         model.theme_switcher = Some(theme_switcher());
         let mut app = ConfigUiApp::new(model);
         app.selected_row = 1;
@@ -1534,8 +1669,12 @@ theme = "light"
         assert_eq!(path, "ui.theme");
         assert_eq!(app.active_theme, ConfigUiTheme::Dark);
 
-        app.model.fields.swap(0, 1);
-        app.finish_successful_unset_field_by_path(&source_id, &path);
+        let identity = ConfigUiFieldId::new(&source_id, &path);
+        let mut reloaded = app.model.clone();
+        reloaded.fields.swap(0, 1);
+        set_unset_value(&mut reloaded, &identity);
+        app.replace_model_after_success(reloaded, &identity)
+            .expect("valid committed reload");
 
         assert_eq!(app.active_theme, ConfigUiTheme::Light);
         assert!(app.edit.is_none());
@@ -1562,14 +1701,234 @@ theme = "light"
         assert!(app.edit.is_some());
     }
 
+    // Defends: valid reloads preserve interaction state and rebind both selection and compatible
+    // edits by stable identity rather than by the old tab or field index.
+    #[test]
+    fn replacement_preserves_interaction_state_across_reordering() {
+        let mut model = test_model();
+        model.tabs.push("appearance".to_string());
+        model.fields[1].tab = "appearance".to_string();
+        model.fields[0].snapshot.intent = ConfigUiOverride::Absent;
+        model.fields[0].snapshot.effective = model.fields[0].snapshot.baseline.clone();
+        model.core_fields = Some(vec![model.fields[1].id()]);
+        let mut app = ConfigUiApp::new(model);
+        app.selected_tab = 1;
+        app.begin_edit_field(1);
+        app.edit.as_mut().expect("edit").input = "staged".to_string();
+        app.search = "theme".to_string();
+        app.search_active = true;
+        app.notice_error("Host reload warning.");
+
+        let mut replacement = app.model.clone();
+        replacement.tabs.swap(0, 1);
+        replacement.fields.swap(0, 1);
+        app.replace_model(replacement).expect("valid replacement");
+
+        assert_eq!(app.selected_tab(), 0);
+        assert_eq!(
+            app.model.fields[app.selected_field_index().expect("selected field")].id(),
+            ConfigUiFieldId::new(DEFAULT_CONFIG_SOURCE_ID, "ui.theme")
+        );
+        assert_eq!(
+            app.edit().map(|edit| (&edit.field_id, edit.input.as_str())),
+            Some((
+                &ConfigUiFieldId::new(DEFAULT_CONFIG_SOURCE_ID, "ui.theme"),
+                "staged"
+            ))
+        );
+        assert_eq!(app.search(), "theme");
+        assert!(app.search_active());
+        assert_eq!(app.settings_view(), ConfigUiSettingsView::Core);
+        assert_eq!(
+            app.notice().map(|notice| notice.text.as_str()),
+            Some("Host reload warning.")
+        );
+    }
+
+    // Defends: invalid construction/replacement cannot partially mutate any editor state.
+    #[test]
+    fn invalid_replacement_rolls_back_the_entire_app() {
+        let mut model = test_model();
+        model.theme_switcher = Some(theme_switcher());
+        let mut app = ConfigUiApp::new(model);
+        app.selected_row = 1;
+        app.begin_edit_field(1);
+        app.edit.as_mut().expect("edit").input = "staged".to_string();
+        app.search = "theme".to_string();
+        app.search_active = true;
+        app.notice_error("Host rejected a prior write.");
+
+        let before_model = app.model.clone();
+        let before_theme = app.active_theme;
+        let before_tab = app.selected_tab;
+        let before_row = app.selected_row;
+        let before_view = app.settings_view;
+        let before_search = app.search.clone();
+        let before_search_active = app.search_active;
+        let before_edit = app.edit.clone();
+        let before_notice = app.notice.clone();
+        let mut invalid = app.model.clone();
+        invalid.tabs.push("general".to_string());
+        let active_field = app.edit.as_ref().expect("edit").field_id.clone();
+
+        assert!(ConfigUiApp::try_new(invalid.clone()).is_err());
+        assert!(app.replace_model(invalid.clone()).is_err());
+        assert!(
+            app.replace_model_after_success(invalid, &active_field)
+                .is_err()
+        );
+        assert_eq!(app.model, before_model);
+        assert_eq!(app.active_theme, before_theme);
+        assert_eq!(app.selected_tab, before_tab);
+        assert_eq!(app.selected_row, before_row);
+        assert_eq!(app.settings_view, before_view);
+        assert_eq!(app.search, before_search);
+        assert_eq!(app.search_active, before_search_active);
+        assert_eq!(app.edit, before_edit);
+        assert_eq!(app.notice, before_notice);
+    }
+
+    // Defends: ordinary reloads report buffer loss without erasing an existing host failure,
+    // whether the active field disappears or its transitional editor metadata changes.
+    #[test]
+    fn ordinary_replacement_cancels_incompatible_edits_and_combines_notices() {
+        fn assert_canceled(
+            mut replacement: ConfigUiModel,
+            mutate: impl FnOnce(&mut ConfigUiModel),
+        ) {
+            let mut app = ConfigUiApp::new(replacement.clone());
+            app.begin_edit_field(1);
+            app.edit.as_mut().expect("edit").input = "staged".to_string();
+            app.notice_error("Host write failed.");
+            mutate(&mut replacement);
+
+            app.replace_model(replacement).expect("valid replacement");
+
+            assert!(app.edit().is_none());
+            let notice = app.notice().expect("combined cancellation notice");
+            assert!(notice.is_error);
+            assert!(notice.text.contains("Edit canceled after reload"));
+            assert!(notice.text.contains("Host write failed."));
+        }
+
+        assert_canceled(test_model(), |model| {
+            model.fields.remove(1);
+        });
+        assert_canceled(test_model(), |model| {
+            model.fields[1].allowed_values.push("system".to_string());
+        });
+    }
+
+    // Defends: a matching atomic completion clears the committed buffer before ordinary reload
+    // compatibility checks, even when the host removes or changes the committed field.
+    #[test]
+    fn atomic_completion_avoids_false_reload_cancellation() {
+        fn assert_completed(
+            mut replacement: ConfigUiModel,
+            mutate: impl FnOnce(&mut ConfigUiModel),
+        ) {
+            let mut app = ConfigUiApp::new(replacement.clone());
+            let identity = app.model.fields[1].id();
+            app.begin_edit_field(1);
+            app.edit.as_mut().expect("edit").input = "staged".to_string();
+            app.notice_error("Host kept this notice.");
+            mutate(&mut replacement);
+
+            app.replace_model_after_success(replacement, &identity)
+                .expect("valid committed reload");
+
+            assert!(app.edit().is_none());
+            assert_eq!(
+                app.notice().map(|notice| notice.text.as_str()),
+                Some("Host kept this notice.")
+            );
+        }
+
+        assert_completed(test_model(), |model| {
+            model.fields.remove(1);
+        });
+        assert_completed(test_model(), |model| {
+            model.fields[1].kind = "opaque".to_string();
+            model.fields[1].allowed_values.clear();
+            model.fields[1].edit_behavior = ConfigUiEditBehavior::StructuredOnly {
+                notice: "Use the host editor.".to_string(),
+            };
+        });
+    }
+
+    // Defends: theme ownership lives at validated model ingestion, including both documented
+    // replacement fallbacks rather than any value emitted by an edit intent.
+    #[test]
+    fn replacement_theme_resolution_handles_unmapped_and_missing_switchers() {
+        let mut model = test_model();
+        model.theme_switcher = Some(theme_switcher());
+        let mut app = ConfigUiApp::new(model);
+        assert_eq!(app.active_theme(), ConfigUiTheme::Light);
+
+        let mut unresolved = app.model.clone();
+        set_committed_value(
+            &mut unresolved,
+            &ConfigUiFieldId::new(DEFAULT_CONFIG_SOURCE_ID, "ui.theme"),
+            json!("system"),
+        );
+        app.replace_model(unresolved)
+            .expect("valid unmapped replacement");
+        assert_eq!(app.active_theme(), ConfigUiTheme::Light);
+
+        let mut no_switcher = app.model.clone();
+        no_switcher.theme_switcher = None;
+        app.replace_model(no_switcher)
+            .expect("valid neutral replacement");
+        assert_eq!(app.active_theme(), ConfigUiTheme::Dark);
+
+        let mut initially_unmapped = test_model();
+        initially_unmapped.theme_switcher = Some(theme_switcher());
+        set_committed_value(
+            &mut initially_unmapped,
+            &ConfigUiFieldId::new(DEFAULT_CONFIG_SOURCE_ID, "ui.theme"),
+            json!("system"),
+        );
+        assert_eq!(
+            ConfigUiApp::new(initially_unmapped).active_theme(),
+            ConfigUiTheme::Dark
+        );
+    }
+
+    // Defends: standalone file-action selection follows its stable identity across both action
+    // and tab reordering instead of silently activating the row that inherited its old index.
+    #[test]
+    fn replacement_preserves_file_action_selection_by_identity() {
+        let mut model = model_with_fields(Vec::new());
+        model.tabs.push("files".to_string());
+        let mut first = file_action("first", "/tmp/first", true, false);
+        let mut selected = file_action("selected", "/tmp/selected", true, false);
+        first.tab = "files".to_string();
+        selected.tab = "files".to_string();
+        model.file_actions = vec![first, selected];
+        let mut app = ConfigUiApp::new(model);
+        app.selected_tab = 1;
+        app.selected_row = 1;
+
+        let mut replacement = app.model.clone();
+        replacement.tabs.swap(0, 1);
+        replacement.file_actions.swap(0, 1);
+        app.replace_model(replacement).expect("valid replacement");
+
+        assert_eq!(app.selected_tab(), 0);
+        assert_eq!(app.selected_row(), 0);
+        assert_eq!(
+            app.handle_key(ConfigUiKey::Enter),
+            open_file_intent(0, "selected", "/tmp/selected", false)
+        );
+    }
+
     // Defends: e opens free-form fields directly in the host editor, while Ctrl+e can externalize an inline staged buffer.
     #[test]
     fn text_edit_mode_emits_external_editor_intent_with_staged_input() {
-        let mut model = test_model();
-        model.fields = vec![
+        let model = model_with_fields(vec![
             field_with_source("ui", "ui.title", "string", "\"light\"", &[]),
             field_with_source("server", "server.enabled", "bool", "false", &[]),
-        ];
+        ]);
         let mut app = ConfigUiApp::new(model);
 
         assert_eq!(app.handle_key(ConfigUiKey::Ctrl('e')), ConfigUiIntent::None);
@@ -1648,11 +2007,10 @@ theme = "light"
     // Defends: returned host-editor text updates only the active staged buffer and still saves through normal parsing.
     #[test]
     fn external_editor_text_is_staged_until_normal_save() {
-        let mut model = test_model();
-        model.fields = vec![
+        let model = model_with_fields(vec![
             field_with_source("ui", "ui.title", "string", "\"light\"", &[]),
             field_with_source("server", "server.enabled", "bool", "false", &[]),
-        ];
+        ]);
         let mut app = ConfigUiApp::new(model);
 
         assert!(app.apply_external_text_edit(0, "ignored").is_err());
@@ -1694,9 +2052,8 @@ line-number = "relative"
             apply_status: after_save_status(),
         })
         .expect("toml document");
-        let mut model = test_model();
+        let mut model = model_with_fields(document.fields);
         model.tabs = vec!["native".to_string()];
-        model.fields = document.fields;
         model
             .tab_list_tables
             .insert("native".to_string(), document.list_table);
@@ -1731,12 +2088,11 @@ line-number = "relative"
     // Defends: return-to-default stays on the host-owned unset intent and is unavailable without a default.
     #[test]
     fn return_to_default_requires_default_value() {
-        let mut model = test_model();
-        model.fields = vec![
+        let mut model = model_with_fields(vec![
             field_with_source("ui", "ui.theme", "string", "\"custom\"", &[]),
             field_with_source("scratch", "scratch.note", "string", "\"custom\"", &[]),
-        ];
-        model.fields[1].default_value = crate::NO_CONFIG_DEFAULT_VALUE_LABEL.to_string();
+        ]);
+        model.fields[1].snapshot.baseline = None;
         let mut app = ConfigUiApp::new(model);
 
         assert_eq!(
@@ -1798,7 +2154,8 @@ line-number = "relative"
         assert!(parse_edit_input(&friendly_list_field, "search, unknown").is_err());
     }
 
-    // Defends: bools keep direct choice edits while scalar enums use the single-select picker mode.
+    // Defends: edit initialization follows sparse state rather than confusing invalid input with
+    // display text, while bools and scalar enums keep their native choice modes.
     #[test]
     fn edit_helpers_use_choice_modes_for_bool_and_enum() {
         let bool_field = field("server.enabled", "bool", "true", &[]);
@@ -1808,6 +2165,12 @@ line-number = "relative"
         let enum_field = field("ui.theme", "string", "\"light\"", &["light", "dark"]);
         assert_eq!(edit_input_for_field(&enum_field), "light");
         assert_eq!(edit_mode_for_field(&enum_field), ConfigUiEditMode::Choice);
+
+        let mut invalid_field = field("server.port", "int", "80", &[]);
+        invalid_field.snapshot.intent = ConfigUiOverride::Invalid {
+            input: "not set".to_string(),
+        };
+        assert_eq!(edit_input_for_field(&invalid_field), "not set");
     }
 
     // Defends: default string-list multiselect remains set-like and canonicalizes selected values to allowed-value order.
@@ -1926,12 +2289,12 @@ line-number = "relative"
     #[test]
     fn reducer_controls_core_all_views_without_hidden_selection_or_search_state_leaks() {
         let mut core = field("core.visible", "string", r#""core""#, &[]);
-        core.state = ConfigUiValueState::Defaulted;
+        crate::model::set_field_state_for_test(&mut core, ConfigUiFieldState::Inherited);
         let mut hidden = field("advanced.hidden", "string", r#""hidden""#, &[]);
-        hidden.state = ConfigUiValueState::Defaulted;
+        crate::model::set_field_state_for_test(&mut hidden, ConfigUiFieldState::Inherited);
         let explicit = field("advanced.explicit", "string", r#""set""#, &[]);
         let mut other_tab = field("other.visible", "string", r#""other""#, &[]);
-        other_tab.state = ConfigUiValueState::Defaulted;
+        crate::model::set_field_state_for_test(&mut other_tab, ConfigUiFieldState::Inherited);
         other_tab.tab = "other".to_string();
         let mut model = model_with_fields(vec![core, hidden, explicit, other_tab]);
         model.tabs.push("other".to_string());
@@ -2136,10 +2499,47 @@ line-number = "relative"
         ])
     }
 
+    fn complete_set(app: &mut ConfigUiApp, identity: ConfigUiFieldId, value: JsonValue) {
+        let mut model = app.model.clone();
+        set_committed_value(&mut model, &identity, value);
+        app.replace_model_after_success(model, &identity)
+            .expect("valid committed reload");
+    }
+
+    fn set_committed_value(
+        model: &mut ConfigUiModel,
+        identity: &ConfigUiFieldId,
+        value: JsonValue,
+    ) {
+        let field = model
+            .fields
+            .iter_mut()
+            .find(|field| field.matches_id(identity))
+            .expect("field to commit");
+        field.snapshot.intent = ConfigUiOverride::Explicit(value.clone());
+        field.snapshot.effective = Some(ConfigUiResolvedValue::new(value));
+    }
+
+    fn complete_unset(app: &mut ConfigUiApp, identity: ConfigUiFieldId) {
+        let mut model = app.model.clone();
+        set_unset_value(&mut model, &identity);
+        app.replace_model_after_success(model, &identity)
+            .expect("valid committed reload");
+    }
+
+    fn set_unset_value(model: &mut ConfigUiModel, identity: &ConfigUiFieldId) {
+        let field = model
+            .fields
+            .iter_mut()
+            .find(|field| field.matches_id(identity))
+            .expect("field to unset");
+        field.snapshot.intent = ConfigUiOverride::Absent;
+        field.snapshot.effective = field.snapshot.baseline.clone();
+    }
+
     fn theme_switcher() -> ConfigUiThemeSwitcher {
         ConfigUiThemeSwitcher {
-            source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
-            field_path: "ui.theme".to_string(),
+            field: ConfigUiFieldId::new(DEFAULT_CONFIG_SOURCE_ID, "ui.theme"),
             mappings: vec![
                 ConfigUiThemeMapping {
                     value: json!("dark"),

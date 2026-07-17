@@ -1,8 +1,9 @@
 use crate::{
-    ConfigUiApplyStatus, ConfigUiEditBehavior, ConfigUiField, ConfigUiModel, ConfigUiValueState,
+    ConfigUiApplyStatus, ConfigUiField, ConfigUiFieldSpec, ConfigUiModel, ConfigUiSource,
     DEFAULT_CONFIG_SOURCE_ID,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 pub(crate) fn apply_status(summary: &str, detail: &str) -> ConfigUiApplyStatus {
     ConfigUiApplyStatus {
@@ -31,31 +32,39 @@ pub(crate) fn field_with_source(
     value: &str,
     allowed: &[&str],
 ) -> ConfigUiField {
-    ConfigUiField {
-        source_id: source_id.to_string(),
-        path: path.to_string(),
-        display_label: String::new(),
-        section_label: String::new(),
-        list_cells: Vec::new(),
-        tab: "general".to_string(),
-        kind: kind.to_string(),
-        current_value: value.to_string(),
-        edit_value: value.to_string(),
-        default_value: value.to_string(),
-        state: ConfigUiValueState::Explicit,
-        description: String::new(),
-        allowed_values: allowed.iter().map(|value| (*value).to_string()).collect(),
-        validation: String::new(),
-        rebuild_required: false,
-        apply_status: after_save_status(),
-        edit_behavior: ConfigUiEditBehavior::Default,
-    }
+    let value: serde_json::Value = serde_json::from_str(value)
+        .unwrap_or_else(|_| serde_json::Value::String(value.to_string()));
+    ConfigUiFieldSpec::new(
+        source_id,
+        path,
+        "general",
+        "",
+        allowed.iter().map(|value| (*value).to_string()).collect(),
+        "",
+        after_save_status(),
+    )
+    .build(kind, Some(&value), Some(&value))
 }
 
 pub(crate) fn model_with_fields(fields: Vec<ConfigUiField>) -> ConfigUiModel {
+    let sources = fields
+        .iter()
+        .map(|field| field.source_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|id| ConfigUiSource {
+            label: id.clone(),
+            path: PathBuf::from(format!("{id}.toml")),
+            id,
+            exists: true,
+            owner_label: Some("test".to_string()),
+            read_only: false,
+        })
+        .collect();
     ConfigUiModel {
-        sources: Vec::new(),
+        sources,
         tabs: vec!["general".to_string()],
+        operational_tab: None,
         tab_list_tables: BTreeMap::new(),
         fields,
         core_fields: None,

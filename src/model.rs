@@ -2,7 +2,7 @@
 
 use crate::patch::get_dotted_json_path;
 use serde_json::Value as JsonValue;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use toml::Value as TomlValue;
 use toml_edit::{DocumentMut as TomlEditDocument, Table as TomlEditTable};
@@ -13,6 +13,8 @@ pub const DEFAULT_CONFIG_SOURCE_ID: &str = "config";
 pub struct ConfigUiModel {
     pub sources: Vec<ConfigUiSource>,
     pub tabs: Vec<String>,
+    /// Optional host-selected tab for generic diagnostics and status rows.
+    pub operational_tab: Option<String>,
     pub tab_list_tables: BTreeMap<String, ConfigUiListTable>,
     pub fields: Vec<ConfigUiField>,
     /// Host-owned positive Core allowlist, matched by source id and field path.
@@ -30,7 +32,7 @@ pub struct ConfigUiModel {
 }
 
 /// Stable field identity used by Core allowlists and field-scoped diagnostics.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ConfigUiFieldId {
     /// Host-supplied config source id.
     pub source_id: String,
@@ -66,21 +68,13 @@ pub struct ConfigUiFieldCounts {
     pub total: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConfigUiPathOwner {
-    Default,
-    HomeManager,
-    User,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigUiSource {
     pub id: String,
-    pub tab: String,
     pub label: String,
     pub path: PathBuf,
     pub exists: bool,
-    pub owner: ConfigUiPathOwner,
+    pub owner_label: Option<String>,
     pub read_only: bool,
 }
 
@@ -103,8 +97,7 @@ pub enum ConfigUiTheme {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigUiThemeSwitcher {
-    pub source_id: String,
-    pub field_path: String,
+    pub field: ConfigUiFieldId,
     pub mappings: Vec<ConfigUiThemeMapping>,
 }
 
@@ -126,7 +119,8 @@ pub enum UiRowRef {
 /// Returns rows from the complete inventory for the selected tab and search.
 ///
 /// Use [`visible_rows_for_tab_search_in_view`] when the caller needs Core filtering.
-pub fn visible_rows_for_tab_search(
+#[cfg(any(feature = "ui", test))]
+pub(crate) fn visible_rows_for_tab_search(
     model: &ConfigUiModel,
     selected_tab: usize,
     search: &str,
@@ -138,16 +132,16 @@ pub fn visible_rows_for_tab_search(
 ///
 /// A non-empty search spans the complete host inventory even when `view` is
 /// [`ConfigUiSettingsView::Core`]. Clearing the search restores the caller's chosen view.
-/// Advanced operational rows and file actions remain available in both views.
-pub fn visible_rows_for_tab_search_in_view(
+/// Host-routed operational rows and file actions remain available in both views.
+pub(crate) fn visible_rows_for_tab_search_in_view(
     model: &ConfigUiModel,
     selected_tab: usize,
     search: &str,
     view: ConfigUiSettingsView,
 ) -> Vec<UiRowRef> {
-    let tab = tab_name(model, selected_tab);
+    let tab = model.tabs[selected_tab].as_str();
     let search = search.to_ascii_lowercase();
-    if tab == "advanced" {
+    if model.operational_tab.as_deref() == Some(tab) {
         return (0..model.diagnostics.len())
             .map(UiRowRef::Diagnostic)
             .chain(file_action_rows_for_tab(model, tab))
@@ -172,11 +166,14 @@ pub fn visible_rows_for_tab_search_in_view(
 
 /// Counts Core and total fields on the selected tab.
 ///
-/// Core includes host-allowlisted fields plus explicit and invalid configured values. Advanced
-/// operational tabs have zero field counts.
-pub fn field_counts_for_tab(model: &ConfigUiModel, selected_tab: usize) -> ConfigUiFieldCounts {
-    let tab = tab_name(model, selected_tab);
-    if tab == "advanced" {
+/// Core includes host-allowlisted fields plus explicit and invalid configured values. The
+/// host-selected operational tab has zero field counts.
+pub(crate) fn field_counts_for_tab(
+    model: &ConfigUiModel,
+    selected_tab: usize,
+) -> ConfigUiFieldCounts {
+    let tab = model.tabs[selected_tab].as_str();
+    if model.operational_tab.as_deref() == Some(tab) {
         return ConfigUiFieldCounts::default();
     }
     let fields = model.fields.iter().filter(|field| field.tab == tab);
@@ -187,22 +184,20 @@ pub fn field_counts_for_tab(model: &ConfigUiModel, selected_tab: usize) -> Confi
     })
 }
 
-fn tab_name(model: &ConfigUiModel, selected_tab: usize) -> &str {
-    model
-        .tabs
-        .get(selected_tab)
-        .map_or("general", String::as_str)
-}
-
 fn field_is_visible_in_core(model: &ConfigUiModel, field: &ConfigUiField) -> bool {
     matches!(
-        model.effective_field_state(field),
-        ConfigUiValueState::Explicit | ConfigUiValueState::Invalid
-    ) || model.core_fields.as_ref().is_none_or(|core_fields| {
-        core_fields
-            .iter()
-            .any(|core| core.source_id == field.source_id && core.path == field.path)
-    })
+        snapshot_field_state(field),
+        ConfigUiFieldState::Explicit | ConfigUiFieldState::Invalid
+    ) || model.diagnostics.iter().any(|diagnostic| {
+        diagnostic.blocking
+            && matches!(
+                &diagnostic.scope,
+                ConfigUiDiagnosticScope::Field(identity) if field.matches_id(identity)
+            )
+    }) || model
+        .core_fields
+        .as_ref()
+        .is_none_or(|core_fields| core_fields.iter().any(|core| field.matches_id(core)))
 }
 
 fn file_action_rows_for_tab<'a>(
@@ -220,32 +215,20 @@ pub fn tab_index(tabs: &[String], tab: &str) -> usize {
         .unwrap_or(tabs.len())
 }
 
-pub fn selected_config_source(
+pub(crate) fn config_ui_theme_for_model(
     model: &ConfigUiModel,
-    selected_tab: usize,
-) -> Option<&ConfigUiSource> {
-    let tab = model.tabs.get(selected_tab)?;
-    model
-        .sources
-        .iter()
-        .find(|source| source.tab == tab.as_str())
-}
-
-pub(crate) fn config_ui_theme_from_model(model: &ConfigUiModel) -> ConfigUiTheme {
-    model
-        .theme_switcher
-        .as_ref()
-        .and_then(|switcher| switcher.resolve(&model.fields))
-        .unwrap_or(ConfigUiTheme::Dark)
+    fallback: ConfigUiTheme,
+) -> ConfigUiTheme {
+    match &model.theme_switcher {
+        None => ConfigUiTheme::Dark,
+        Some(switcher) => switcher.resolve(&model.fields).unwrap_or(fallback),
+    }
 }
 
 impl ConfigUiThemeSwitcher {
-    pub fn resolve(&self, fields: &[ConfigUiField]) -> Option<ConfigUiTheme> {
-        let field = fields
-            .iter()
-            .find(|field| field.source_id == self.source_id && field.path == self.field_path)?;
-        let value = committed_field_value(field)?;
-        self.theme_for_value(&value)
+    fn resolve(&self, fields: &[ConfigUiField]) -> Option<ConfigUiTheme> {
+        let field = fields.iter().find(|field| field.matches_id(&self.field))?;
+        self.theme_for_value(&field.snapshot.effective.as_ref()?.value)
     }
 
     pub fn theme_for_value(&self, value: &JsonValue) -> Option<ConfigUiTheme> {
@@ -256,18 +239,42 @@ impl ConfigUiThemeSwitcher {
     }
 }
 
-fn committed_field_value(field: &ConfigUiField) -> Option<JsonValue> {
-    serde_json::from_str(&field.edit_value)
-        .or_else(|_| serde_json::from_str(&field.current_value))
-        .ok()
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfigUiFieldState {
+    Explicit,
+    Inherited,
+    Absent,
+    Invalid,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConfigUiValueState {
-    Explicit,
-    Defaulted,
-    Unset,
-    Invalid,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigUiFieldSnapshot {
+    pub intent: ConfigUiOverride,
+    pub effective: Option<ConfigUiResolvedValue>,
+    pub baseline: Option<ConfigUiResolvedValue>,
+    pub external_manager: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigUiOverride {
+    Absent,
+    Explicit(JsonValue),
+    Invalid { input: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigUiResolvedValue {
+    pub value: JsonValue,
+    pub origin: Option<String>,
+}
+
+impl ConfigUiResolvedValue {
+    pub fn new(value: JsonValue) -> Self {
+        Self {
+            value,
+            origin: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -279,10 +286,7 @@ pub struct ConfigUiField {
     pub list_cells: Vec<String>,
     pub tab: String,
     pub kind: String,
-    pub current_value: String,
-    pub edit_value: String,
-    pub default_value: String,
-    pub state: ConfigUiValueState,
+    pub snapshot: ConfigUiFieldSnapshot,
     pub description: String,
     pub allowed_values: Vec<String>,
     pub validation: String,
@@ -311,14 +315,73 @@ pub struct ConfigUiFileAction {
 }
 
 impl ConfigUiField {
-    pub fn has_default_value(&self) -> bool {
-        self.default_value != NO_CONFIG_DEFAULT_VALUE_LABEL
+    pub fn id(&self) -> ConfigUiFieldId {
+        ConfigUiFieldId::new(&self.source_id, &self.path)
+    }
+
+    pub(crate) fn matches_id(&self, identity: &ConfigUiFieldId) -> bool {
+        self.source_id == identity.source_id && self.path == identity.path
+    }
+
+    pub fn has_baseline_value(&self) -> bool {
+        self.snapshot.baseline.is_some()
     }
 }
 
-/// Display marker for manually constructed fields that do not have a default.
-pub const NO_CONFIG_DEFAULT_VALUE_LABEL: &str = "no default";
 pub(crate) const UNSET_CONFIG_VALUE_LABEL: &str = "not set";
+
+pub(crate) fn field_current_json_value(field: &ConfigUiField) -> Option<&JsonValue> {
+    match (&field.snapshot.intent, &field.snapshot.effective) {
+        (ConfigUiOverride::Invalid { .. }, _) => None,
+        (_, Some(resolved)) => Some(&resolved.value),
+        (ConfigUiOverride::Explicit(value), None) => Some(value),
+        (ConfigUiOverride::Absent, None) => None,
+    }
+}
+
+pub(crate) fn field_current_value(field: &ConfigUiField) -> String {
+    match &field.snapshot.intent {
+        ConfigUiOverride::Invalid { input } => input.clone(),
+        ConfigUiOverride::Explicit(_) | ConfigUiOverride::Absent => field_current_json_value(field)
+            .map(|value| render_field_value(field, value))
+            .unwrap_or_else(|| UNSET_CONFIG_VALUE_LABEL.to_string()),
+    }
+}
+
+pub(crate) fn field_edit_value(field: &ConfigUiField) -> String {
+    match &field.snapshot.intent {
+        ConfigUiOverride::Invalid { input } => input.clone(),
+        ConfigUiOverride::Explicit(value) => render_field_edit_value(field, value),
+        ConfigUiOverride::Absent => field
+            .snapshot
+            .effective
+            .as_ref()
+            .map(|resolved| render_field_edit_value(field, &resolved.value))
+            .unwrap_or_default(),
+    }
+}
+
+pub(crate) fn field_baseline_value(field: &ConfigUiField) -> Option<String> {
+    field
+        .snapshot
+        .baseline
+        .as_ref()
+        .map(|resolved| render_field_edit_value(field, &resolved.value))
+}
+
+fn render_field_value(field: &ConfigUiField, value: &JsonValue) -> String {
+    match value {
+        JsonValue::String(value) if field.kind != "string" => value.clone(),
+        _ => render_json_value(value),
+    }
+}
+
+fn render_field_edit_value(field: &ConfigUiField, value: &JsonValue) -> String {
+    match value {
+        JsonValue::String(value) if field.kind != "string" => value.clone(),
+        _ => render_json_edit_value(value),
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct ConfigUiFieldSpec {
@@ -368,13 +431,11 @@ impl ConfigUiFieldSpec {
         current: Option<&JsonValue>,
         default: Option<&JsonValue>,
     ) -> ConfigUiField {
-        let state = if current.is_some() {
-            ConfigUiValueState::Explicit
-        } else if default.is_some() {
-            ConfigUiValueState::Defaulted
-        } else {
-            ConfigUiValueState::Unset
-        };
+        let effective = current.or(default).cloned().map(ConfigUiResolvedValue::new);
+        let baseline = default.cloned().map(ConfigUiResolvedValue::new);
+        let intent = current
+            .cloned()
+            .map_or(ConfigUiOverride::Absent, ConfigUiOverride::Explicit);
         ConfigUiField {
             source_id: self.source_id,
             path: self.path,
@@ -383,18 +444,12 @@ impl ConfigUiFieldSpec {
             list_cells: self.list_cells,
             tab: self.tab,
             kind: kind.into(),
-            current_value: current
-                .or(default)
-                .map(render_json_value)
-                .unwrap_or_else(|| UNSET_CONFIG_VALUE_LABEL.to_string()),
-            edit_value: current
-                .or(default)
-                .map(render_json_edit_value)
-                .unwrap_or_default(),
-            default_value: default
-                .map(render_json_edit_value)
-                .unwrap_or_else(|| NO_CONFIG_DEFAULT_VALUE_LABEL.to_string()),
-            state,
+            snapshot: ConfigUiFieldSnapshot {
+                intent,
+                effective,
+                baseline,
+                external_manager: None,
+            },
             description: self.description,
             allowed_values: self.allowed_values,
             validation: self.validation,
@@ -519,7 +574,7 @@ pub struct ConfigUiSidecar {
     pub name: String,
     pub path: PathBuf,
     pub present: bool,
-    pub owner: ConfigUiPathOwner,
+    pub owner_label: Option<String>,
     pub read_only: bool,
 }
 
@@ -546,31 +601,295 @@ pub enum ConfigUiDiagnosticScope {
 }
 
 impl ConfigUiModel {
-    /// Returns the field's stored state with matching blocking diagnostics applied.
-    ///
-    /// Nonblocking diagnostics never change field state. Hosts remain responsible for
-    /// classifying diagnostics and deciding whether a write is safe.
-    pub fn effective_field_state(&self, field: &ConfigUiField) -> ConfigUiValueState {
-        if field.state == ConfigUiValueState::Invalid
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        let tabs = nonblank_unique("tab", self.tabs.iter().map(String::as_str))?;
+        if tabs.is_empty() {
+            return Err("model must define at least one tab".to_string());
+        }
+        let operational_tab = self.operational_tab.as_deref();
+        if operational_tab.is_some_and(|tab| !tabs.contains(tab)) {
+            return Err("operational_tab must name a declared tab".to_string());
+        }
+
+        let sources = nonblank_unique(
+            "source id",
+            self.sources.iter().map(|source| source.id.as_str()),
+        )?;
+        for source in &self.sources {
+            require_nonblank("source label", &source.label)?;
+            validate_optional_label("source owner_label", source.owner_label.as_deref())?;
+        }
+
+        let mut field_ids = BTreeSet::new();
+        for field in &self.fields {
+            require_nonblank("field source_id", &field.source_id)?;
+            require_nonblank("field path", &field.path)?;
+            if !tabs.contains(field.tab.as_str()) {
+                return Err(format!(
+                    "field {} uses unknown tab {}",
+                    field.path, field.tab
+                ));
+            }
+            if operational_tab == Some(field.tab.as_str()) {
+                return Err(format!(
+                    "operational tab {} cannot contain fields",
+                    field.tab
+                ));
+            }
+            let source = self
+                .sources
+                .iter()
+                .find(|source| source.id == field.source_id)
+                .ok_or_else(|| {
+                    format!(
+                        "field {} references missing source {}",
+                        field.path, field.source_id
+                    )
+                })?;
+            if !source.exists && !matches!(field.snapshot.intent, ConfigUiOverride::Absent) {
+                return Err(format!(
+                    "field {} has an explicit or invalid override from absent source {}",
+                    field.path, field.source_id
+                ));
+            }
+            if !field_ids.insert(field.id()) {
+                return Err(format!(
+                    "duplicate field identity ({}, {})",
+                    field.source_id, field.path
+                ));
+            }
+            validate_snapshot(field)?;
+        }
+
+        let mut action_ids = BTreeSet::new();
+        for action in &self.file_actions {
+            require_nonblank("file action source_id", &action.source_id)?;
+            require_nonblank("file action action_id", &action.action_id)?;
+            if !tabs.contains(action.tab.as_str()) {
+                return Err(format!(
+                    "file action {} uses unknown tab {}",
+                    action.action_id, action.tab
+                ));
+            }
+            if !action_ids.insert((action.source_id.as_str(), action.action_id.as_str())) {
+                return Err(format!(
+                    "duplicate file action identity ({}, {})",
+                    action.source_id, action.action_id
+                ));
+            }
+        }
+
+        for tab in self.tab_list_tables.keys() {
+            if !tabs.contains(tab.as_str()) {
+                return Err(format!("list table uses unknown tab {tab}"));
+            }
+            if operational_tab == Some(tab.as_str()) {
+                return Err(format!("operational tab {tab} cannot use a list table"));
+            }
+        }
+
+        let has_operational_rows = !self.sidecars.is_empty()
+            || !self.native_config_statuses.is_empty()
             || self.diagnostics.iter().any(|diagnostic| {
-                diagnostic.blocking
-                    && match &diagnostic.scope {
-                        ConfigUiDiagnosticScope::Global => true,
-                        ConfigUiDiagnosticScope::Source { source_id } => {
-                            field.source_id == source_id.as_str()
-                        }
-                        ConfigUiDiagnosticScope::Field(identity) => {
-                            field.source_id == identity.source_id.as_str()
-                                && field.path == identity.path.as_str()
-                        }
+                matches!(
+                    diagnostic.scope,
+                    ConfigUiDiagnosticScope::Global | ConfigUiDiagnosticScope::Source { .. }
+                )
+            });
+        if has_operational_rows && operational_tab.is_none() {
+            return Err(
+                "source/global diagnostics, sidecars, and native statuses require operational_tab"
+                    .to_string(),
+            );
+        }
+        for sidecar in &self.sidecars {
+            require_nonblank("sidecar name", &sidecar.name)?;
+            validate_optional_label("sidecar owner_label", sidecar.owner_label.as_deref())?;
+        }
+        for diagnostic in &self.diagnostics {
+            match &diagnostic.scope {
+                ConfigUiDiagnosticScope::Global => {}
+                ConfigUiDiagnosticScope::Source { source_id } => {
+                    require_nonblank("diagnostic source_id", source_id)?;
+                    if !sources.contains(source_id.as_str()) {
+                        return Err(format!("diagnostic references missing source {source_id}"));
                     }
-            })
-        {
-            ConfigUiValueState::Invalid
-        } else {
-            field.state
+                }
+                ConfigUiDiagnosticScope::Field(identity) => {
+                    require_nonblank("diagnostic field source_id", &identity.source_id)?;
+                    require_nonblank("diagnostic field path", &identity.path)?;
+                    if !field_ids.contains(identity) {
+                        return Err(format!(
+                            "diagnostic references missing field ({}, {})",
+                            identity.source_id, identity.path
+                        ));
+                    }
+                }
+            }
+        }
+
+        if let Some(core_fields) = &self.core_fields {
+            let mut unique = BTreeSet::new();
+            for identity in core_fields {
+                if !field_ids.contains(identity) {
+                    return Err(format!(
+                        "Core allowlist references missing field ({}, {})",
+                        identity.source_id, identity.path
+                    ));
+                }
+                if !unique.insert(identity) {
+                    return Err(format!(
+                        "duplicate Core field ({}, {})",
+                        identity.source_id, identity.path
+                    ));
+                }
+            }
+        }
+
+        if let Some(switcher) = &self.theme_switcher {
+            if !field_ids.contains(&switcher.field) {
+                return Err(format!(
+                    "theme switcher references missing field ({}, {})",
+                    switcher.field.source_id, switcher.field.path
+                ));
+            }
+            if switcher.mappings.is_empty() {
+                return Err("theme switcher must define at least one mapping".to_string());
+            }
+            if switcher
+                .mappings
+                .iter()
+                .enumerate()
+                .any(|(index, mapping)| {
+                    switcher.mappings[..index]
+                        .iter()
+                        .any(|previous| previous.value == mapping.value)
+                })
+            {
+                return Err("theme switcher mapping values must be unique".to_string());
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(any(feature = "ui", test))]
+    pub(crate) fn field_state(&self, field: &ConfigUiField) -> ConfigUiFieldState {
+        if self.diagnostics.iter().any(|diagnostic| {
+            diagnostic.blocking
+                && match &diagnostic.scope {
+                    ConfigUiDiagnosticScope::Global => true,
+                    ConfigUiDiagnosticScope::Source { source_id } => {
+                        field.source_id == source_id.as_str()
+                    }
+                    ConfigUiDiagnosticScope::Field(identity) => field.matches_id(identity),
+                }
+        }) {
+            return ConfigUiFieldState::Invalid;
+        }
+        snapshot_field_state(field)
+    }
+}
+
+pub(crate) fn snapshot_field_state(field: &ConfigUiField) -> ConfigUiFieldState {
+    match &field.snapshot.intent {
+        ConfigUiOverride::Explicit(_) => ConfigUiFieldState::Explicit,
+        ConfigUiOverride::Absent if field.snapshot.effective.is_some() => {
+            ConfigUiFieldState::Inherited
+        }
+        ConfigUiOverride::Absent => ConfigUiFieldState::Absent,
+        ConfigUiOverride::Invalid { .. } => ConfigUiFieldState::Invalid,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn set_field_state_for_test(field: &mut ConfigUiField, state: ConfigUiFieldState) {
+    let value = field
+        .snapshot
+        .effective
+        .as_ref()
+        .or(field.snapshot.baseline.as_ref())
+        .map(|resolved| resolved.value.clone())
+        .or_else(|| match &field.snapshot.intent {
+            ConfigUiOverride::Explicit(value) => Some(value.clone()),
+            ConfigUiOverride::Absent | ConfigUiOverride::Invalid { .. } => None,
+        })
+        .unwrap_or(JsonValue::Null);
+    match state {
+        ConfigUiFieldState::Explicit => {
+            field.snapshot.intent = ConfigUiOverride::Explicit(value.clone());
+            field.snapshot.effective = Some(ConfigUiResolvedValue::new(value));
+        }
+        ConfigUiFieldState::Inherited => {
+            let resolved = ConfigUiResolvedValue::new(value);
+            field.snapshot.intent = ConfigUiOverride::Absent;
+            field.snapshot.effective = Some(resolved.clone());
+            field.snapshot.baseline = Some(resolved);
+        }
+        ConfigUiFieldState::Absent => {
+            field.snapshot.intent = ConfigUiOverride::Absent;
+            field.snapshot.effective = None;
+            field.snapshot.baseline = None;
+        }
+        ConfigUiFieldState::Invalid => {
+            field.snapshot.intent = ConfigUiOverride::Invalid {
+                input: field_edit_value(field),
+            };
         }
     }
+}
+
+fn nonblank_unique<'a>(
+    label: &str,
+    values: impl IntoIterator<Item = &'a str>,
+) -> Result<BTreeSet<&'a str>, String> {
+    let mut unique = BTreeSet::new();
+    for value in values {
+        require_nonblank(label, value)?;
+        if !unique.insert(value) {
+            return Err(format!("duplicate {label} {value}"));
+        }
+    }
+    Ok(unique)
+}
+
+fn require_nonblank(label: &str, value: &str) -> Result<(), String> {
+    if value.trim().is_empty() {
+        Err(format!("{label} must not be blank"))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_optional_label(label: &str, value: Option<&str>) -> Result<(), String> {
+    if let Some(value) = value {
+        require_nonblank(label, value)?;
+    }
+    Ok(())
+}
+
+fn validate_snapshot(field: &ConfigUiField) -> Result<(), String> {
+    validate_optional_label(
+        "field external_manager",
+        field.snapshot.external_manager.as_deref(),
+    )?;
+    for resolved in [
+        field.snapshot.effective.as_ref(),
+        field.snapshot.baseline.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        validate_optional_label("resolved value origin", resolved.origin.as_deref())?;
+    }
+    if matches!(field.snapshot.intent, ConfigUiOverride::Absent)
+        && field.snapshot.effective != field.snapshot.baseline
+    {
+        return Err(format!(
+            "absent field {} must have identical effective and baseline resolutions or neither",
+            field.path
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -723,9 +1042,6 @@ pub fn schema_tabs(
         .collect::<Vec<_>>();
     if tabs.is_empty() {
         tabs = default_tabs.iter().map(|tab| (*tab).to_string()).collect();
-    }
-    if !tabs.iter().any(|tab| tab == "advanced") {
-        tabs.push("advanced".to_string());
     }
     tabs
 }
@@ -915,34 +1231,33 @@ fn toml_document_entry_field(
     let display_path = toml_document_display_path(&entry.segments);
     let patch_path = toml_document_patch_path(current.as_table(), &entry.segments);
     let field_path = patch_path.as_deref().unwrap_or(&display_path).to_string();
-    let effective = entry.current.as_ref().or(entry.default.as_ref());
-    let kind = effective.map_or("unknown", toml_document_field_kind);
-    let type_label = effective.map_or("unknown", toml_document_type_label);
-    let editable = patch_path.is_some() && effective.is_some_and(toml_document_value_is_editable);
+    let observed = entry
+        .current
+        .as_ref()
+        .or(entry.default.as_ref())
+        .expect("TOML entries are observed in at least one document");
+    let kind = toml_document_field_kind(observed);
+    let type_label = toml_document_type_label(observed);
+    let editable = patch_path.is_some() && toml_document_value_is_editable(observed);
+    let intent = entry
+        .current
+        .as_ref()
+        .map_or(ConfigUiOverride::Absent, |value| {
+            ConfigUiOverride::Explicit(toml_document_snapshot_value(value))
+        });
     let state = if entry.current.is_some() {
-        ConfigUiValueState::Explicit
-    } else if entry.default.is_some() {
-        ConfigUiValueState::Defaulted
+        ConfigUiFieldState::Explicit
     } else {
-        ConfigUiValueState::Unset
+        ConfigUiFieldState::Inherited
     };
-    let current_value = effective
-        .map(toml_document_render_value)
-        .unwrap_or_else(|| UNSET_CONFIG_VALUE_LABEL.to_string());
-    let edit_value = if editable {
-        effective
-            .map(toml_value_to_json)
-            .transpose()?
-            .map(|value| render_json_edit_value(&value))
-            .unwrap_or_default()
-    } else {
-        String::new()
-    };
+    let current_value = toml_document_render_value(observed);
     let rendered_default = entry.default.as_ref().map(toml_document_render_value);
-    let default_value = rendered_default
-        .clone()
-        .unwrap_or_else(|| NO_CONFIG_DEFAULT_VALUE_LABEL.to_string());
     let default_cell = rendered_default.unwrap_or_else(|| "-".to_string());
+    let baseline = entry
+        .default
+        .as_ref()
+        .map(toml_document_snapshot_value)
+        .map(ConfigUiResolvedValue::new);
     let validation = if !editable || spec.validation.trim().is_empty() {
         toml_document_validation_label(type_label, editable).to_string()
     } else {
@@ -958,16 +1273,20 @@ fn toml_document_entry_field(
             toml_document_parent_label(&entry.segments),
             toml_document_key_label(&entry.segments, type_label),
             type_label.to_string(),
-            state_label_text(state).to_string(),
-            current_value.clone(),
+            field_state_label(state).to_string(),
+            current_value,
             default_cell,
         ],
         tab: spec.tab.to_string(),
         kind: kind.to_string(),
-        current_value,
-        edit_value,
-        default_value,
-        state,
+        snapshot: ConfigUiFieldSnapshot {
+            intent,
+            effective: Some(ConfigUiResolvedValue::new(toml_document_snapshot_value(
+                observed,
+            ))),
+            baseline,
+            external_manager: None,
+        },
         description: toml_document_description(
             &display_path,
             type_label,
@@ -1101,6 +1420,11 @@ fn toml_document_render_value(value: &TomlValue) -> String {
     }
 }
 
+fn toml_document_snapshot_value(value: &TomlValue) -> JsonValue {
+    toml_value_to_json(value)
+        .unwrap_or_else(|_| JsonValue::String(toml_document_render_value(value)))
+}
+
 fn toml_document_validation_label(type_label: &str, editable: bool) -> &'static str {
     if editable {
         match type_label {
@@ -1146,20 +1470,12 @@ fn toml_document_read_only_notice(path_is_patchable: bool) -> &'static str {
     }
 }
 
-fn state_label_text(state: ConfigUiValueState) -> &'static str {
+pub(crate) fn field_state_label(state: ConfigUiFieldState) -> &'static str {
     match state {
-        ConfigUiValueState::Explicit => "explicit",
-        ConfigUiValueState::Defaulted => "default",
-        ConfigUiValueState::Unset => "unset",
-        ConfigUiValueState::Invalid => "invalid",
-    }
-}
-
-pub fn owner_label(owner: ConfigUiPathOwner) -> &'static str {
-    match owner {
-        ConfigUiPathOwner::Default => "default",
-        ConfigUiPathOwner::HomeManager => "home-manager",
-        ConfigUiPathOwner::User => "user",
+        ConfigUiFieldState::Explicit => "explicit",
+        ConfigUiFieldState::Inherited => "default",
+        ConfigUiFieldState::Absent => "unset",
+        ConfigUiFieldState::Invalid => "invalid",
     }
 }
 
@@ -1167,14 +1483,16 @@ fn row_matches_search(model: &ConfigUiModel, row: UiRowRef, search: &str) -> boo
     match row {
         UiRowRef::Field(index) => {
             let field = &model.fields[index];
+            let current = field_current_value(field);
+            let baseline = field_baseline_value(field).unwrap_or_default();
             search_matches(
                 search,
                 [
                     field.path.as_str(),
                     field.display_label.as_str(),
                     field.section_label.as_str(),
-                    field.current_value.as_str(),
-                    field.default_value.as_str(),
+                    current.as_str(),
+                    baseline.as_str(),
                     field.description.as_str(),
                 ],
             )
@@ -1202,7 +1520,7 @@ fn row_matches_search(model: &ConfigUiModel, row: UiRowRef, search: &str) -> boo
                 [
                     sidecar.name.as_str(),
                     path.as_ref(),
-                    owner_label(sidecar.owner),
+                    sidecar.owner_label.as_deref().unwrap_or_default(),
                 ],
             )
         }
@@ -1379,43 +1697,351 @@ mod tests {
             .unwrap_or_else(|| panic!("missing TOML document field {path}"))
     }
 
-    // Defends: source metadata is selected by host tab while source-less tabs stay explicitly unmatched.
+    // Defends: source identity is independent of tabs and remains unique across one shared tab.
     #[test]
-    fn selected_config_source_matches_selected_tab() {
-        let source = |id: &str, tab: &str| ConfigUiSource {
-            id: id.to_string(),
-            tab: tab.to_string(),
-            label: String::new(),
-            path: PathBuf::new(),
-            exists: true,
-            owner: ConfigUiPathOwner::User,
-            read_only: false,
+    fn source_ids_are_unique_without_tab_ownership() {
+        let mut model = model_with_fields(vec![
+            field_with_source("settings-source", "ui.theme", "string", "dark", &[]),
+            field_with_source("keys-source", "keys.leader", "string", "space", &[]),
+        ]);
+        assert!(model.validate().is_ok());
+
+        model.sources[0].id = model.sources[1].id.clone();
+        assert!(
+            model
+                .validate()
+                .unwrap_err()
+                .contains("duplicate source id")
+        );
+    }
+
+    // Defends: sparse snapshots preserve override intent independently from resolved values and
+    // reject only the contradictory inherited shapes that a host cannot explain.
+    #[test]
+    fn sparse_snapshots_preserve_intent_resolution_and_invalid_input() {
+        fn resolved(value: JsonValue, origin: &str) -> ConfigUiResolvedValue {
+            ConfigUiResolvedValue {
+                value,
+                origin: Some(origin.to_string()),
+            }
+        }
+
+        let mut inherited = field("inherited", "string", r#""base""#, &[]);
+        inherited.snapshot.intent = ConfigUiOverride::Absent;
+        inherited.snapshot.effective = Some(resolved(json!("base"), "defaults"));
+        inherited.snapshot.baseline = inherited.snapshot.effective.clone();
+        let inherited_model = model_with_fields(vec![inherited.clone()]);
+        assert!(inherited_model.validate().is_ok());
+        assert_eq!(
+            snapshot_field_state(&inherited),
+            ConfigUiFieldState::Inherited
+        );
+
+        let mut absent = inherited.clone();
+        absent.snapshot.effective = None;
+        absent.snapshot.baseline = None;
+        assert!(model_with_fields(vec![absent]).validate().is_ok());
+
+        let mut contradictory = inherited.clone();
+        contradictory.snapshot.baseline = Some(resolved(json!("other"), "defaults"));
+        assert!(
+            model_with_fields(vec![contradictory])
+                .validate()
+                .unwrap_err()
+                .contains("identical effective and baseline")
+        );
+        let mut partial = inherited.clone();
+        partial.snapshot.baseline = None;
+        assert!(model_with_fields(vec![partial]).validate().is_err());
+
+        let mut explicit = field("explicit", "string", r#""pinned""#, &[]);
+        explicit.snapshot.baseline = Some(resolved(json!("pinned"), "old defaults"));
+        assert!(model_with_fields(vec![explicit.clone()]).validate().is_ok());
+        assert_eq!(
+            snapshot_field_state(&explicit),
+            ConfigUiFieldState::Explicit
+        );
+        explicit.snapshot.baseline = Some(resolved(json!("changed"), "new defaults"));
+        assert!(model_with_fields(vec![explicit.clone()]).validate().is_ok());
+        assert_eq!(
+            snapshot_field_state(&explicit),
+            ConfigUiFieldState::Explicit
+        );
+        assert_eq!(field_current_value(&explicit), r#""pinned""#);
+
+        let mut invalid = field("invalid", "number", "1", &[]);
+        invalid.snapshot.intent = ConfigUiOverride::Invalid {
+            input: "not-a-number".to_string(),
         };
-        let model = ConfigUiModel {
-            sources: vec![
-                source("settings-source", "settings"),
-                source("keys-source", "keys"),
+        invalid.snapshot.effective = Some(resolved(json!(4), "runtime"));
+        invalid.snapshot.baseline = Some(resolved(json!(2), "defaults"));
+        invalid.snapshot.external_manager = Some("system policy".to_string());
+        assert!(model_with_fields(vec![invalid.clone()]).validate().is_ok());
+        assert_eq!(snapshot_field_state(&invalid), ConfigUiFieldState::Invalid);
+        assert_eq!(field_current_value(&invalid), "not-a-number");
+        assert_eq!(field_edit_value(&invalid), "not-a-number");
+        assert_eq!(field_baseline_value(&invalid).as_deref(), Some("2"));
+
+        let mut independent = field("independent", "string", r#""intent""#, &[]);
+        independent.snapshot.effective = Some(resolved(json!("effective"), "runtime"));
+        independent.snapshot.baseline = Some(resolved(json!("baseline"), "defaults"));
+        assert!(model_with_fields(vec![independent]).validate().is_ok());
+    }
+
+    // Defends: all model relationships are checked at ingestion while standalone actions and
+    // exact-field diagnostics remain usable without fabricated sources or an operational tab.
+    #[test]
+    fn model_validation_rejects_unreachable_and_ambiguous_relationships() {
+        fn invalid(model: ConfigUiModel, expected: &str) {
+            let error = model.validate().expect_err("model should be invalid");
+            assert!(
+                error.contains(expected),
+                "expected {error:?} to contain {expected:?}"
+            );
+        }
+
+        fn action(source_id: &str, action_id: &str, tab: &str) -> ConfigUiFileAction {
+            ConfigUiFileAction {
+                source_id: source_id.to_string(),
+                action_id: action_id.to_string(),
+                tab: tab.to_string(),
+                label: "Open file".to_string(),
+                description: String::new(),
+                path: PathBuf::from("settings.toml"),
+                exists: true,
+                read_only: false,
+                create_if_missing: false,
+                disabled_reason: None,
+            }
+        }
+
+        let base = model_with_fields(vec![field("known", "string", r#""value""#, &[])]);
+
+        let mut model = base.clone();
+        model.tabs.clear();
+        invalid(model, "at least one tab");
+
+        let mut model = base.clone();
+        model.tabs[0] = " ".to_string();
+        invalid(model, "tab must not be blank");
+
+        let mut model = base.clone();
+        model.tabs.push("general".to_string());
+        invalid(model, "duplicate tab");
+
+        let mut model = base.clone();
+        model.sources[0].id.clear();
+        invalid(model, "source id must not be blank");
+
+        let mut model = base.clone();
+        model.fields[0].source_id.clear();
+        invalid(model, "field source_id must not be blank");
+
+        let mut model = base.clone();
+        model.fields[0].path = "\t".to_string();
+        invalid(model, "field path must not be blank");
+
+        let mut model = base.clone();
+        model.fields.push(model.fields[0].clone());
+        invalid(model, "duplicate field identity");
+
+        let mut model = base.clone();
+        model.fields[0].source_id = "missing".to_string();
+        invalid(model, "references missing source");
+
+        let mut model = base.clone();
+        model.sources[0].exists = false;
+        invalid(model, "explicit or invalid override from absent source");
+
+        let mut model = base.clone();
+        model.sources[0].exists = false;
+        model.fields[0].snapshot.intent = ConfigUiOverride::Absent;
+        model.fields[0].snapshot.effective = model.fields[0].snapshot.baseline.clone();
+        assert!(
+            model.validate().is_ok(),
+            "an absent override may target a source the host can create"
+        );
+
+        let mut model = base.clone();
+        model.fields[0].tab = "missing".to_string();
+        invalid(model, "uses unknown tab");
+
+        let mut model = base.clone();
+        model.file_actions = vec![action("standalone", "open", "general")];
+        assert!(
+            model.validate().is_ok(),
+            "actions do not require a ConfigUiSource"
+        );
+        model
+            .file_actions
+            .push(action("standalone", "open", "general"));
+        invalid(model, "duplicate file action identity");
+
+        let mut model = base.clone();
+        model.file_actions = vec![action("standalone", "open", "missing")];
+        invalid(model, "uses unknown tab");
+
+        let mut model = base.clone();
+        model.file_actions = vec![action("", "open", "general")];
+        invalid(model, "file action source_id must not be blank");
+
+        let mut model = base.clone();
+        model.file_actions = vec![action("standalone", " ", "general")];
+        invalid(model, "file action action_id must not be blank");
+
+        let mut model = base.clone();
+        model.operational_tab = Some("missing".to_string());
+        invalid(model, "operational_tab must name a declared tab");
+
+        let mut model = base.clone();
+        model.tabs.push("operations".to_string());
+        model.operational_tab = Some("operations".to_string());
+        model.fields[0].tab = "operations".to_string();
+        invalid(model, "cannot contain fields");
+
+        let mut model = base.clone();
+        model.tabs.push("operations".to_string());
+        model.operational_tab = Some("operations".to_string());
+        model.tab_list_tables.insert(
+            "operations".to_string(),
+            ConfigUiListTable {
+                columns: Vec::new(),
+            },
+        );
+        invalid(model, "cannot use a list table");
+
+        let mut model = base.clone();
+        model.tab_list_tables.insert(
+            "missing".to_string(),
+            ConfigUiListTable {
+                columns: Vec::new(),
+            },
+        );
+        invalid(model, "list table uses unknown tab");
+
+        let field_id = base.fields[0].id();
+        let diagnostic = |scope| ConfigUiDiagnostic {
+            path: "host.check".to_string(),
+            status: "invalid".to_string(),
+            headline: "Host diagnostic".to_string(),
+            blocking: true,
+            scope,
+            detail_lines: Vec::new(),
+        };
+        let mut model = base.clone();
+        model
+            .diagnostics
+            .push(diagnostic(ConfigUiDiagnosticScope::Field(field_id)));
+        assert!(
+            model.validate().is_ok(),
+            "exact-field diagnostics need no operations tab"
+        );
+
+        let mut model = base.clone();
+        model
+            .diagnostics
+            .push(diagnostic(ConfigUiDiagnosticScope::Global));
+        invalid(model, "require operational_tab");
+
+        let mut model = base.clone();
+        model
+            .diagnostics
+            .push(diagnostic(ConfigUiDiagnosticScope::Source {
+                source_id: "missing".to_string(),
+            }));
+        model.tabs.push("operations".to_string());
+        model.operational_tab = Some("operations".to_string());
+        invalid(model, "diagnostic references missing source");
+
+        let mut model = base.clone();
+        model
+            .diagnostics
+            .push(diagnostic(ConfigUiDiagnosticScope::Field(
+                ConfigUiFieldId::new(DEFAULT_CONFIG_SOURCE_ID, "missing"),
+            )));
+        invalid(model, "diagnostic references missing field");
+
+        let mut model = base.clone();
+        model.core_fields = Some(vec![ConfigUiFieldId::new(
+            DEFAULT_CONFIG_SOURCE_ID,
+            "missing",
+        )]);
+        invalid(model, "Core allowlist references missing field");
+
+        let mut model = base.clone();
+        model.core_fields = Some(vec![model.fields[0].id(), model.fields[0].id()]);
+        invalid(model, "duplicate Core field");
+
+        let mut model = base.clone();
+        model.theme_switcher = Some(ConfigUiThemeSwitcher {
+            field: ConfigUiFieldId::new(DEFAULT_CONFIG_SOURCE_ID, "missing"),
+            mappings: vec![ConfigUiThemeMapping {
+                value: json!("dark"),
+                theme: ConfigUiTheme::Dark,
+            }],
+        });
+        invalid(model, "theme switcher references missing field");
+
+        let mut model = base.clone();
+        model.theme_switcher = Some(ConfigUiThemeSwitcher {
+            field: model.fields[0].id(),
+            mappings: Vec::new(),
+        });
+        invalid(model, "must define at least one mapping");
+
+        let mut model = base;
+        model.theme_switcher = Some(ConfigUiThemeSwitcher {
+            field: model.fields[0].id(),
+            mappings: vec![
+                ConfigUiThemeMapping {
+                    value: json!("same"),
+                    theme: ConfigUiTheme::Dark,
+                },
+                ConfigUiThemeMapping {
+                    value: json!("same"),
+                    theme: ConfigUiTheme::Light,
+                },
             ],
-            tabs: vec![
-                "settings".to_string(),
-                "keys".to_string(),
-                "advanced".to_string(),
-            ],
-            tab_list_tables: BTreeMap::new(),
-            fields: Vec::new(),
-            core_fields: None,
-            file_actions: Vec::new(),
-            sidecars: Vec::new(),
-            native_config_statuses: Vec::new(),
-            diagnostics: Vec::new(),
-            theme_switcher: None,
+        });
+        invalid(model, "mapping values must be unique");
+    }
+
+    // Defends: optional provenance and ownership labels are either absent or meaningful.
+    #[test]
+    fn model_validation_rejects_blank_optional_labels() {
+        let base = model_with_fields(vec![field("known", "string", r#""value""#, &[])]);
+        let invalid = |model: ConfigUiModel, expected: &str| {
+            assert!(model.validate().unwrap_err().contains(expected));
         };
 
-        assert_eq!(
-            selected_config_source(&model, 1).map(|source| source.id.as_str()),
-            Some("keys-source")
-        );
-        assert!(selected_config_source(&model, 2).is_none());
+        let mut model = base.clone();
+        model.sources[0].owner_label = Some("  ".to_string());
+        invalid(model, "source owner_label");
+
+        let mut model = base.clone();
+        model.fields[0].snapshot.external_manager = Some(String::new());
+        invalid(model, "field external_manager");
+
+        let mut model = base.clone();
+        model.fields[0]
+            .snapshot
+            .effective
+            .as_mut()
+            .expect("effective")
+            .origin = Some("\t".to_string());
+        invalid(model, "resolved value origin");
+
+        let mut model = base;
+        model.tabs.push("operations".to_string());
+        model.operational_tab = Some("operations".to_string());
+        model.sidecars.push(ConfigUiSidecar {
+            name: "sidecar".to_string(),
+            path: PathBuf::from("sidecar.toml"),
+            present: true,
+            owner_label: Some(" ".to_string()),
+            read_only: false,
+        });
+        invalid(model, "sidecar owner_label");
     }
 
     fn spec() -> ConfigUiFieldSpec {
@@ -1430,9 +2056,9 @@ mod tests {
         )
     }
 
-    // Defends: schema tab extraction is reusable and always includes the advanced operational tab.
+    // Defends: schema tab extraction preserves only host/schema-declared tabs.
     #[test]
-    fn schema_tabs_use_schema_order_or_fallback_with_advanced() {
+    fn schema_tabs_use_schema_order_or_fallback_without_injection() {
         let schema = json!({
             "x-host-config": {
                 "tabs": ["general", "editor"]
@@ -1440,7 +2066,7 @@ mod tests {
         });
         assert_eq!(
             schema_tabs(&schema, "x-host-config", &["fallback"]),
-            vec!["general", "editor", "advanced"]
+            vec!["general", "editor"]
         );
 
         assert_eq!(
@@ -1546,32 +2172,41 @@ help = "Theme name"
         let default = json!("light");
 
         let explicit = spec().build("string", Some(&current), Some(&default));
-        assert_eq!(explicit.state, ConfigUiValueState::Explicit);
-        assert_eq!(explicit.current_value, "\"dark\"");
-        assert_eq!(explicit.edit_value, "\"dark\"");
-        assert_eq!(explicit.default_value, "\"light\"");
-        assert!(explicit.has_default_value());
+        assert_eq!(
+            snapshot_field_state(&explicit),
+            ConfigUiFieldState::Explicit
+        );
+        assert_eq!(field_current_value(&explicit), "\"dark\"");
+        assert_eq!(field_edit_value(&explicit), "\"dark\"");
+        assert_eq!(
+            field_baseline_value(&explicit).as_deref(),
+            Some("\"light\"")
+        );
+        assert!(explicit.has_baseline_value());
 
         let defaulted = spec().build("string", None, Some(&default));
-        assert_eq!(defaulted.state, ConfigUiValueState::Defaulted);
-        assert_eq!(defaulted.current_value, "\"light\"");
-        assert!(defaulted.has_default_value());
+        assert_eq!(
+            snapshot_field_state(&defaulted),
+            ConfigUiFieldState::Inherited
+        );
+        assert_eq!(field_current_value(&defaulted), "\"light\"");
+        assert!(defaulted.has_baseline_value());
 
         let unset = spec().build("string", None, None);
-        assert_eq!(unset.state, ConfigUiValueState::Unset);
-        assert_eq!(unset.current_value, "not set");
-        assert_eq!(unset.default_value, NO_CONFIG_DEFAULT_VALUE_LABEL);
-        assert!(!unset.has_default_value());
+        assert_eq!(snapshot_field_state(&unset), ConfigUiFieldState::Absent);
+        assert_eq!(field_current_value(&unset), "not set");
+        assert_eq!(field_baseline_value(&unset), None);
+        assert!(!unset.has_baseline_value());
 
         let control_value = json!("\0");
         let control_field = spec().build("string", Some(&control_value), Some(&control_value));
         for rendered in [
-            &control_field.current_value,
-            &control_field.edit_value,
-            &control_field.default_value,
+            field_current_value(&control_field),
+            field_edit_value(&control_field),
+            field_baseline_value(&control_field).expect("baseline"),
         ] {
             assert_eq!(
-                serde_json::from_str::<JsonValue>(rendered).expect("valid JSON value"),
+                serde_json::from_str::<JsonValue>(&rendered).expect("valid JSON value"),
                 control_value
             );
         }
@@ -1605,9 +2240,9 @@ help = "Theme name"
         assert_eq!(field.section_label, "Plugins");
         assert_eq!(field.list_cells, vec!["plugins", "5 enabled"]);
         assert_eq!(field.tab, "advanced");
-        assert_eq!(field.current_value, "[5 items]");
+        assert_eq!(field_current_value(&field), "[5 items]");
         assert_eq!(
-            field.edit_value,
+            field_edit_value(&field),
             r#"["git","search","preview","terminal","theme"]"#
         );
         assert!(field.rebuild_required);
@@ -1653,10 +2288,13 @@ help = "Theme name"
         assert_eq!(field.list_cells, vec!["widgets", "2 selected"]);
         assert_eq!(field.tab, "widgets");
         assert_eq!(field.kind, "string_list");
-        assert_eq!(field.current_value, r#"["status","clock"]"#);
-        assert_eq!(field.edit_value, r#"["status","clock"]"#);
-        assert_eq!(field.default_value, r#"["clock"]"#);
-        assert_eq!(field.state, ConfigUiValueState::Explicit);
+        assert_eq!(field_current_value(&field), r#"["status","clock"]"#);
+        assert_eq!(field_edit_value(&field), r#"["status","clock"]"#);
+        assert_eq!(
+            field_baseline_value(&field).as_deref(),
+            Some(r#"["clock"]"#)
+        );
+        assert_eq!(snapshot_field_state(&field), ConfigUiFieldState::Explicit);
         assert_eq!(field.allowed_values, vec!["clock", "status", "mode"]);
         assert!(field.rebuild_required);
     }
@@ -1794,9 +2432,12 @@ normal = "block"
                 "\"absolute\""
             ]
         );
-        assert_eq!(line_number.current_value, "\"relative\"");
-        assert_eq!(line_number.edit_value, "\"relative\"");
-        assert_eq!(line_number.default_value, "\"absolute\"");
+        assert_eq!(field_current_value(line_number), "\"relative\"");
+        assert_eq!(field_edit_value(line_number), "\"relative\"");
+        assert_eq!(
+            field_baseline_value(line_number).as_deref(),
+            Some("\"absolute\"")
+        );
         assert_eq!(line_number.edit_behavior, ConfigUiEditBehavior::Default);
     }
 
@@ -1820,9 +2461,15 @@ rulers = [80]
         );
 
         let line_number = toml_field(&rows, "editor.line-number");
-        assert_eq!(line_number.state, ConfigUiValueState::Defaulted);
-        assert_eq!(line_number.current_value, "\"relative\"");
-        assert_eq!(line_number.default_value, "\"relative\"");
+        assert_eq!(
+            snapshot_field_state(line_number),
+            ConfigUiFieldState::Inherited
+        );
+        assert_eq!(field_current_value(line_number), "\"relative\"");
+        assert_eq!(
+            field_baseline_value(line_number).as_deref(),
+            Some("\"relative\"")
+        );
         assert_eq!(
             line_number.list_cells,
             vec![
@@ -1837,8 +2484,8 @@ rulers = [80]
 
         let rulers = toml_field(&rows, "editor.rulers");
         assert_eq!(rulers.kind, "array");
-        assert_eq!(rulers.current_value, "[80,100]");
-        assert_eq!(rulers.default_value, "[80]");
+        assert_eq!(field_current_value(rulers), "[80,100]");
+        assert_eq!(field_baseline_value(rulers).as_deref(), Some("[80]"));
         assert_eq!(rulers.list_cells[5], "[80]");
         assert_eq!(rulers.validation, "read-only in generic TOML document view");
         assert!(matches!(
@@ -1847,10 +2494,10 @@ rulers = [80]
         ));
 
         let limits = toml_field(&rows, "editor.limits");
-        assert_eq!(limits.current_value, "[inf, -inf, nan]");
+        assert_eq!(field_current_value(limits), "[inf, -inf, nan]");
 
         let limit = toml_field(&rows, "editor.limit");
-        assert_eq!(limit.current_value, "inf");
+        assert_eq!(field_current_value(limit), "inf");
         assert!(matches!(
             limit.edit_behavior,
             ConfigUiEditBehavior::StructuredOnly { .. }
@@ -1900,7 +2547,7 @@ rulers = [80, 100]
 
         assert_eq!(field.path, "\"weird.key\"");
         assert_eq!(field.display_label, "\"weird.key\"");
-        assert_eq!(field.default_value, "\"default\"");
+        assert_eq!(field_baseline_value(field).as_deref(), Some("\"default\""));
         assert_eq!(
             field.list_cells,
             vec![
@@ -1930,9 +2577,9 @@ package = { name = "ratconfig", enabled = true }
 
         let name = toml_field(&rows, "package.name");
         assert_eq!(name.kind, "string");
-        assert_eq!(name.current_value, "\"ratconfig\"");
-        assert_eq!(name.edit_value, "");
-        assert_eq!(name.default_value, NO_CONFIG_DEFAULT_VALUE_LABEL);
+        assert_eq!(field_current_value(name), "\"ratconfig\"");
+        assert_eq!(field_edit_value(name), "\"ratconfig\"");
+        assert_eq!(field_baseline_value(name), None);
         assert_eq!(name.validation, "read-only in generic TOML document view");
         assert_eq!(
             name.edit_behavior,
@@ -1956,8 +2603,8 @@ empty = []
         let plugins = toml_field(&rows, "shell.plugins");
 
         assert_eq!(plugins.kind, "string_list");
-        assert_eq!(plugins.current_value, r#"["git","status"]"#);
-        assert_eq!(plugins.edit_value, r#"["git","status"]"#);
+        assert_eq!(field_current_value(plugins), r#"["git","status"]"#);
+        assert_eq!(field_edit_value(plugins), r#"["git","status"]"#);
         assert_eq!(plugins.edit_behavior, ConfigUiEditBehavior::Default);
 
         let empty = toml_field(&rows, "shell.empty");
@@ -2014,6 +2661,7 @@ empty = []
         let mut model = ConfigUiModel {
             sources: Vec::new(),
             tabs: vec!["general".to_string(), "advanced".to_string()],
+            operational_tab: Some("advanced".to_string()),
             tab_list_tables: BTreeMap::new(),
             fields: vec![spec().build("string", None, None)],
             core_fields: None,
@@ -2061,12 +2709,12 @@ empty = []
     #[test]
     fn core_allowlist_filters_defaults_but_keeps_active_values_and_all_scope_search() {
         let mut core = field("core.default", "string", r#""core""#, &[]);
-        core.state = ConfigUiValueState::Defaulted;
+        set_field_state_for_test(&mut core, ConfigUiFieldState::Inherited);
         let mut hidden = field("hidden.default", "string", r#""hidden""#, &[]);
-        hidden.state = ConfigUiValueState::Defaulted;
+        set_field_state_for_test(&mut hidden, ConfigUiFieldState::Inherited);
         let explicit = field("hidden.explicit", "string", r#""set""#, &[]);
         let mut invalid = field("hidden.invalid", "string", r#""broken""#, &[]);
-        invalid.state = ConfigUiValueState::Invalid;
+        set_field_state_for_test(&mut invalid, ConfigUiFieldState::Invalid);
         let mut model = model_with_fields(vec![core, hidden, explicit, invalid]);
         model.core_fields = Some(vec![ConfigUiFieldId::new(
             DEFAULT_CONFIG_SOURCE_ID,
@@ -2097,16 +2745,17 @@ empty = []
     #[test]
     fn scoped_diagnostics_derive_field_state_without_cross_source_leaks() {
         use crate::{ConfigUiApp, ConfigUiIntent, ConfigUiKey};
-        use ConfigUiValueState::{Defaulted, Invalid};
+        use ConfigUiFieldState::{Inherited, Invalid};
 
         let mut source_a_one = field_with_source("source-a", "known.one", "string", "one", &[]);
         let mut source_a_two = field_with_source("source-a", "known.two", "string", "two", &[]);
         let mut source_b_one = field_with_source("source-b", "known.one", "string", "one", &[]);
         for field in [&mut source_a_one, &mut source_a_two, &mut source_b_one] {
-            field.state = Defaulted;
+            set_field_state_for_test(field, Inherited);
         }
         let mut model = model_with_fields(vec![source_a_one, source_a_two, source_b_one]);
         model.tabs.push("advanced".to_string());
+        model.operational_tab = Some("advanced".to_string());
         model.core_fields = Some(Vec::new());
         let diagnostic = |blocking, scope| ConfigUiDiagnostic {
             path: "opaque.native".to_string(),
@@ -2118,17 +2767,17 @@ empty = []
         };
         model.diagnostics.push(diagnostic(
             false,
-            ConfigUiDiagnosticScope::Field(ConfigUiFieldId::new("source-a", "opaque.native")),
+            ConfigUiDiagnosticScope::Field(ConfigUiFieldId::new("source-a", "known.one")),
         ));
         let states = |model: &ConfigUiModel| {
             model
                 .fields
                 .iter()
-                .map(|field| model.effective_field_state(field))
+                .map(|field| model.field_state(field))
                 .collect::<Vec<_>>()
         };
 
-        assert_eq!(states(&model), vec![Defaulted; 3]);
+        assert_eq!(states(&model), vec![Inherited; 3]);
         assert!(
             visible_rows_for_tab_search_in_view(&model, 0, "", ConfigUiSettingsView::Core)
                 .is_empty()
@@ -2148,7 +2797,7 @@ empty = []
             true,
             ConfigUiDiagnosticScope::Field(ConfigUiFieldId::new("source-a", "known.one")),
         ));
-        assert_eq!(states(&model), vec![Invalid, Defaulted, Defaulted]);
+        assert_eq!(states(&model), vec![Invalid, Inherited, Inherited]);
         assert_eq!(
             visible_rows_for_tab_search_in_view(&model, 0, "", ConfigUiSettingsView::Core),
             vec![UiRowRef::Field(0)]
@@ -2157,19 +2806,29 @@ empty = []
         model.diagnostics[1].scope = ConfigUiDiagnosticScope::Source {
             source_id: "source-a".to_string(),
         };
-        assert_eq!(states(&model), vec![Invalid, Invalid, Defaulted]);
+        assert_eq!(states(&model), vec![Invalid, Invalid, Inherited]);
+        assert!(
+            visible_rows_for_tab_search_in_view(&model, 0, "", ConfigUiSettingsView::Core)
+                .is_empty(),
+            "source blockers must not pull every affected field into Core"
+        );
 
         model.diagnostics[1].scope = ConfigUiDiagnosticScope::Global;
         assert_eq!(states(&model), vec![Invalid; 3]);
+        assert!(
+            visible_rows_for_tab_search_in_view(&model, 0, "", ConfigUiSettingsView::Core)
+                .is_empty(),
+            "global blockers must remain operational rather than expanding Core"
+        );
     }
 
-    // Defends: omitting the allowlist preserves all-core compatibility, including empty tabs.
+    // Defends: omitting the allowlist treats every declared field as Core, including on empty tabs.
     #[test]
     fn absent_core_allowlist_treats_every_field_as_core() {
         let mut one = field("one", "string", r#""one""#, &[]);
-        one.state = ConfigUiValueState::Defaulted;
+        set_field_state_for_test(&mut one, ConfigUiFieldState::Inherited);
         let mut two = field("two", "string", r#""two""#, &[]);
-        two.state = ConfigUiValueState::Unset;
+        set_field_state_for_test(&mut two, ConfigUiFieldState::Absent);
         let mut model = model_with_fields(vec![one, two]);
         model.tabs.push("empty".to_string());
 
@@ -2184,10 +2843,6 @@ empty = []
         assert_eq!(
             field_counts_for_tab(&model, 1),
             ConfigUiFieldCounts { core: 0, total: 0 }
-        );
-        assert_eq!(
-            field_counts_for_tab(&model, model.tabs.len()),
-            ConfigUiFieldCounts { core: 2, total: 2 }
         );
     }
 

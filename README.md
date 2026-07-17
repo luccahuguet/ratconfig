@@ -42,24 +42,25 @@ Yazelix-specific behavior stays out of this repository, including Home Manager o
 ```rust
 use std::path::PathBuf;
 use ratconfig::{
-    ConfigUiApplyStatus, ConfigUiEditBehavior, ConfigUiField, ConfigUiModel,
-    ConfigUiPathOwner, ConfigUiSource, ConfigUiValueState,
+    ConfigUiApplyStatus, ConfigUiEditBehavior, ConfigUiField, ConfigUiFieldSnapshot,
+    ConfigUiModel, ConfigUiOverride, ConfigUiResolvedValue, ConfigUiSource,
     DEFAULT_CONFIG_SOURCE_ID,
     toml_adapter::{TomlPatchError, set_toml_value_text},
 };
+use serde_json::json;
 
 fn model() -> ConfigUiModel {
     ConfigUiModel {
         sources: vec![ConfigUiSource {
             id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
-            tab: "general".to_string(),
             label: "Settings".to_string(),
             path: PathBuf::from("settings.toml"),
             exists: true,
-            owner: ConfigUiPathOwner::User,
+            owner_label: Some("user".to_string()),
             read_only: false,
         }],
-        tabs: vec!["general".to_string(), "advanced".to_string()],
+        tabs: vec!["general".to_string()],
+        operational_tab: None,
         tab_list_tables: std::collections::BTreeMap::new(),
         fields: vec![ConfigUiField {
             source_id: DEFAULT_CONFIG_SOURCE_ID.to_string(),
@@ -69,10 +70,12 @@ fn model() -> ConfigUiModel {
             list_cells: Vec::new(),
             tab: "general".to_string(),
             kind: "bool".to_string(),
-            current_value: "false".to_string(),
-            edit_value: "false".to_string(),
-            default_value: "false".to_string(),
-            state: ConfigUiValueState::Explicit,
+            snapshot: ConfigUiFieldSnapshot {
+                intent: ConfigUiOverride::Explicit(json!(false)),
+                effective: Some(ConfigUiResolvedValue::new(json!(false))),
+                baseline: Some(ConfigUiResolvedValue::new(json!(false))),
+                external_manager: None,
+            },
             description: "Enable debug logging".to_string(),
             allowed_values: Vec::new(),
             validation: "bool".to_string(),
@@ -106,7 +109,11 @@ fn patch_toml() -> Result<String, TomlPatchError> {
 
 Host applications build the model from their own schema and config files, then use ratconfig editor/rendering helpers inside their terminal event loop. After an edit, the host validates and writes the patched text, reloads the model, and applies any live runtime changes it owns
 
-Populate `ConfigUiModel::sources` for host-owned config documents. Ratconfig uses that metadata only to render the selected tab's label, path, owner, and write mode; tabs without a matching source show neutral non-file-backed metadata. Hosts still own discovery, loading, writes, creation policy, and validation
+Construct the editor with `ConfigUiApp::try_new`. Model construction and both replacement methods validate tab routing, stable identities, source references, snapshots, diagnostics, and theme mappings before the app changes. App state is read-only through narrow accessors; hosts report persistence or validation feedback with `notice_info` and `notice_error`
+
+Populate `ConfigUiModel::sources` for host-owned config documents. Sources are unique by id and can back fields on several tabs. Ratconfig renders source metadata from the selected field, renders file-action metadata from the selected action, and uses neutral metadata when neither is selected. `owner_label` is optional display text and does not grant write authority. Hosts still own discovery, loading, writes, creation policy, and validation
+
+Each field snapshot keeps four concerns separate: `intent` records whether the selected source contains an absent, explicit, or locally invalid override; `effective` records the resolved value in use; `baseline` records resolution without that override; and `external_manager` carries optional display provenance. Effective and baseline values can each include one optional `origin` label. An absent override requires effective and baseline to be identical or both unknown, while explicit and invalid snapshots may carry independent resolutions and require a present source document. Equality between an explicit value and its baseline remains explicit
 
 Use `ConfigUiField::display_label` when row and detail text should be friendlier than the stable field path. Ratconfig still uses `path` for edit intents and host write routing
 
@@ -118,9 +125,9 @@ Populate `ConfigUiModel::tab_list_tables` and matching `ConfigUiField::list_cell
 
 Hosts do not choose widths for the default list. Ratconfig sizes status and setting from every row in the selected tab, then gives the remaining cells to value; search and selection leave column starts unchanged
 
-Fields with defaults expose a reset-to-default action that emits `ConfigUiIntent::UnsetField`. Hosts decide whether that means unsetting text, writing a default, validation, persistence, reloads, and apply behavior. Use `NO_CONFIG_DEFAULT_VALUE_LABEL` for manually constructed fields that have no default; builder helpers set it automatically
+Fields with a known baseline expose a reset-to-default action that emits `ConfigUiIntent::UnsetField`. Hosts decide whether that means unsetting text, validation, persistence, reloads, and apply behavior. A missing baseline is represented by `snapshot.baseline: None`; no string sentinel is used
 
-Populate `ConfigUiModel::theme_switcher` when a committed field value should select a built-in Ratconfig theme. The switcher names one source id, one field path, and `serde_json::Value` mappings to `ConfigUiTheme::Dark` or `ConfigUiTheme::Light`; Ratconfig resolves the initial theme from model fields and switches after `ConfigUiApp::finish_successful_set_field_by_path()` or `ConfigUiApp::finish_successful_unset_field_by_path()` confirms a successful write of that source/path after any host reload. Failed host validation/writeback should not call those methods, so staged edits stay active and the theme does not change
+Populate `ConfigUiModel::theme_switcher` when a committed field value should select a built-in Ratconfig theme. The switcher names one `ConfigUiFieldId` and maps exact `serde_json::Value` values to `ConfigUiTheme::Dark` or `ConfigUiTheme::Light`. `try_new` resolves the initial theme from the field's effective snapshot. After a successful host write and reload, call `replace_model_after_success(reloaded, &field_id)`; the validated replacement becomes committed truth and only a matching staged edit is cleared. Failed host validation or persistence should report a notice without replacing the model, which preserves the staged buffer
 
 ## Core And All Settings
 
@@ -141,13 +148,13 @@ fn classify_core(model: &mut ConfigUiModel) {
 
 Any field outside those identities is non-core while defaulted or unset. Ratconfig keeps explicit and invalid values in Core so active configuration and errors stay visible. `core_fields: None` treats every field as Core
 
-`ConfigUiApp` starts in Core when the model contains a Core/All distinction. It starts in All when both views contain the same fields. Normal-mode `a` toggles the selected tab between Core and All when that distinction exists. A non-empty search spans All fields without changing the saved view. The settings heading reports Core and total counts, and file actions plus advanced operational rows remain reachable in either view
+`ConfigUiApp` starts in Core when the model contains a Core/All distinction. It starts in All when both views contain the same fields. Normal-mode `a` toggles the selected tab between Core and All when that distinction exists. A non-empty search spans All fields without changing the saved view. The settings heading reports Core and total counts, and file actions plus host-routed operational rows remain reachable in either view
 
 Generated TOML rows use the same identity contract. Hosts can classify fields returned by `build_toml_document_fields` with `ConfigUiFieldId::new(source_id, path)` without reconstructing the rows
 
 ## Scoped Diagnostics
 
-Hosts classify every diagnostic as blocking or nonblocking and scope it globally, to one source, or to one exact `ConfigUiFieldId`. Ratconfig combines that declaration with each field's stored state through `ConfigUiModel::effective_field_state`. A matching blocking diagnostic renders the field as invalid and keeps it visible in Core; a nonblocking diagnostic remains visible on the Advanced tab without changing any field state. `schema_tabs` includes the reserved `advanced` tab; manually assembled models must include it in `tabs` for diagnostics to be reachable
+Hosts classify every diagnostic as blocking or nonblocking and scope it globally, to one source, or to one exact `ConfigUiFieldId`. An exact-field blocking diagnostic renders that field as invalid and keeps it visible in Core without changing its snapshot intent. Source/global blockers mark matching fields invalid without expanding Core, and nonblocking diagnostics remain informational. Exact-field diagnostics can exist without an operational tab, while source/global diagnostics, sidecars, and native-status rows require `operational_tab` to name one declared tab. That tab uses Ratconfig's generic status layout and cannot also contain fields or a list-table profile. No tab name is reserved, and `schema_tabs` returns only host/schema-declared tabs
 
 Use a nonblocking diagnostic for an opaque native entry that the host can preserve safely. Use field scope for one known invalid setting, source scope when one document is unsafe as a whole, and global scope only when every field is affected:
 
@@ -274,7 +281,7 @@ fn patch_native_toml(raw: &str, path: &str, value: &Value) -> Result<String, Tom
 }
 ```
 
-The generated rows include tables, scalar leaves, arrays, current/default state, deterministic table/key ordering, and compact previews of complete structured values. Strings, booleans, integers, finite floats, and non-empty string arrays use the normal editable field path when the TOML key path can be represented as dotted bare keys such as `editor.line-number` and the current document can be patched safely through that path
+The generated rows include tables, scalar leaves, arrays, sparse intent/effective/baseline snapshots, deterministic table/key ordering, and compact previews of complete structured values. Strings, booleans, integers, finite floats, and non-empty string arrays use the normal editable field path when the TOML key path can be represented as dotted bare keys such as `editor.line-number` and the current document can be patched safely through that path
 
 Complex tables, complex arrays, datetimes, quoted keys with dots, and other paths that cannot be safely represented as dotted patch paths are rendered as structured read-only rows. When exactly one file action has the same `source_id` as the selected structured field, `e` emits that action's existing `ConfigUiIntent::OpenFile` if it is available; unavailable, ambiguous, or missing ownership keeps the read-only behavior. Give each editable TOML document its own source id when its rows should open one exact file
 
@@ -293,10 +300,13 @@ ratconfig = { git = "https://github.com/luccahuguet/ratconfig", tag = "v5.0.0", 
 ```
 
 ```rust,no_run
-use ratconfig::{ConfigUiApp, ConfigUiIntent, run_config_ui};
+use ratconfig::{
+    ConfigUiApp, ConfigUiFieldId, ConfigUiIntent, ConfigUiModel, CrosstermRunnerError,
+    run_config_ui,
+};
 use serde_json::Value;
 
-fn run_editor(mut app: ConfigUiApp) -> Result<(), Box<dyn std::error::Error>> {
+fn run_editor(mut app: ConfigUiApp) -> Result<(), CrosstermRunnerError<std::io::Error>> {
     run_config_ui(&mut app, |app, intent| {
         match intent {
             ConfigUiIntent::BeginEdit { field_index, .. } => {
@@ -304,11 +314,17 @@ fn run_editor(mut app: ConfigUiApp) -> Result<(), Box<dyn std::error::Error>> {
             }
             ConfigUiIntent::SetField { source_id, path, value, .. } => {
                 host_validate_and_write(&source_id, &path, &value)?;
-                app.finish_successful_set_field_by_path(&source_id, &path, &value);
+                let field = ConfigUiFieldId::new(source_id, path);
+                let reloaded = host_reload_model()?;
+                app.replace_model_after_success(reloaded, &field)
+                    .map_err(std::io::Error::other)?;
             }
             ConfigUiIntent::UnsetField { source_id, path, .. } => {
-                host_unset_and_reload(&source_id, &path)?;
-                app.finish_successful_unset_field_by_path(&source_id, &path);
+                host_unset(&source_id, &path)?;
+                let field = ConfigUiFieldId::new(source_id, path);
+                let reloaded = host_reload_model()?;
+                app.replace_model_after_success(reloaded, &field)
+                    .map_err(std::io::Error::other)?;
             }
             ConfigUiIntent::EditTextExternally { field_index, input, .. } => {
                 let edited = host_edit_text_buffer(&input)?;
@@ -321,34 +337,37 @@ fn run_editor(mut app: ConfigUiApp) -> Result<(), Box<dyn std::error::Error>> {
             }
             ConfigUiIntent::None | ConfigUiIntent::Exit => {}
         }
-        Ok::<(), Box<dyn std::error::Error>>(())
-    })?;
-    Ok(())
+        Ok(())
+    })
 }
 
 fn host_validate_and_write(
     _source_id: &str,
     _path: &str,
     _value: &Value,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> std::io::Result<()> {
     Ok(())
 }
 
-fn host_unset_and_reload(
+fn host_unset(
     _source_id: &str,
     _path: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> std::io::Result<()> {
     Ok(())
 }
 
-fn host_edit_text_buffer(input: &str) -> Result<String, Box<dyn std::error::Error>> {
+fn host_reload_model() -> std::io::Result<ConfigUiModel> {
+    unimplemented!("reload the host-owned config and build a fresh model")
+}
+
+fn host_edit_text_buffer(input: &str) -> std::io::Result<String> {
     Ok(input.to_string())
 }
 
 fn host_open_file(
     _path: &std::path::Path,
     _create_if_missing: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> std::io::Result<()> {
     Ok(())
 }
 ```
@@ -495,6 +514,9 @@ Before cutting a release:
 
 ### 6.0.0 (unreleased)
 
+- `ConfigUiFieldSnapshot` separates absent/explicit/invalid override intent from optional effective and baseline resolutions, provenance, and external-management labels; the parallel string value fields and sentinel defaults are absent from the model
+- `ConfigUiApp::try_new`, `replace_model`, and `replace_model_after_success` validate complete models before mutation; app internals are read-only to hosts, reloads preserve stable selection and compatible edits by identity, and invalid replacements leave staged state untouched
+- `ConfigUiSource` is unique by id and independent of tabs, selected rows drive source headers, and `operational_tab` replaces reserved-name routing for diagnostics and status rows
 - `ConfigUiDiagnostic` adds required global/source/field scope, and effective field validity is derived from matching blocking diagnostics instead of a duplicate field-spec flag
 - `ConfigUiEditState` adds a required grapheme-boundary cursor; `ConfigUiKey` adds Home, End, Delete, and owned paste input and is no longer `Copy`
 - Free-form fields use `Enter` for cursor-aware single-line editing and normal-mode `e` for the host-owned external editor; choice controls remain native

@@ -1,6 +1,10 @@
 // Test lane: default
 use super::*;
-use crate::model::UNSET_CONFIG_VALUE_LABEL;
+use crate::model::{
+    ConfigUiFieldState, UNSET_CONFIG_VALUE_LABEL, field_baseline_value, field_counts_for_tab,
+    field_current_json_value, field_current_value, field_state_label, snapshot_field_state,
+    visible_rows_for_tab_search,
+};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -98,7 +102,7 @@ enum ListEntry<'a> {
 struct HeaderMetadata {
     source_label: Option<String>,
     source_path: String,
-    owner: &'static str,
+    owner: String,
     mode: &'static str,
 }
 
@@ -106,10 +110,12 @@ impl ConfigUiApp {
     pub fn render_details(&self, row: UiRowRef) -> Vec<Line<'static>> {
         match row {
             UiRowRef::Field(index) => {
-                let field = &self.model.fields[index];
-                let state = self.model.effective_field_state(field);
+                let Some(field) = self.model.fields.get(index) else {
+                    return Vec::new();
+                };
+                let state = self.model.field_state(field);
                 if let Some(edit) = &self.edit
-                    && edit.field_index == index
+                    && field.matches_id(&edit.field_id)
                 {
                     match edit.mode {
                         ConfigUiEditMode::Choice if is_scalar_enum_field(field) => {
@@ -126,14 +132,30 @@ impl ConfigUiApp {
                 }
                 field_detail_lines(field, state)
             }
-            UiRowRef::Sidecar(index) => sidecar_detail_lines(&self.model.sidecars[index]),
-            UiRowRef::FileAction(index) => {
-                file_action_detail_lines(&self.model.file_actions[index])
-            }
-            UiRowRef::Diagnostic(index) => diagnostic_detail_lines(&self.model.diagnostics[index]),
-            UiRowRef::NativeStatus(index) => {
-                native_status_detail_lines(&self.model.native_config_statuses[index])
-            }
+            UiRowRef::Sidecar(index) => self
+                .model
+                .sidecars
+                .get(index)
+                .map(sidecar_detail_lines)
+                .unwrap_or_default(),
+            UiRowRef::FileAction(index) => self
+                .model
+                .file_actions
+                .get(index)
+                .map(file_action_detail_lines)
+                .unwrap_or_default(),
+            UiRowRef::Diagnostic(index) => self
+                .model
+                .diagnostics
+                .get(index)
+                .map(diagnostic_detail_lines)
+                .unwrap_or_default(),
+            UiRowRef::NativeStatus(index) => self
+                .model
+                .native_config_statuses
+                .get(index)
+                .map(native_status_detail_lines)
+                .unwrap_or_default(),
         }
     }
 }
@@ -166,7 +188,7 @@ pub fn draw_config_ui_with_details(
 
 fn render_header(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect) {
     let theme = app.active_theme;
-    let metadata = header_metadata(&app.model, app.selected_tab);
+    let metadata = header_metadata(app);
     let warning_count = app
         .model
         .diagnostics
@@ -229,20 +251,49 @@ fn render_header(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect) {
     }
 }
 
-fn header_metadata(model: &ConfigUiModel, selected_tab: usize) -> HeaderMetadata {
-    if let Some(source) = selected_config_source(model, selected_tab) {
-        return HeaderMetadata {
-            source_label: Some(source.label.clone()),
-            source_path: config_path_text(&source.path, source.exists),
-            owner: owner_label(source.owner),
-            mode: write_mode(source.read_only),
-        };
+fn header_metadata(app: &ConfigUiApp) -> HeaderMetadata {
+    let selected = app.visible_rows().get(app.selected_row).copied();
+    match selected {
+        Some(UiRowRef::Field(index)) => app
+            .model
+            .fields
+            .get(index)
+            .and_then(|field| {
+                app.model
+                    .sources
+                    .iter()
+                    .find(|source| source.id == field.source_id)
+            })
+            .map(|source| HeaderMetadata {
+                source_label: Some(source.label.clone()),
+                source_path: config_path_text(&source.path, source.exists),
+                owner: source
+                    .owner_label
+                    .clone()
+                    .unwrap_or_else(|| "none".to_string()),
+                mode: write_mode(source.read_only),
+            })
+            .unwrap_or_else(neutral_header_metadata),
+        Some(UiRowRef::FileAction(index)) => app
+            .model
+            .file_actions
+            .get(index)
+            .map(|action| HeaderMetadata {
+                source_label: Some(action.label.clone()),
+                source_path: config_path_text(&action.path, action.exists),
+                owner: "none".to_string(),
+                mode: write_mode(action.read_only),
+            })
+            .unwrap_or_else(neutral_header_metadata),
+        _ => neutral_header_metadata(),
     }
+}
 
+fn neutral_header_metadata() -> HeaderMetadata {
     HeaderMetadata {
         source_label: None,
         source_path: "not file-backed".to_string(),
-        owner: "none",
+        owner: "none".to_string(),
         mode: "n/a",
     }
 }
@@ -251,7 +302,7 @@ fn config_path_text(path: &std::path::Path, exists: bool) -> String {
     if exists {
         path.display().to_string()
     } else {
-        format!("{} (missing; showing shipped defaults)", path.display())
+        format!("{} (missing)", path.display())
     }
 }
 
@@ -296,7 +347,7 @@ fn header_metadata_line(
         Span::styled(path, metadata_value_style()),
         Span::raw("  "),
         Span::styled("owner: ", metadata_key_style()),
-        Span::styled(metadata.owner, metadata_value_style()),
+        Span::styled(metadata.owner.clone(), metadata_value_style()),
         Span::raw("  "),
         Span::styled("mode: ", metadata_key_style()),
         Span::styled(metadata.mode, metadata_value_style()),
@@ -489,13 +540,14 @@ fn list_header_line(layout: ListLayout<'_>) -> Line<'static> {
 }
 
 fn list_layout(model: &ConfigUiModel, selected_tab: usize) -> ListLayout<'_> {
-    match model.tabs.get(selected_tab).map(String::as_str) {
-        Some("advanced") => ListLayout::Status,
-        Some(tab) => model.tab_list_tables.get(tab).map_or(
+    let tab = &model.tabs[selected_tab];
+    if model.operational_tab.as_ref() == Some(tab) {
+        ListLayout::Status
+    } else {
+        model.tab_list_tables.get(tab).map_or(
             ListLayout::Field(DEFAULT_FIELD_COLUMN_WIDTHS),
             ListLayout::Table,
-        ),
-        None => ListLayout::Field(DEFAULT_FIELD_COLUMN_WIDTHS),
+        )
     }
 }
 
@@ -629,7 +681,8 @@ fn empty_settings_message(app: &ConfigUiApp) -> &'static str {
     }
 }
 
-pub fn row_line_for_model(model: &ConfigUiModel, row: UiRowRef) -> Line<'static> {
+#[cfg(test)]
+pub(crate) fn row_line_for_model(model: &ConfigUiModel, row: UiRowRef) -> Line<'static> {
     row_line_for_layout(model, row, ListLayout::Field(DEFAULT_FIELD_COLUMN_WIDTHS))
 }
 
@@ -641,11 +694,12 @@ fn row_line_for_layout(
     match (row, layout) {
         (UiRowRef::Field(index), ListLayout::Table(table)) => {
             let field = &model.fields[index];
-            list_table_row_line(table, field, model.effective_field_state(field))
+            list_table_row_line(table, field, model.field_state(field))
         }
         (UiRowRef::Field(index), layout) => {
             let field = &model.fields[index];
-            let state = model.effective_field_state(field);
+            let state = model.field_state(field);
+            let current = field_current_value(field);
             let widths = match layout {
                 ListLayout::Field(widths) => widths,
                 _ => DEFAULT_FIELD_COLUMN_WIDTHS,
@@ -656,7 +710,7 @@ fn row_line_for_layout(
                 apply_status_style(&field.apply_status),
                 field_display_label(field),
                 field_style(state, config_key_style()),
-                &field.current_value,
+                &current,
                 field_style(state, fg_style(Color::Gray)),
             )
         }
@@ -731,7 +785,7 @@ fn list_table_header_line(table: &ConfigUiListTable) -> Line<'static> {
 fn list_table_row_line(
     table: &ConfigUiListTable,
     field: &ConfigUiField,
-    state: ConfigUiValueState,
+    state: ConfigUiFieldState,
 ) -> Line<'static> {
     table
         .columns
@@ -749,7 +803,7 @@ fn list_table_row_line(
 
 fn list_table_cell_style(
     field: &ConfigUiField,
-    state: ConfigUiValueState,
+    state: ConfigUiFieldState,
     column_index: usize,
 ) -> Style {
     let default = match column_index {
@@ -864,8 +918,8 @@ fn field_title_lines(field: &ConfigUiField) -> Vec<Line<'static>> {
     lines
 }
 
-fn field_style(state: ConfigUiValueState, default: Style) -> Style {
-    if state == ConfigUiValueState::Invalid {
+fn field_style(state: ConfigUiFieldState, default: Style) -> Style {
+    if state == ConfigUiFieldState::Invalid {
         state_style(state)
     } else {
         default
@@ -874,21 +928,29 @@ fn field_style(state: ConfigUiValueState, default: Style) -> Style {
 
 /// Renders stored field state; use [`ConfigUiApp::render_details`] for scoped diagnostics.
 pub fn default_field_detail_lines(field: &ConfigUiField) -> Vec<Line<'static>> {
-    field_detail_lines(field, field.state)
+    field_detail_lines(field, snapshot_field_state(field))
 }
 
-fn field_detail_lines(field: &ConfigUiField, state: ConfigUiValueState) -> Vec<Line<'static>> {
-    let current = field_detail_value(field, &field.current_value, Some(&field.edit_value));
-    let has_default = field.has_default_value();
-    let default = if has_default {
-        field_detail_value(field, &field.default_value, None)
-    } else {
-        FieldDetailValue::Scalar(&field.default_value)
-    };
+fn field_detail_lines(field: &ConfigUiField, state: ConfigUiFieldState) -> Vec<Line<'static>> {
+    let current_value = field_current_value(field);
+    let baseline_value = field_baseline_value(field);
+    let current = field_detail_value(field, &current_value, field_current_json_value(field));
+    let default_value = baseline_value
+        .as_deref()
+        .unwrap_or(UNSET_CONFIG_VALUE_LABEL);
+    let default = field_detail_value(
+        field,
+        default_value,
+        field
+            .snapshot
+            .baseline
+            .as_ref()
+            .map(|resolved| &resolved.value),
+    );
     let mut lines = field_title_lines(field);
-    lines.push(detail_line("state", state_label(state)));
+    lines.push(detail_line("state", field_state_label(state)));
     lines.extend(field_detail_value_lines("current", &current));
-    if has_default && current == default {
+    if baseline_value.is_some() && current == default {
         lines.push(detail_line("default", "same as current"));
     } else {
         lines.extend(field_detail_value_lines("default", &default));
@@ -930,7 +992,7 @@ fn structured_json(value: &str) -> Option<JsonValue> {
 fn field_detail_value<'a>(
     field: &ConfigUiField,
     fallback: &'a str,
-    preferred_json: Option<&str>,
+    preferred_json: Option<&JsonValue>,
 ) -> FieldDetailValue<'a> {
     if fallback == UNSET_CONFIG_VALUE_LABEL
         || !matches!(field.kind.as_str(), "array" | "object" | "string_list")
@@ -939,7 +1001,8 @@ fn field_detail_value<'a>(
     }
 
     match preferred_json
-        .and_then(structured_json)
+        .filter(|value| matches!(value, JsonValue::Array(_) | JsonValue::Object(_)))
+        .cloned()
         .or_else(|| structured_json(fallback))
     {
         Some(value) => FieldDetailValue::Structured(value),
@@ -966,15 +1029,15 @@ fn field_detail_value_lines(label: &str, value: &FieldDetailValue<'_>) -> Vec<Li
 
 /// Renders stored choice state; use [`ConfigUiApp::render_details`] for scoped diagnostics.
 pub fn single_choice_field_detail_lines(field: &ConfigUiField) -> Vec<Line<'static>> {
-    single_choice_field_detail_lines_with_state(field, field.state)
+    single_choice_field_detail_lines_with_state(field, snapshot_field_state(field))
 }
 
 fn single_choice_field_detail_lines_with_state(
     field: &ConfigUiField,
-    state: ConfigUiValueState,
+    state: ConfigUiFieldState,
 ) -> Vec<Line<'static>> {
-    let selected_value = parse_rendered_json_string(&field.current_value)
-        .unwrap_or_else(|| field.current_value.clone());
+    let current = field_current_value(field);
+    let selected_value = parse_rendered_json_string(&current).unwrap_or(current);
     let mut lines = field_detail_lines(field, state);
     lines.push(Line::from(""));
     append_single_choice_options(&mut lines, field, &selected_value, None);
@@ -1092,7 +1155,7 @@ pub fn sidecar_detail_lines(sidecar: &ConfigUiSidecar) -> Vec<Line<'static>> {
         Line::from(""),
         detail_line("path", &sidecar.path.display().to_string()),
         detail_line("state", sidecar_status_label(sidecar.present)),
-        detail_line("owner", owner_label(sidecar.owner)),
+        detail_line("owner", sidecar.owner_label.as_deref().unwrap_or("none")),
         detail_line("write", write_detail_label(sidecar.read_only)),
     ]
 }
@@ -1200,7 +1263,9 @@ pub fn native_status_detail_lines(status: &ConfigUiNativeStatus) -> Vec<Line<'st
 
 fn render_footer(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect) {
     if let Some(edit) = &app.edit {
-        let field = &app.model.fields[edit.field_index];
+        let Some(field) = app.active_edit_field() else {
+            return;
+        };
         let editing = edit_status_line(field, edit, area.width as usize);
         let status = app.notice.as_ref().map_or_else(
             || edit_control_line(field, edit.mode),
@@ -1374,7 +1439,7 @@ fn normal_control_line(app: &ConfigUiApp) -> Line<'static> {
 }
 
 fn setting_control_line(primary: &'static str, field: &ConfigUiField) -> Line<'static> {
-    if field.has_default_value() {
+    if field.has_baseline_value() {
         raw_line([primary, "  u reset default"])
     } else {
         Line::from(primary)
@@ -1471,21 +1536,12 @@ fn border_style(theme: ConfigUiTheme) -> Style {
     fg_style(config_ui_theme_palette(theme).border)
 }
 
-pub fn state_label(state: ConfigUiValueState) -> &'static str {
+pub(crate) fn state_style(state: ConfigUiFieldState) -> Style {
     match state {
-        ConfigUiValueState::Explicit => "explicit",
-        ConfigUiValueState::Defaulted => "default",
-        ConfigUiValueState::Unset => "unset",
-        ConfigUiValueState::Invalid => "invalid",
-    }
-}
-
-pub fn state_style(state: ConfigUiValueState) -> Style {
-    match state {
-        ConfigUiValueState::Explicit => fg_style(Color::Green),
-        ConfigUiValueState::Defaulted => fg_style(Color::Cyan),
-        ConfigUiValueState::Unset => fg_style(Color::Yellow),
-        ConfigUiValueState::Invalid => bold_fg_style(Color::Red),
+        ConfigUiFieldState::Explicit => fg_style(Color::Green),
+        ConfigUiFieldState::Inherited => fg_style(Color::Cyan),
+        ConfigUiFieldState::Absent => fg_style(Color::Yellow),
+        ConfigUiFieldState::Invalid => bold_fg_style(Color::Red),
     }
 }
 
@@ -1607,7 +1663,7 @@ pub fn truncate_start(value: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{apply_status, field, model_with_fields};
+    use crate::test_support::{apply_status, field, field_with_source, model_with_fields};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::{Buffer, Cell};
@@ -1722,9 +1778,9 @@ mod tests {
         );
     }
 
-    fn test_model(state: ConfigUiValueState) -> ConfigUiModel {
+    fn test_model(state: ConfigUiFieldState) -> ConfigUiModel {
         let mut field = field("core.debug_mode", "bool", "false", &[]);
-        field.state = state;
+        crate::model::set_field_state_for_test(&mut field, state);
         field.apply_status = apply_status("after app restart", "Restart the app after saving");
         model_with_fields(vec![field])
     }
@@ -1745,13 +1801,30 @@ mod tests {
         assert_eq!(labels[9], "tab_10");
     }
 
+    // Defends: the public detail resolver treats caller-fabricated row references as unavailable
+    // instead of indexing beyond a validated model.
+    #[test]
+    fn detail_resolver_is_total_for_unknown_rows() {
+        let app = ConfigUiApp::new(test_model(ConfigUiFieldState::Explicit));
+
+        for row in [
+            UiRowRef::Field(usize::MAX),
+            UiRowRef::FileAction(usize::MAX),
+            UiRowRef::Sidecar(usize::MAX),
+            UiRowRef::NativeStatus(usize::MAX),
+            UiRowRef::Diagnostic(usize::MAX),
+        ] {
+            assert!(app.render_details(row).is_empty());
+        }
+    }
+
     // Defends: narrow layouts expose the active view, honest counts, and the matching toggle without hiding search scope.
     #[test]
     fn core_all_view_state_and_controls_remain_clear_in_a_narrow_ui() {
         let mut core = field("core.visible", "string", r#""core""#, &[]);
-        core.state = ConfigUiValueState::Defaulted;
+        crate::model::set_field_state_for_test(&mut core, ConfigUiFieldState::Inherited);
         let mut hidden = field("hidden.secret", "string", r#""secret""#, &[]);
-        hidden.state = ConfigUiValueState::Defaulted;
+        crate::model::set_field_state_for_test(&mut hidden, ConfigUiFieldState::Inherited);
         let mut model = model_with_fields(vec![core, hidden]);
         model.core_fields = Some(vec![ConfigUiFieldId::new(
             DEFAULT_CONFIG_SOURCE_ID,
@@ -1910,35 +1983,39 @@ mod tests {
     }
 
     fn source(
-        tab: &str,
+        id: &str,
         label: &str,
         exists: bool,
-        owner: ConfigUiPathOwner,
+        owner_label: &str,
         read_only: bool,
     ) -> ConfigUiSource {
         ConfigUiSource {
-            id: tab.to_string(),
-            tab: tab.to_string(),
+            id: id.to_string(),
             label: label.to_string(),
-            path: PathBuf::from(format!("/home/alex/.config/acme/{tab}.toml")),
+            path: PathBuf::from(format!("/home/alex/.config/acme/{id}.toml")),
             exists,
-            owner,
+            owner_label: Some(owner_label.to_string()),
             read_only,
         }
     }
 
-    // Defends: selected file-backed tabs drive header source, path, owner, and write-mode metadata.
+    // Defends: the selected field drives header source metadata on a multi-source tab.
     #[test]
     fn header_uses_selected_config_source_metadata() {
-        let mut model = test_model(ConfigUiValueState::Explicit);
-        let owner = ConfigUiPathOwner::HomeManager;
-        model.tabs = vec!["settings".to_string(), "keys".to_string()];
+        let mut model = model_with_fields(vec![
+            field_with_source("settings", "ui.theme", "string", "dark", &[]),
+            field_with_source("keys", "keys.leader", "string", "space", &[]),
+        ]);
         model.sources = vec![
-            source("settings", "Settings", true, ConfigUiPathOwner::User, false),
-            source("keys", "Keybindings", false, owner, true),
+            source("settings", "Settings", true, "user", false),
+            source("keys", "Keybindings", false, "home-manager", true),
         ];
+        model.fields[1].snapshot.intent = ConfigUiOverride::Absent;
+        model.fields[1].snapshot.effective = model.fields[1].snapshot.baseline.clone();
+        let mut app = ConfigUiApp::new(model);
+        app.selected_row = 1;
 
-        let metadata = header_metadata(&model, 1);
+        let metadata = header_metadata(&app);
         assert_eq!(metadata.source_label.as_deref(), Some("Keybindings"));
         assert!(metadata.source_path.contains("keys.toml"));
         assert!(metadata.source_path.contains("missing"));
@@ -1952,10 +2029,15 @@ mod tests {
         assert!(text.contains("mode: read-only"));
     }
 
-    // Defends: tabs without a matching source render neutral non-file-backed metadata.
+    // Defends: a source-less operational selection renders neutral metadata.
     #[test]
-    fn header_is_neutral_without_selected_config_source() {
-        let metadata = header_metadata(&test_model(ConfigUiValueState::Explicit), 0);
+    fn header_is_neutral_without_selected_source_row() {
+        let mut model = test_model(ConfigUiFieldState::Explicit);
+        model.tabs.push("status".to_string());
+        model.operational_tab = Some("status".to_string());
+        let mut app = ConfigUiApp::new(model);
+        app.selected_tab = 1;
+        let metadata = header_metadata(&app);
         assert_eq!(metadata.source_label, None);
         assert_eq!(metadata.source_path, "not file-backed");
         assert_eq!(metadata.owner, "none");
@@ -1963,22 +2045,6 @@ mod tests {
 
         let line = header_metadata_line(&metadata, "ok", Style::default(), 160);
         assert!(!rendered_text(&line).contains("source:"));
-
-        let mut model = test_model(ConfigUiValueState::Explicit);
-        model.tabs = vec!["settings".to_string(), "advanced".to_string()];
-        model.sources = vec![source(
-            "settings",
-            "Settings",
-            true,
-            ConfigUiPathOwner::User,
-            false,
-        )];
-
-        let metadata = header_metadata(&model, 1);
-        assert_eq!(metadata.source_label, None);
-        assert_eq!(metadata.source_path, "not file-backed");
-        assert_eq!(metadata.owner, "none");
-        assert_eq!(metadata.mode, "n/a");
     }
 
     // Defends: source labels are bounded and omitted before they crowd out path context.
@@ -1987,7 +2053,7 @@ mod tests {
         let metadata = HeaderMetadata {
             source_label: Some("Very Long Source Label".to_string()),
             source_path: "/home/alex/.config/acme/settings.toml".to_string(),
-            owner: "user",
+            owner: "user".to_string(),
             mode: "writable",
         };
 
@@ -2009,7 +2075,7 @@ mod tests {
     // Defends: settings rows expose apply/setting/value without repeating complete-config explicit state.
     #[test]
     fn field_row_omits_explicit_state_column() {
-        let model = test_model(ConfigUiValueState::Explicit);
+        let model = test_model(ConfigUiFieldState::Explicit);
         let line = row_line_for_model(&model, UiRowRef::Field(0));
 
         assert_eq!(
@@ -2117,11 +2183,10 @@ mod tests {
     // Defends: host-defined field table profiles render supplied cells without parsing display labels or values.
     #[test]
     fn custom_field_table_renders_host_supplied_cells() {
-        let mut model = test_model(ConfigUiValueState::Explicit);
+        let mut model = test_model(ConfigUiFieldState::Explicit);
         model.tabs = vec!["keys".to_string()];
         model.fields[0].tab = "keys".to_string();
         model.fields[0].display_label = "ignored label".to_string();
-        model.fields[0].current_value = "ignored value".to_string();
         model.fields[0].list_cells = strings(&[
             "editor",
             "Ctrl+x",
@@ -2164,7 +2229,7 @@ mod tests {
     // Defends: missing custom table cells render as blanks instead of panicking.
     #[test]
     fn custom_field_table_allows_missing_cells() {
-        let mut model = test_model(ConfigUiValueState::Explicit);
+        let mut model = test_model(ConfigUiFieldState::Explicit);
         set_list_table(&mut model, "general", &[("one", 8), ("two", 8)]);
         model.fields[0].list_cells = strings(&["only"]);
 
@@ -2178,7 +2243,7 @@ mod tests {
     // Defends: narrow host table widths bound rendered cells instead of leaking a full ellipsis.
     #[test]
     fn custom_field_table_honors_narrow_column_widths() {
-        let mut model = test_model(ConfigUiValueState::Explicit);
+        let mut model = test_model(ConfigUiFieldState::Explicit);
         set_list_table(&mut model, "general", &[("abcd", 2), ("empty", 0)]);
         model.fields[0].list_cells = strings(&["wxyz", "hidden"]);
 
@@ -2190,11 +2255,12 @@ mod tests {
         assert_eq!(rendered_cells(&row), vec!["..", ""]);
     }
 
-    // Defends: the reserved advanced tab keeps status columns even if a host table profile exists.
+    // Defends: the host-selected operational tab keeps status columns even for unchecked metadata.
     #[test]
-    fn advanced_tab_ignores_custom_field_table() {
-        let mut model = test_model(ConfigUiValueState::Explicit);
+    fn operational_tab_ignores_custom_field_table() {
+        let mut model = test_model(ConfigUiFieldState::Explicit);
         model.tabs = vec!["advanced".to_string()];
+        model.operational_tab = Some("advanced".to_string());
         set_list_table(&mut model, "advanced", &[("custom", 8)]);
 
         assert_eq!(
@@ -2206,7 +2272,7 @@ mod tests {
     // Defends: display labels improve visible text while details keep the stable field path.
     #[test]
     fn field_display_label_replaces_visible_label_but_keeps_path_detail() {
-        let mut model = test_model(ConfigUiValueState::Explicit);
+        let mut model = test_model(ConfigUiFieldState::Explicit);
         model.fields[0].path = "ui.pane_frames.rounded_corners".to_string();
         model.fields[0].display_label = "Rounded corners".to_string();
 
@@ -2223,9 +2289,10 @@ mod tests {
         );
     }
 
-    // Defends: list previews stay compact while structured details retain every nested value and avoid repeating equal defaults.
+    // Defends: details retain complete structures, deduplicate equal defaults, and consistently
+    // project effective values while list previews stay compact.
     #[test]
-    fn structured_field_details_are_complete_pretty_and_deduplicated() {
+    fn field_details_keep_structures_complete_and_project_effective_values() {
         let long_value = "a deliberately long nested value that the detail paragraph can wrap without hiding its surrounding structure";
         let current = json!({"nested": [{"message": long_value}, {"enabled": true}]});
         let different_default = json!({"nested": [{"message": "short"}]});
@@ -2252,6 +2319,27 @@ mod tests {
 
         assert_eq!(same_details.matches("    1,").count(), 1);
         assert!(same_details.contains("default    same as current"));
+
+        let mut resolved = built_field(
+            "object",
+            Some(&json!({"requested": true})),
+            Some(&json!({"baseline": true})),
+        );
+        resolved.snapshot.effective = Some(ConfigUiResolvedValue::new(json!({"applied": true})));
+        let resolved_details = detail_text(&resolved);
+        assert!(resolved_details.contains("\"applied\": true"));
+        assert!(!resolved_details.contains("\"requested\": true"));
+
+        let mut choice = built_field("string", Some(&json!("requested")), None);
+        choice.allowed_values = strings(&["requested", "applied"]);
+        choice.snapshot.effective = Some(ConfigUiResolvedValue::new(json!("applied")));
+        let choice_details = single_choice_field_detail_lines(&choice)
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(choice_details.contains("(x) applied"));
+        assert!(!choice_details.contains("(x) requested"));
     }
 
     // Defends: non-structured details stay compact and TOML-only float values survive the structured fallback verbatim.
@@ -2293,24 +2381,24 @@ mod tests {
     // Defends: invalid field rows remain visibly exceptional even without the normal state column.
     #[test]
     fn invalid_field_row_keeps_error_style_on_setting_and_value() {
-        let model = test_model(ConfigUiValueState::Invalid);
+        let model = test_model(ConfigUiFieldState::Invalid);
         let line = row_line_for_model(&model, UiRowRef::Field(0));
 
         assert_eq!(
             line.spans[1].style,
-            state_style(ConfigUiValueState::Invalid)
+            state_style(ConfigUiFieldState::Invalid)
         );
         assert_eq!(
             line.spans[2].style,
-            state_style(ConfigUiValueState::Invalid)
+            state_style(ConfigUiFieldState::Invalid)
         );
     }
 
     // Defends: model-derived diagnostic state reaches rows and scalar-choice details, while
-    // Advanced details identify the exact host-declared scope.
+    // diagnostic rows identify the exact host-declared scope.
     #[test]
     fn scoped_blocker_renders_effective_field_state_and_scope() {
-        let mut model = test_model(ConfigUiValueState::Defaulted);
+        let mut model = test_model(ConfigUiFieldState::Inherited);
         model.fields[0].kind = "string".to_string();
         model.fields[0].allowed_values = strings(&["false", "true"]);
         model.diagnostics.push(ConfigUiDiagnostic {
@@ -2327,7 +2415,7 @@ mod tests {
         let mut app = ConfigUiApp::new(model);
 
         let row = row_line_for_model(&app.model, UiRowRef::Field(0));
-        assert_eq!(row.spans[1].style, state_style(ConfigUiValueState::Invalid));
+        assert_eq!(row.spans[1].style, state_style(ConfigUiFieldState::Invalid));
         assert!(
             app.render_details(UiRowRef::Field(0))
                 .iter()
@@ -2359,7 +2447,7 @@ mod tests {
     #[test]
     fn light_theme_and_divided_body_have_stable_rendered_contract() {
         let mut invalid = field("ui.invalid", "string", "broken", &[]);
-        invalid.state = ConfigUiValueState::Invalid;
+        crate::model::set_field_state_for_test(&mut invalid, ConfigUiFieldState::Invalid);
         let mut ready = field("ui.ready", "string", "ready-value", &[]);
         ready.apply_status = apply_status("ready now", "Already active.");
         ready.apply_status.pending = false;
@@ -2431,15 +2519,15 @@ mod tests {
         assert!(contrast_ratio(palette.border, Color::White) >= 3.0);
     }
 
-    // Defends: absent advanced status rows stay neutral instead of warning-colored.
+    // Defends: absent operational status rows stay neutral instead of warning-colored.
     #[test]
     fn absent_sidecar_status_is_neutral() {
-        let mut model = test_model(ConfigUiValueState::Explicit);
+        let mut model = test_model(ConfigUiFieldState::Explicit);
         model.sidecars = vec![ConfigUiSidecar {
             name: "Native config".to_string(),
             path: PathBuf::from("/home/alex/.config/acme/native.toml"),
             present: false,
-            owner: ConfigUiPathOwner::User,
+            owner_label: Some("user".to_string()),
             read_only: false,
         }];
         let line = row_line_for_model(&model, UiRowRef::Sidecar(0));
@@ -2463,10 +2551,10 @@ mod tests {
         );
     }
 
-    // Defends: native status rows align with the advanced status/item/detail header.
+    // Defends: native status rows align with the operational status/item/detail header.
     #[test]
-    fn native_status_rows_use_advanced_status_columns() {
-        let mut model = test_model(ConfigUiValueState::Explicit);
+    fn native_status_rows_use_operational_status_columns() {
+        let mut model = test_model(ConfigUiFieldState::Explicit);
         model.native_config_statuses = vec![ConfigUiNativeStatus {
             surface: "mars".to_string(),
             tool: "mars".to_string(),
@@ -2491,10 +2579,10 @@ mod tests {
         assert_eq!(span_width(&line, 1), STATUS_ITEM_COLUMN_WIDTH);
     }
 
-    // Defends: advanced file actions use status columns without changing normal tab file action rows.
+    // Defends: operational file actions use status columns without changing field-tab actions.
     #[test]
-    fn advanced_file_actions_use_status_columns() {
-        let mut model = test_model(ConfigUiValueState::Explicit);
+    fn operational_file_actions_use_status_columns() {
+        let mut model = test_model(ConfigUiFieldState::Explicit);
         model.file_actions = vec![file_action(true, true, false, None)];
         let line = row_line_for_layout(&model, UiRowRef::FileAction(0), ListLayout::Status);
 
@@ -2513,15 +2601,15 @@ mod tests {
     // Defends: normal controls expose only actions available for the selected row.
     #[test]
     fn normal_controls_follow_selected_row_capabilities() {
-        let mut app = ConfigUiApp::new(test_model(ConfigUiValueState::Explicit));
+        let mut app = ConfigUiApp::new(test_model(ConfigUiFieldState::Explicit));
         assert!(rendered_text(&normal_control_line(&app)).contains("u reset default"));
 
-        app.model.fields[0].default_value = NO_CONFIG_DEFAULT_VALUE_LABEL.to_string();
+        app.model.fields[0].snapshot.baseline = None;
         assert!(!rendered_text(&normal_control_line(&app)).contains("reset default"));
 
         app.model.fields[0].source_id = "native".to_string();
         app.model.fields[0].kind = "bool".to_string();
-        app.model.fields[0].default_value = "[80]".to_string();
+        app.model.fields[0].snapshot.baseline = Some(ConfigUiResolvedValue::new(json!([80])));
         app.model.fields[0].edit_behavior = ConfigUiEditBehavior::StructuredOnly {
             notice: "Edit the source file directly.".to_string(),
         };
@@ -2540,7 +2628,7 @@ mod tests {
     // Defends: boolean controls distinguish normal-mode staging from edit-mode persistence.
     #[test]
     fn boolean_controls_show_space_to_stage_and_enter_to_save() {
-        let app = ConfigUiApp::new(test_model(ConfigUiValueState::Explicit));
+        let app = ConfigUiApp::new(test_model(ConfigUiFieldState::Explicit));
         let field = app.selected_field().expect("boolean field");
 
         let normal = rendered_text(&normal_control_line(&app));
@@ -2556,23 +2644,25 @@ mod tests {
     // Defends: ordered string-list editing exposes selected order and the generic reorder command.
     #[test]
     fn ordered_multichoice_rendering_shows_order_controls() {
-        let mut model = test_model(ConfigUiValueState::Explicit);
+        let mut model = test_model(ConfigUiFieldState::Explicit);
         let field = &mut model.fields[0];
         field.kind = "string_list".to_string();
-        field.current_value = r#"["status","clock"]"#.to_string();
-        field.edit_value = field.current_value.clone();
+        let value = json!(["status", "clock"]);
+        field.snapshot.intent = ConfigUiOverride::Explicit(value.clone());
+        field.snapshot.effective = Some(ConfigUiResolvedValue::new(value));
         field.allowed_values = vec![
             "clock".to_string(),
             "status".to_string(),
             "mode".to_string(),
         ];
         field.edit_behavior = ConfigUiEditBehavior::OrderedStringList;
+        let input = crate::model::field_edit_value(field);
         let edit = ConfigUiEditState {
-            field_index: 0,
-            input: field.edit_value.clone(),
+            field_id: field.id(),
+            input: input.clone(),
             mode: ConfigUiEditMode::MultiChoice,
             choice_index: 1,
-            cursor: field.edit_value.len(),
+            cursor: input.len(),
         };
 
         assert!(multi_choice_status_value(field, &edit).contains("order status, clock"));
@@ -2602,7 +2692,7 @@ mod tests {
     // Defends: text edit controls expose the host-owned external editor path without changing picker controls.
     #[test]
     fn text_edit_controls_show_external_editor_key() {
-        let mut model = test_model(ConfigUiValueState::Explicit);
+        let mut model = test_model(ConfigUiFieldState::Explicit);
         model.fields[0].kind = "string".to_string();
         let field = &model.fields[0];
         let app = ConfigUiApp::new(model.clone());
@@ -2631,7 +2721,7 @@ mod tests {
 
         let field = field("a.very.long.setting.path", "string", "abcdefghij", &[]);
         let edit = ConfigUiEditState {
-            field_index: 0,
+            field_id: field.id(),
             input: "abcdefghij".to_string(),
             mode: ConfigUiEditMode::Text,
             choice_index: 0,
@@ -2678,7 +2768,7 @@ mod tests {
     // Defends: file action rows expose neutral absent states without weakening existing, read-only, or error states.
     #[test]
     fn file_action_rows_render_host_file_states() {
-        let mut model = test_model(ConfigUiValueState::Explicit);
+        let mut model = test_model(ConfigUiFieldState::Explicit);
         model.fields.clear();
         model.file_actions = vec![
             file_action(true, false, true, None),
