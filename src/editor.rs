@@ -20,9 +20,9 @@ pub struct ConfigUiApp {
     pub(crate) selected_row: usize,
     /// Current view outside active search.
     ///
-    /// [`ConfigUiApp::try_new`] selects Core when the model contains a Core/All distinction. Models
+    /// [`ConfigUiApp::try_new`] selects Overview when the model contains an Overview/All distinction. Models
     /// whose views contain the same fields start in All. Normal-mode `a` toggles the view when the
-    /// selected tab has non-core fields. Search spans All without changing this saved view.
+    /// selected tab has non-Overview fields. Search spans All without changing this saved view.
     pub(crate) settings_view: ConfigUiSettingsView,
     pub(crate) search: String,
     pub(crate) search_active: bool,
@@ -176,12 +176,12 @@ fn insert_at_cursor(edit: &mut ConfigUiEditState, text: &str) {
 impl ConfigUiApp {
     /// Validates a model and creates an editor.
     ///
-    /// Models with `core_fields: None` start in All because every field belongs to Core.
+    /// Models with `recommended_fields: None` start in All because every field belongs to Overview.
     pub fn try_new(model: ConfigUiModel) -> Result<Self, String> {
         model.validate()?;
         let active_theme = config_ui_theme_for_model(&model, ConfigUiTheme::Dark);
-        let settings_view = if model_has_non_core_fields(&model) {
-            ConfigUiSettingsView::Core
+        let settings_view = if model_has_non_overview_fields(&model) {
+            ConfigUiSettingsView::Overview
         } else {
             ConfigUiSettingsView::All
         };
@@ -285,8 +285,8 @@ impl ConfigUiApp {
         }
 
         let active_theme = config_ui_theme_for_model(&model, self.active_theme);
-        let settings_view = if self.settings_view == ConfigUiSettingsView::Core
-            && !model_has_non_core_fields(&model)
+        let settings_view = if self.settings_view == ConfigUiSettingsView::Overview
+            && !model_has_non_overview_fields(&model)
         {
             ConfigUiSettingsView::All
         } else {
@@ -382,13 +382,13 @@ impl ConfigUiApp {
         )
     }
 
-    pub(crate) fn selected_tab_has_non_core_fields(&self) -> bool {
+    pub(crate) fn selected_tab_has_non_overview_fields(&self) -> bool {
         let counts = field_counts_for_tab(&self.model, self.selected_tab);
-        counts.core < counts.total
+        counts.overview < counts.total
     }
 
     pub(crate) fn can_toggle_settings_view(&self) -> bool {
-        !self.search_active && self.search.is_empty() && self.selected_tab_has_non_core_fields()
+        !self.search_active && self.search.is_empty() && self.selected_tab_has_non_overview_fields()
     }
 
     fn toggle_settings_view(&mut self) {
@@ -397,8 +397,8 @@ impl ConfigUiApp {
         }
         let selected = self.visible_rows().get(self.selected_row).copied();
         self.settings_view = match self.settings_view {
-            ConfigUiSettingsView::Core => ConfigUiSettingsView::All,
-            ConfigUiSettingsView::All => ConfigUiSettingsView::Core,
+            ConfigUiSettingsView::Overview => ConfigUiSettingsView::All,
+            ConfigUiSettingsView::All => ConfigUiSettingsView::Overview,
         };
         let rows = self.visible_rows();
         self.selected_row = selected
@@ -959,10 +959,10 @@ impl ConfigUiApp {
     }
 }
 
-fn model_has_non_core_fields(model: &ConfigUiModel) -> bool {
+fn model_has_non_overview_fields(model: &ConfigUiModel) -> bool {
     (0..model.tabs.len()).any(|tab| {
         let counts = field_counts_for_tab(model, tab);
-        counts.core < counts.total
+        counts.overview < counts.total
     })
 }
 
@@ -1651,7 +1651,7 @@ theme = "light"
         model.fields[1].tab = "appearance".to_string();
         model.fields[0].snapshot.intent = ConfigUiOverride::Absent;
         model.fields[0].snapshot.effective = model.fields[0].snapshot.baseline.clone();
-        model.core_fields = Some(vec![model.fields[1].id()]);
+        model.recommended_fields = Some(vec![model.fields[1].id()]);
         let mut app = ConfigUiApp::new(model);
         app.selected_tab = 1;
         app.begin_edit_field(1);
@@ -1685,7 +1685,7 @@ theme = "light"
         );
         assert_eq!(app.search(), "theme");
         assert!(app.search_active());
-        assert_eq!(app.settings_view(), ConfigUiSettingsView::Core);
+        assert_eq!(app.settings_view(), ConfigUiSettingsView::Overview);
         assert_eq!(
             app.notice().map(|notice| notice.text.as_str()),
             Some("Host reload warning.")
@@ -2415,26 +2415,26 @@ line-number = "relative"
         assert!(!app.search_active);
     }
 
-    // Defends: Core is the focused default, search widens without changing it, and toggles preserve a surviving selection.
+    // Defends: Overview is the focused default, search widens without changing it, and toggles preserve a surviving selection.
     #[test]
-    fn reducer_controls_core_all_views_without_hidden_selection_or_search_state_leaks() {
-        let mut core = field("core.visible", "string", r#""core""#, &[]);
-        crate::model::set_field_state_for_test(&mut core, ConfigUiFieldState::Inherited);
+    fn reducer_controls_overview_all_views_without_hidden_selection_or_search_state_leaks() {
+        let mut recommended = field("core.visible", "string", r#""core""#, &[]);
+        crate::model::set_field_state_for_test(&mut recommended, ConfigUiFieldState::Inherited);
         let mut hidden = field("advanced.hidden", "string", r#""hidden""#, &[]);
         crate::model::set_field_state_for_test(&mut hidden, ConfigUiFieldState::Inherited);
         let explicit = field("advanced.explicit", "string", r#""set""#, &[]);
         let mut other_tab = field("other.visible", "string", r#""other""#, &[]);
         crate::model::set_field_state_for_test(&mut other_tab, ConfigUiFieldState::Inherited);
         other_tab.tab = "other".to_string();
-        let mut model = model_with_fields(vec![core, hidden, explicit, other_tab]);
+        let mut model = model_with_fields(vec![recommended, hidden, explicit, other_tab]);
         model.tabs.push("other".to_string());
-        model.core_fields = Some(vec![
+        model.recommended_fields = Some(vec![
             ConfigUiFieldId::new(DEFAULT_CONFIG_SOURCE_ID, "core.visible"),
             ConfigUiFieldId::new(DEFAULT_CONFIG_SOURCE_ID, "other.visible"),
         ]);
         let mut app = ConfigUiApp::new(model);
 
-        assert_eq!(app.settings_view, ConfigUiSettingsView::Core);
+        assert_eq!(app.settings_view, ConfigUiSettingsView::Overview);
         assert_eq!(
             app.visible_rows(),
             vec![UiRowRef::Field(0), UiRowRef::Field(2)]
@@ -2449,7 +2449,7 @@ line-number = "relative"
         );
 
         app.handle_key(ConfigUiKey::Char('a'));
-        assert_eq!(app.settings_view, ConfigUiSettingsView::Core);
+        assert_eq!(app.settings_view, ConfigUiSettingsView::Overview);
         assert_eq!(
             app.selected_field().map(|field| field.path.as_str()),
             Some("advanced.explicit")
@@ -2461,7 +2461,7 @@ line-number = "relative"
         app.handle_key(ConfigUiKey::Char('/'));
         app.handle_key(ConfigUiKey::Char('a'));
         assert_eq!(app.search, "a");
-        assert_eq!(app.settings_view, ConfigUiSettingsView::Core);
+        assert_eq!(app.settings_view, ConfigUiSettingsView::Overview);
         app.handle_key(ConfigUiKey::Ctrl('u'));
         for ch in "advanced.hidden".chars() {
             app.handle_key(ConfigUiKey::Char(ch));
@@ -2469,7 +2469,7 @@ line-number = "relative"
         assert_eq!(app.visible_rows(), vec![UiRowRef::Field(1)]);
         app.handle_key(ConfigUiKey::Enter);
         app.handle_key(ConfigUiKey::Char('a'));
-        assert_eq!(app.settings_view, ConfigUiSettingsView::Core);
+        assert_eq!(app.settings_view, ConfigUiSettingsView::Overview);
         app.handle_key(ConfigUiKey::Esc);
         assert!(app.search.is_empty());
         assert_eq!(
@@ -2478,9 +2478,9 @@ line-number = "relative"
         );
 
         app.next_tab();
-        assert!(!app.selected_tab_has_non_core_fields());
+        assert!(!app.selected_tab_has_non_overview_fields());
         app.handle_key(ConfigUiKey::Char('a'));
-        assert_eq!(app.settings_view, ConfigUiSettingsView::Core);
+        assert_eq!(app.settings_view, ConfigUiSettingsView::Overview);
     }
 
     // Defends: normal-mode digits select the matching first-nine tab and reset row selection without changing out-of-range state.

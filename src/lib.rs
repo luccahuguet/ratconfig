@@ -25,13 +25,13 @@ pub use editor::*;
 pub(crate) use model::ConfigUiFieldState;
 pub use model::{
     ConfigUiApplyStatus, ConfigUiCapability, ConfigUiChoice, ConfigUiContractField,
-    ConfigUiDiagnostic, ConfigUiDiagnosticScope, ConfigUiField, ConfigUiFieldCounts,
-    ConfigUiFieldId, ConfigUiFieldMetadata, ConfigUiFieldSnapshot, ConfigUiFieldSpec,
-    ConfigUiFileAction, ConfigUiListColumn, ConfigUiListTable, ConfigUiMetadata, ConfigUiModel,
-    ConfigUiNativeStatus, ConfigUiOverride, ConfigUiResolvedValue, ConfigUiSchemaField,
-    ConfigUiSettingsView, ConfigUiSidecar, ConfigUiSource, ConfigUiTextEncoding, ConfigUiTheme,
-    ConfigUiThemeMapping, ConfigUiThemeSwitcher, ConfigUiTomlDocumentRows,
-    ConfigUiTomlDocumentSpec, DEFAULT_CONFIG_SOURCE_ID,
+    ConfigUiDiagnostic, ConfigUiDiagnosticScope, ConfigUiField, ConfigUiFieldId,
+    ConfigUiFieldMetadata, ConfigUiFieldSnapshot, ConfigUiFieldSpec, ConfigUiFileAction,
+    ConfigUiListColumn, ConfigUiListTable, ConfigUiMetadata, ConfigUiModel, ConfigUiNativeStatus,
+    ConfigUiOverride, ConfigUiResolvedValue, ConfigUiSchemaField, ConfigUiSettingsView,
+    ConfigUiSidecar, ConfigUiSource, ConfigUiTextEncoding, ConfigUiTheme, ConfigUiThemeMapping,
+    ConfigUiThemeSwitcher, ConfigUiTomlDocumentRows, ConfigUiTomlDocumentSpec,
+    DEFAULT_CONFIG_SOURCE_ID,
 };
 pub use model::{
     UiRowRef, build_toml_document_fields, collect_config_ui_schema_fields,

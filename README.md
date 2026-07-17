@@ -12,7 +12,7 @@ Example host integration in Yazelix: ratconfig owns the reusable tabs, rows, edi
 
 - generic config document and field model
 - tabs, visible rows, search, selection, notices, and edit state
-- Core and All visibility, per-tab counts, and search across a host-owned field inventory
+- Overview and All visibility, per-tab counts, and search across a host-owned field inventory
 - optional host-supplied list table profiles for structured field tabs
 - capability-driven toggles, free text, single-select, multiselect, and default reset controls
 - host-routed file action rows and exact field-to-action shortcuts for native config files
@@ -26,7 +26,7 @@ Example host integration in Yazelix: ratconfig owns the reusable tabs, rows, edi
 ## What The Host Owns
 
 - loading defaults and user config
-- supplying the complete field inventory, choosing the Core allowlist, and grouping fields
+- supplying the complete field inventory, choosing recommended fields, and grouping fields
 - validation and diagnostics
 - file IO and atomic writes
 - native config file creation and editor launching for file action rows
@@ -91,7 +91,7 @@ fn model() -> ConfigUiModel {
             },
             can_unset: true,
         }],
-        core_fields: None,
+        recommended_fields: None,
         file_actions: Vec::new(),
         sidecars: Vec::new(),
         native_config_statuses: Vec::new(),
@@ -132,32 +132,32 @@ Hosts do not choose widths for the default list. Ratconfig sizes status and sett
 
 Populate `ConfigUiModel::theme_switcher` when a committed field value should select a built-in Ratconfig theme. The switcher names one `ConfigUiFieldId` and maps exact `serde_json::Value` values to `ConfigUiTheme::Dark` or `ConfigUiTheme::Light`. `try_new` resolves the initial theme from the field's effective snapshot. After a successful host write and reload, call `replace_model_after_success(reloaded, &field_id)`; the validated replacement becomes committed truth and only a matching staged edit is cleared. Failed host validation or persistence should report a notice without replacing the model, which preserves the staged buffer
 
-## Core And All Settings
+## Overview And All Settings
 
-Hosts place the complete known inventory in `ConfigUiModel::fields`. Set `core_fields` to a positive allowlist of stable source/path identities when the UI should open with a focused Core view:
+Hosts place the complete known inventory in `ConfigUiModel::fields`. Set `recommended_fields` to an explicit set of stable source/path identities when the UI should open with a focused Overview:
 
 ```rust
 use ratconfig::{
     ConfigUiFieldId, ConfigUiModel, DEFAULT_CONFIG_SOURCE_ID,
 };
 
-fn classify_core(model: &mut ConfigUiModel) {
-    model.core_fields = Some(vec![
+fn recommend_fields(model: &mut ConfigUiModel) {
+    model.recommended_fields = Some(vec![
         ConfigUiFieldId::new(DEFAULT_CONFIG_SOURCE_ID, "core.debug"),
         ConfigUiFieldId::new("editor", "theme"),
     ]);
 }
 ```
 
-Any field outside those identities is non-core while defaulted or unset. Ratconfig keeps explicit and invalid values in Core so active configuration and errors stay visible. `core_fields: None` treats every field as Core
+Overview contains recommended fields plus omitted fields that are explicit, locally invalid, externally managed, or named by an exact field-scoped diagnostic. This keeps active configuration, provenance, and field-specific attention visible without making diagnostics change snapshot intent. `recommended_fields: Some(Vec::new())` creates an attention-only Overview. `recommended_fields: None` recommends every field, so Overview and All contain the same fields
 
-`ConfigUiApp` starts in Core when the model contains a Core/All distinction. It starts in All when both views contain the same fields. Normal-mode `a` toggles the selected tab between Core and All when that distinction exists. A non-empty search spans All fields without changing the saved view. The settings heading reports Core and total counts, and file actions plus host-routed operational rows remain reachable in either view
+`ConfigUiApp` starts in Overview only when `recommended_fields: Some(...)` leaves at least one field All-only anywhere in the model. It starts in All when both views contain the same fields. Normal-mode `a` toggles the selected tab between Overview and All when that distinction exists. A non-empty search spans All fields without changing the saved view. The settings heading reports Overview and total counts, and file actions plus host-routed operational rows remain reachable in either view
 
 Generated TOML rows use the same identity contract. Hosts can classify fields returned by `build_toml_document_fields` with `ConfigUiFieldId::new(source_id, path)` without reconstructing the rows
 
 ## Scoped Diagnostics
 
-Hosts classify every diagnostic as blocking or nonblocking and scope it globally, to one source, or to one exact `ConfigUiFieldId`. An exact-field blocking diagnostic renders that field as invalid and keeps it visible in Core without changing its snapshot intent. Source/global blockers mark matching fields invalid without expanding Core, and nonblocking diagnostics remain informational. Exact-field diagnostics can exist without an operational tab, while source/global diagnostics, sidecars, and native-status rows require `operational_tab` to name one declared tab. That tab uses Ratconfig's generic status layout and cannot also contain fields or a list-table profile. No tab name is reserved, and `schema_tabs` returns only host/schema-declared tabs
+Hosts classify every diagnostic as blocking or nonblocking and scope it globally, to one source, or to one exact `ConfigUiFieldId`. Every exact-field diagnostic keeps that field visible in Overview without changing its snapshot intent; only a blocking diagnostic renders it as invalid. Source/global blockers mark matching fields invalid without expanding Overview, and nonblocking diagnostics remain informational. Exact-field diagnostics can exist without an operational tab, while source/global diagnostics, sidecars, and native-status rows require `operational_tab` to name one declared tab. That tab uses Ratconfig's generic status layout and cannot also contain fields or a list-table profile. No tab name is reserved, and `schema_tabs` returns only host/schema-declared tabs
 
 Use a nonblocking diagnostic for an opaque native entry that the host can preserve safely. Use field scope for one known invalid setting, source scope when one document is unsafe as a whole, and global scope only when every field is affected:
 
@@ -518,6 +518,7 @@ Before cutting a release:
 
 ### 6.0.0 (unreleased)
 
+- `ConfigUiModel::recommended_fields` and `ConfigUiSettingsView::Overview` replace the previous focused allowlist and view; Overview combines recommendations with fields that are explicit, locally invalid, externally managed, or named by exact diagnostics, while All remains the complete inventory
 - `ConfigUiFieldSnapshot` separates absent/explicit/invalid override intent from optional effective and baseline resolutions, provenance, and external-management labels; the parallel string value fields and sentinel defaults are absent from the model
 - `ConfigUiCapability` is the sole editor-authorization surface for read-only, free-text, toggle, choice, and multichoice fields; `type_label` is display-only, and the intermediate `kind`, `allowed_values`, and `ConfigUiEditBehavior` field APIs are removed
 - Field intents carry `ConfigUiFieldId`, `OpenFile` carries stable source/action identity with its validated path payload, edits start inside Ratconfig without `BeginEdit`, and external editor results are applied by field identity
@@ -531,8 +532,8 @@ Before cutting a release:
 
 ### 5.0.0
 
-- `ConfigUiModel` adds the required `core_fields` field, and direct `ConfigUiApp` literals add the required `settings_view` field; `ConfigUiApp::new` selects the initial view from the model
-- Core includes allowlisted fields plus explicit and invalid configured values; All contains the host's complete inventory, non-empty search spans All without changing the saved view, and normal-mode `a` toggles views when the selected tab has a distinction
+- `ConfigUiModel` added explicit focused-field classification, and direct `ConfigUiApp` literals added the required `settings_view` field; `ConfigUiApp::new` selected the initial view from the model
+- The focused view included allowlisted fields plus explicit and invalid configured values; All contained the host's complete inventory, non-empty search spanned All without changing the saved view, and normal-mode `a` toggled views when the selected tab had a distinction
 - TOML patching, migrations, and contract-state reads share dotted-path validation and normalization while preserving operation and contract-change error context
 - Structured rows keep compact list previews while the details pane renders complete nested values and collapses equal defaults to `same as current`
 - Default field columns allocate spare width to values and measure ASCII, CJK text, and joined emoji in terminal cells

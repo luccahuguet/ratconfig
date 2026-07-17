@@ -94,7 +94,7 @@ pub(crate) fn model_with_fields(fields: Vec<ConfigUiField>) -> ConfigUiModel {
         operational_tab: None,
         tab_list_tables: BTreeMap::new(),
         fields,
-        core_fields: None,
+        recommended_fields: None,
         file_actions: Vec::new(),
         sidecars: Vec::new(),
         native_config_statuses: Vec::new(),

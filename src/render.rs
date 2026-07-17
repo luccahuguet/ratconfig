@@ -113,26 +113,28 @@ impl ConfigUiApp {
                     return Vec::new();
                 };
                 let state = self.model.field_state(field);
-                if let Some(edit) = &self.edit
-                    && field.matches_id(&edit.field_id)
+                let mut lines = match self
+                    .edit
+                    .as_ref()
+                    .filter(|edit| field.matches_id(&edit.field_id))
                 {
-                    match edit.mode {
-                        ConfigUiEditMode::Choice => {
-                            return single_choice_detail_lines(field, edit);
-                        }
-                        ConfigUiEditMode::MultiChoice => {
-                            return multi_choice_detail_lines(field, edit);
-                        }
-                        _ => {}
+                    Some(edit) if edit.mode == ConfigUiEditMode::Choice => {
+                        single_choice_detail_lines(field, edit)
                     }
-                }
-                if matches!(
-                    field.capability,
-                    ConfigUiCapability::Toggle { .. } | ConfigUiCapability::Choice { .. }
-                ) {
-                    return single_choice_field_detail_lines_with_state(field, state);
-                }
-                field_detail_lines(field, state)
+                    Some(edit) if edit.mode == ConfigUiEditMode::MultiChoice => {
+                        multi_choice_detail_lines(field, edit)
+                    }
+                    _ if matches!(
+                        field.capability,
+                        ConfigUiCapability::Toggle { .. } | ConfigUiCapability::Choice { .. }
+                    ) =>
+                    {
+                        single_choice_field_detail_lines_with_state(field, state)
+                    }
+                    _ => field_detail_lines(field, state),
+                };
+                append_field_diagnostics(&mut lines, &self.model, field);
+                lines
             }
             UiRowRef::Sidecar(index) => self
                 .model
@@ -424,8 +426,8 @@ fn render_body(
 }
 
 fn render_list(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect, rows: &[UiRowRef]) {
-    let title = settings_title(app);
     let (title_area, content_area) = pane_areas(area);
+    let title = settings_title(app, usize::from(title_area.width));
     frame.render_widget(
         Paragraph::new(themed_line(Line::from(title), app.active_theme)),
         title_area,
@@ -473,25 +475,49 @@ fn render_list(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect, rows: &[UiR
     );
 }
 
-fn settings_title(app: &ConfigUiApp) -> String {
+fn settings_title(app: &ConfigUiApp, width: usize) -> String {
     let counts = field_counts_for_tab(&app.model, app.selected_tab);
-    if counts.core == counts.total {
+    if counts.overview == counts.total {
         return if app.search.is_empty() {
             "settings".to_string()
         } else {
-            format!("settings filtered by {}", app.search)
+            title_that_fits(
+                width,
+                format!("settings filtered by {}", app.search),
+                format!("search · {}", app.search),
+            )
         };
     }
 
     if !app.search.is_empty() {
-        return format!(
-            "settings · search All · Core {}/{} · {}",
-            counts.core, counts.total, app.search
+        return title_that_fits(
+            width,
+            format!(
+                "settings · search All · Overview {}/{} · {}",
+                counts.overview, counts.total, app.search
+            ),
+            format!("search All · {}", app.search),
         );
     }
     match app.settings_view {
-        ConfigUiSettingsView::Core => format!("settings · Core {}/{}", counts.core, counts.total),
-        ConfigUiSettingsView::All => format!("settings All{}/Core{}", counts.total, counts.core),
+        ConfigUiSettingsView::Overview => title_that_fits(
+            width,
+            format!("settings · Overview {}/{}", counts.overview, counts.total),
+            format!("Overview {}/{}", counts.overview, counts.total),
+        ),
+        ConfigUiSettingsView::All => title_that_fits(
+            width,
+            format!("settings All{}/Overview{}", counts.total, counts.overview),
+            format!("All {}/Overview {}", counts.total, counts.overview),
+        ),
+    }
+}
+
+fn title_that_fits(width: usize, full: String, compact: String) -> String {
+    if Span::raw(full.as_str()).width() <= width {
+        full
+    } else {
+        compact
     }
 }
 
@@ -670,13 +696,13 @@ fn horizontal_inset(area: Rect) -> Rect {
 fn empty_settings_message(app: &ConfigUiApp) -> &'static str {
     if !app.search.is_empty() {
         "No settings match this search."
-    } else if app.settings_view == ConfigUiSettingsView::Core
-        && app.selected_tab_has_non_core_fields()
+    } else if app.settings_view == ConfigUiSettingsView::Overview
+        && app.selected_tab_has_non_overview_fields()
     {
         if app.search_active {
-            "No Core settings on this tab. Type to search All."
+            "Overview empty. Search All."
         } else {
-            "No Core settings on this tab. Press a to show All."
+            "Overview empty. Press a for All."
         }
     } else {
         "No settings on this tab."
@@ -925,6 +951,22 @@ fn field_style(state: ConfigUiFieldState, default: Style) -> Style {
         state_style(state)
     } else {
         default
+    }
+}
+
+fn append_field_diagnostics(
+    lines: &mut Vec<Line<'static>>,
+    model: &ConfigUiModel,
+    field: &ConfigUiField,
+) {
+    for diagnostic in model.diagnostics.iter().filter(|diagnostic| {
+        matches!(
+            &diagnostic.scope,
+            ConfigUiDiagnosticScope::Field(identity) if field.matches_id(identity)
+        )
+    }) {
+        lines.push(Line::from(""));
+        lines.extend(diagnostic_detail_lines(diagnostic));
     }
 }
 
@@ -1319,11 +1361,11 @@ fn footer_control_line(app: &ConfigUiApp) -> Line<'static> {
     let mut spans = vec![Span::raw("q quit ")];
     if app.can_toggle_settings_view() {
         let target = match app.settings_view {
-            ConfigUiSettingsView::Core => "All",
-            ConfigUiSettingsView::All => "Core",
+            ConfigUiSettingsView::Overview => "All",
+            ConfigUiSettingsView::All => "Overview",
         };
         spans.push(Span::styled(
-            format!("a to {target} "),
+            format!("a {target} "),
             fg_style(Color::Yellow),
         ));
     }
@@ -1837,58 +1879,56 @@ mod tests {
 
     // Defends: narrow layouts expose the active view, honest counts, and the matching toggle without hiding search scope.
     #[test]
-    fn core_all_view_state_and_controls_remain_clear_in_a_narrow_ui() {
-        let mut core = field("core.visible", "string", r#""core""#, &[]);
-        crate::model::set_field_state_for_test(&mut core, ConfigUiFieldState::Inherited);
+    fn overview_all_view_state_and_controls_remain_clear_in_a_narrow_ui() {
+        let mut recommended = field("core.visible", "string", r#""core""#, &[]);
+        crate::model::set_field_state_for_test(&mut recommended, ConfigUiFieldState::Inherited);
         let mut hidden = field("hidden.secret", "string", r#""secret""#, &[]);
         crate::model::set_field_state_for_test(&mut hidden, ConfigUiFieldState::Inherited);
-        let mut model = model_with_fields(vec![core, hidden]);
-        model.core_fields = Some(vec![ConfigUiFieldId::new(
+        let mut model = model_with_fields(vec![recommended, hidden]);
+        model.recommended_fields = Some(vec![ConfigUiFieldId::new(
             DEFAULT_CONFIG_SOURCE_ID,
             "core.visible",
         )]);
         let mut app = ConfigUiApp::new(model);
-        let mut terminal = Terminal::new(TestBackend::new(44, 16)).expect("test terminal");
+        let mut terminal = Terminal::new(TestBackend::new(46, 16)).expect("test terminal");
 
         let text = render_app(&mut terminal, &mut app);
-        assert!(text.contains("settings · Core 1/2"));
-        assert!(text.contains("a to All"));
+        assert!(text.contains("Overview 1/2"));
+        assert!(text.contains("a All"));
         assert!(text.contains("/ search"));
 
         app.handle_key(ConfigUiKey::Char('a'));
         assert_eq!(app.visible_rows().len(), 2);
         let text = render_app(&mut terminal, &mut app);
-        assert!(text.contains("settings All2/Core1"));
-        assert!(text.contains("a to Core"));
+        assert!(text.contains("All 2/Overview 1"));
+        assert!(text.contains("a Overview"));
         assert!(text.contains("/ search"));
 
         app.search_active = true;
         let text = render_app(&mut terminal, &mut app);
         assert!(text.contains("search: _"));
-        assert!(!text.contains("a to"));
+        assert!(!text.contains("a Overview"));
 
         app.search_active = false;
         app.search = "secret".to_string();
         assert_eq!(app.visible_rows(), vec![UiRowRef::Field(1)]);
         let text = render_app(&mut terminal, &mut app);
-        assert!(text.contains("settings · search All"));
-        assert!(!text.contains("a to"));
+        assert!(text.contains("search All · secret"));
+        assert!(!text.contains("a Overview"));
 
         app.search.clear();
-        app.model.core_fields = Some(Vec::new());
-        app.settings_view = ConfigUiSettingsView::Core;
+        app.model.recommended_fields = Some(Vec::new());
+        app.settings_view = ConfigUiSettingsView::Overview;
         let text = render_app(&mut terminal, &mut app);
-        assert!(text.contains("settings · Core 0/2"));
-        assert!(text.contains("No Core settings"));
-        assert!(text.contains("Press a"));
-        assert!(text.contains("to show All"));
-        assert!(text.contains("a to All"));
+        assert!(text.contains("Overview 0/2"));
+        assert!(text.contains("Overview empty"));
+        assert!(text.contains("Press a for All"));
+        assert!(text.contains("a All"));
 
         app.search_active = true;
         let text = render_app(&mut terminal, &mut app);
-        assert!(text.contains("Type to"));
-        assert!(text.contains("search All"));
-        assert!(!text.contains("show All"));
+        assert!(text.contains("Search All"));
+        assert!(!text.contains("Press a"));
 
         app.search_active = false;
         for index in 2..12 {
@@ -1896,7 +1936,7 @@ mod tests {
             extra.path = format!("extra.setting_{index}");
             app.model.fields.push(extra);
         }
-        app.model.core_fields = Some(
+        app.model.recommended_fields = Some(
             app.model
                 .fields
                 .iter()
@@ -1904,13 +1944,13 @@ mod tests {
                 .map(|field| ConfigUiFieldId::new(field.source_id.clone(), field.path.clone()))
                 .collect(),
         );
-        app.settings_view = ConfigUiSettingsView::Core;
+        app.settings_view = ConfigUiSettingsView::Overview;
         let text = render_app(&mut terminal, &mut app);
-        assert!(text.contains("settings · Core 10/12"));
+        assert!(text.contains("Overview 10/12"));
 
         app.settings_view = ConfigUiSettingsView::All;
         let text = render_app(&mut terminal, &mut app);
-        assert!(text.contains("settings All12/Core10"));
+        assert!(text.contains("All 12/Overview 10"));
     }
 
     // Defends: headings are derived from filtered field rows and selection indices continue to target only real rows.
@@ -2416,10 +2456,10 @@ mod tests {
         );
     }
 
-    // Defends: model-derived diagnostic state reaches rows and scalar-choice details, while
-    // diagnostic rows identify the exact host-declared scope.
+    // Defends: exact diagnostics remain reachable through field details without an operational
+    // tab, while blocking state and diagnostic-row scope stay model-derived.
     #[test]
-    fn scoped_blocker_renders_effective_field_state_and_scope() {
+    fn scoped_diagnostic_renders_effective_field_state_message_and_scope() {
         let mut model = test_model(ConfigUiFieldState::Inherited);
         model.fields[0].capability = ConfigUiCapability::Choice {
             choices: ["false", "true"]
@@ -2442,11 +2482,19 @@ mod tests {
 
         let row = row_line_for_model(&app.model, UiRowRef::Field(0));
         assert_eq!(row.spans[1].style, state_style(ConfigUiFieldState::Invalid));
+        let field_details = rendered_lines(&app.render_details(UiRowRef::Field(0)));
+        assert!(field_details.contains("state      invalid"));
+        assert!(field_details.contains("Invalid debug mode"));
+
+        app.model.diagnostics[0].blocking = false;
+        app.model.diagnostics[0].status = "preserved".to_string();
+        app.model.diagnostics[0].headline = "Preserved debug metadata".to_string();
+        let field_details = rendered_lines(&app.render_details(UiRowRef::Field(0)));
         assert!(
-            app.render_details(UiRowRef::Field(0))
-                .iter()
-                .any(|line| rendered_text(line) == "state      invalid")
+            field_details.contains("state      default"),
+            "{field_details}"
         );
+        assert!(field_details.contains("Preserved debug metadata"));
 
         let diagnostic_details =
             |app: &ConfigUiApp| rendered_lines(&app.render_details(UiRowRef::Diagnostic(0)));
