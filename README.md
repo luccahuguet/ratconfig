@@ -2,7 +2,7 @@
 
 Ratconfig is a reusable Rust crate for building Ratatui config editors over TOML-backed settings
 
-It is extracted from Yazelix, but it is project-agnostic: applications provide their own config schema, default values, validation, file writes, and post-save apply behavior
+It is extracted from Yazelix, but it is project-agnostic: applications provide their own field inventories and snapshots, validation, file writes, and post-save apply behavior
 
 ![Yazelix config UI powered by ratconfig](assets/screenshots/yazelix_config_ui.png)
 
@@ -14,7 +14,7 @@ Example host integration in Yazelix: ratconfig owns the reusable tabs, rows, edi
 - tabs, visible rows, search, selection, notices, and edit state
 - Overview and All visibility, per-tab counts, and search across a host-owned field inventory
 - optional host-supplied list table profiles for structured field tabs
-- capability-driven toggles, free text, single-select, multiselect, and default reset controls
+- capability-driven toggles, free text, single-select, multiselect, and reset-to-inherited controls
 - host-routed file action rows and exact field-to-action shortcuts for native config files
 - built-in dark/light UI palettes and optional model-driven theme switching
 - generic Ratatui rendering for the model
@@ -129,6 +129,10 @@ Populate `ConfigUiModel::tab_list_tables` and matching `ConfigUiField::list_cell
 Hosts do not choose widths for the default list. Ratconfig sizes status and setting from every row in the selected tab, then gives the remaining cells to value; search and selection leave column starts unchanged
 
 `ConfigUiField::can_unset` declares host authorization to remove an override independently of editor capability and baseline knowledge. Ratconfig exposes that action only when the flag is true for `Explicit` or `Invalid` intent on a writable source, and emits `ConfigUiIntent::UnsetField`. A known baseline can preview the inherited result, while `snapshot.baseline: None` keeps that result unknown without blocking an authorized unset
+
+The default settings list projects one compact value without collapsing the snapshot channels: locally invalid input is the correction target, otherwise a known effective value wins, otherwise explicit intent is shown, and a field with none of those renders as `unresolved`. Details label intent, explicit override or invalid input, effective value, baseline, their optional origins, and external management separately. Missing effective and baseline values are omitted rather than fabricated. When reset is authorized, the details and `u inherit` control describe removal of the override; a known baseline is the inherited preview, while an unknown baseline remains an authorized reset with an unknown result
+
+Custom detail callbacks passed to `draw_config_ui_with_details` or `run_config_ui_with_details` can immediately call `ConfigUiApp::resolve_row` to obtain a validated borrowed `ConfigUiRow`. Out-of-range indices resolve to `None`; row references are ephemeral indices and should not be retained across model replacement or reordering
 
 Populate `ConfigUiModel::theme_switcher` when a committed field value should select a built-in Ratconfig theme. The switcher names one `ConfigUiFieldId` and maps exact `serde_json::Value` values to `ConfigUiTheme::Dark` or `ConfigUiTheme::Light`. `try_new` resolves the initial theme from the field's effective snapshot. After a successful host write and reload, call `replace_model_after_success(reloaded, &field_id)`; the validated replacement becomes committed truth and only a matching staged edit is cleared. Failed host validation or persistence should report a notice without replacing the model, which preserves the staged buffer
 
@@ -526,6 +530,7 @@ Before cutting a release:
 - `ConfigUiApp::try_new`, `replace_model`, and `replace_model_after_success` validate complete models before mutation; app internals are read-only to hosts, reloads preserve stable selection and compatible edits by identity, and invalid replacements leave staged state untouched
 - `ConfigUiSource` is unique by id and independent of tabs, selected rows drive source headers, and `operational_tab` replaces reserved-name routing for diagnostics and status rows
 - `ConfigUiDiagnostic` adds required global/source/field scope, and effective field validity is derived from matching blocking diagnostics instead of a duplicate field-spec flag
+- Built-in rows and details present invalid input, sparse override intent, effective resolution, baseline resolution, origins, external management, and reset-to-inherited behavior without relabeling intent when a blocking diagnostic applies; custom detail callbacks resolve rows through `ConfigUiApp::resolve_row`
 - `ConfigUiEditState` adds a required grapheme-boundary cursor; `ConfigUiKey` adds Home, End, Delete, and owned paste input and is no longer `Copy`
 - Free-form fields use `Enter` for cursor-aware single-line editing and normal-mode `e` for the host-owned external editor; choice controls remain native
 - The outer-borderless body uses padded content, a single center divider, and an inset tab separator

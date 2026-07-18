@@ -1,9 +1,9 @@
 // Test lane: default
 
 use super::{
-    ConfigUiCapability, ConfigUiChoice, ConfigUiField, ConfigUiFieldId, ConfigUiFileAction,
-    ConfigUiModel, ConfigUiOverride, ConfigUiSettingsView, ConfigUiTextEncoding, ConfigUiTheme,
-    UiRowRef,
+    ConfigUiCapability, ConfigUiChoice, ConfigUiDiagnostic, ConfigUiField, ConfigUiFieldId,
+    ConfigUiFileAction, ConfigUiModel, ConfigUiNativeStatus, ConfigUiOverride,
+    ConfigUiSettingsView, ConfigUiSidecar, ConfigUiTextEncoding, ConfigUiTheme, UiRowRef,
 };
 use crate::model::{
     config_ui_theme_for_model, field_counts_for_tab, render_json_edit_value,
@@ -102,6 +102,16 @@ pub enum ConfigUiIntent {
     UnsetField {
         field: ConfigUiFieldId,
     },
+}
+
+/// Validated borrowed data for a renderer-provided row reference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigUiRow<'a> {
+    Field(&'a ConfigUiField),
+    FileAction(&'a ConfigUiFileAction),
+    Sidecar(&'a ConfigUiSidecar),
+    NativeStatus(&'a ConfigUiNativeStatus),
+    Diagnostic(&'a ConfigUiDiagnostic),
 }
 
 pub(crate) fn grapheme_boundary_at_or_before(input: &str, index: usize) -> usize {
@@ -205,6 +215,32 @@ impl ConfigUiApp {
 
     pub fn model(&self) -> &ConfigUiModel {
         &self.model
+    }
+
+    /// Resolves a renderer-provided row without requiring unchecked model indexing.
+    ///
+    /// Out-of-range references return `None`. Row references are ephemeral and should be
+    /// resolved when received rather than retained across model replacement or reordering.
+    pub fn resolve_row(&self, row: UiRowRef) -> Option<ConfigUiRow<'_>> {
+        match row {
+            UiRowRef::Field(index) => self.model.fields.get(index).map(ConfigUiRow::Field),
+            UiRowRef::FileAction(index) => self
+                .model
+                .file_actions
+                .get(index)
+                .map(ConfigUiRow::FileAction),
+            UiRowRef::Sidecar(index) => self.model.sidecars.get(index).map(ConfigUiRow::Sidecar),
+            UiRowRef::NativeStatus(index) => self
+                .model
+                .native_config_statuses
+                .get(index)
+                .map(ConfigUiRow::NativeStatus),
+            UiRowRef::Diagnostic(index) => self
+                .model
+                .diagnostics
+                .get(index)
+                .map(ConfigUiRow::Diagnostic),
+        }
     }
 
     pub fn active_theme(&self) -> ConfigUiTheme {
@@ -330,22 +366,15 @@ impl ConfigUiApp {
     }
 
     fn row_id(&self, row: UiRowRef) -> Option<ConfigUiRowId> {
-        match row {
-            UiRowRef::Field(index) => self
-                .model
-                .fields
-                .get(index)
-                .map(|field| ConfigUiRowId::Field(field.id())),
-            UiRowRef::FileAction(index) => {
-                self.model
-                    .file_actions
-                    .get(index)
-                    .map(|action| ConfigUiRowId::FileAction {
-                        source_id: action.source_id.clone(),
-                        action_id: action.action_id.clone(),
-                    })
+        match self.resolve_row(row)? {
+            ConfigUiRow::Field(field) => Some(ConfigUiRowId::Field(field.id())),
+            ConfigUiRow::FileAction(action) => Some(ConfigUiRowId::FileAction {
+                source_id: action.source_id.clone(),
+                action_id: action.action_id.clone(),
+            }),
+            ConfigUiRow::Sidecar(_) | ConfigUiRow::NativeStatus(_) | ConfigUiRow::Diagnostic(_) => {
+                None
             }
-            UiRowRef::Sidecar(_) | UiRowRef::NativeStatus(_) | UiRowRef::Diagnostic(_) => None,
         }
     }
 
@@ -931,7 +960,7 @@ impl ConfigUiApp {
             .filter(|field| self.can_unset_field(field))
             .map(ConfigUiField::id)
         else {
-            self.notice_info("This row cannot be reset.");
+            self.notice_info("This row has no removable override.");
             return ConfigUiIntent::None;
         };
         ConfigUiIntent::UnsetField { field }
@@ -1036,10 +1065,7 @@ fn edit_state_for_field(field: &ConfigUiField) -> Result<ConfigUiEditState, Stri
         ConfigUiCapability::Toggle { .. } | ConfigUiCapability::Choice { .. } => {
             let value = direct_choice_seed(field)?;
             let index = capability_choice_index(field, value).ok_or_else(|| {
-                format!(
-                    "{} has no editable choice for its current value.",
-                    field.path
-                )
+                format!("{} has no choice matching its editable value.", field.path)
             })?;
             (
                 render_json_edit_value(value),
@@ -1091,7 +1117,7 @@ fn direct_choice_seed(field: &ConfigUiField) -> Result<&JsonValue, String> {
             .effective
             .as_ref()
             .map(|resolved| &resolved.value)
-            .ok_or_else(|| format!("{} has no current value to edit.", field.path)),
+            .ok_or_else(|| format!("{} has no resolved value to edit.", field.path)),
         crate::ConfigUiOverride::Invalid { .. } => Err(format!(
             "{} has invalid input; remove the override or use a free-text editor.",
             field.path
@@ -1352,7 +1378,7 @@ pub(crate) fn is_ordered_multi_choice_field(field: &ConfigUiField) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::field_current_value;
+    use crate::model::field_list_value;
     #[cfg(feature = "ui")]
     use crate::row_line_for_model;
     use crate::{
@@ -1431,7 +1457,7 @@ theme = "light"
 
         assert_eq!(app.handle_key(ConfigUiKey::Enter), ConfigUiIntent::None);
         assert!(app.edit.is_none());
-        assert_eq!(field_current_value(&app.model.fields[0]), "false");
+        assert_eq!(field_list_value(&app.model.fields[0]), "false");
         assert_eq!(
             app.notice.as_ref().map(|notice| notice.text.as_str()),
             Some("Press Space to stage this change, then Enter to save.")
@@ -1590,9 +1616,9 @@ theme = "light"
         assert_eq!(app.active_theme, ConfigUiTheme::Light);
     }
 
-    // Defends: successful reset-to-default writes can switch a theme field without an active edit.
+    // Defends: a successful reset-to-inherited write can switch a theme field without an active edit.
     #[test]
-    fn successful_theme_field_unset_switches_to_default_theme() {
+    fn successful_theme_field_unset_switches_to_inherited_theme() {
         let mut model = test_model();
         model.fields[1] = field("ui.theme", "string", "\"dark\"", &["light", "dark"]);
         model.fields[1].snapshot.baseline = Some(ConfigUiResolvedValue::new(json!("light")));

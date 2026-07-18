@@ -1,9 +1,8 @@
 // Test lane: default
 use super::*;
 use crate::model::{
-    ConfigUiFieldState, UNSET_CONFIG_VALUE_LABEL, field_baseline_value, field_counts_for_tab,
-    field_current_json_value, field_current_value, field_state_label, snapshot_field_state,
-    visible_rows_for_tab_search,
+    ConfigUiFieldState, field_counts_for_tab, field_list_value, field_projected_json_value,
+    render_field_edit_value, visible_rows_for_tab_search,
 };
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
@@ -107,12 +106,8 @@ struct HeaderMetadata {
 
 impl ConfigUiApp {
     pub fn render_details(&self, row: UiRowRef) -> Vec<Line<'static>> {
-        match row {
-            UiRowRef::Field(index) => {
-                let Some(field) = self.model.fields.get(index) else {
-                    return Vec::new();
-                };
-                let state = self.model.field_state(field);
+        match self.resolve_row(row) {
+            Some(ConfigUiRow::Field(field)) => {
                 let mut lines = match self
                     .edit
                     .as_ref()
@@ -129,37 +124,21 @@ impl ConfigUiApp {
                         ConfigUiCapability::Toggle { .. } | ConfigUiCapability::Choice { .. }
                     ) =>
                     {
-                        single_choice_field_detail_lines_with_state(field, state)
+                        single_choice_field_detail_lines(field)
                     }
-                    _ => field_detail_lines(field, state),
+                    _ => field_detail_lines(field),
                 };
+                if self.can_unset_field(field) {
+                    lines.extend(reset_detail_lines(field));
+                }
                 append_field_diagnostics(&mut lines, &self.model, field);
                 lines
             }
-            UiRowRef::Sidecar(index) => self
-                .model
-                .sidecars
-                .get(index)
-                .map(sidecar_detail_lines)
-                .unwrap_or_default(),
-            UiRowRef::FileAction(index) => self
-                .model
-                .file_actions
-                .get(index)
-                .map(file_action_detail_lines)
-                .unwrap_or_default(),
-            UiRowRef::Diagnostic(index) => self
-                .model
-                .diagnostics
-                .get(index)
-                .map(diagnostic_detail_lines)
-                .unwrap_or_default(),
-            UiRowRef::NativeStatus(index) => self
-                .model
-                .native_config_statuses
-                .get(index)
-                .map(native_status_detail_lines)
-                .unwrap_or_default(),
+            Some(ConfigUiRow::Sidecar(sidecar)) => sidecar_detail_lines(sidecar),
+            Some(ConfigUiRow::FileAction(action)) => file_action_detail_lines(action),
+            Some(ConfigUiRow::Diagnostic(diagnostic)) => diagnostic_detail_lines(diagnostic),
+            Some(ConfigUiRow::NativeStatus(status)) => native_status_detail_lines(status),
+            None => Vec::new(),
         }
     }
 }
@@ -257,17 +236,12 @@ fn render_header(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect) {
 
 fn header_metadata(app: &ConfigUiApp) -> HeaderMetadata {
     let selected = app.visible_rows().get(app.selected_row).copied();
-    match selected {
-        Some(UiRowRef::Field(index)) => app
+    match selected.and_then(|row| app.resolve_row(row)) {
+        Some(ConfigUiRow::Field(field)) => app
             .model
-            .fields
-            .get(index)
-            .and_then(|field| {
-                app.model
-                    .sources
-                    .iter()
-                    .find(|source| source.id == field.source_id)
-            })
+            .sources
+            .iter()
+            .find(|source| source.id == field.source_id)
             .map(|source| HeaderMetadata {
                 source_label: Some(source.label.clone()),
                 source_path: config_path_text(&source.path, source.exists),
@@ -278,17 +252,12 @@ fn header_metadata(app: &ConfigUiApp) -> HeaderMetadata {
                 mode: write_mode(source.read_only),
             })
             .unwrap_or_else(neutral_header_metadata),
-        Some(UiRowRef::FileAction(index)) => app
-            .model
-            .file_actions
-            .get(index)
-            .map(|action| HeaderMetadata {
-                source_label: Some(action.label.clone()),
-                source_path: config_path_text(&action.path, action.exists),
-                owner: "none".to_string(),
-                mode: write_mode(action.read_only),
-            })
-            .unwrap_or_else(neutral_header_metadata),
+        Some(ConfigUiRow::FileAction(action)) => HeaderMetadata {
+            source_label: Some(action.label.clone()),
+            source_path: config_path_text(&action.path, action.exists),
+            owner: "none".to_string(),
+            mode: write_mode(action.read_only),
+        },
         _ => neutral_header_metadata(),
     }
 }
@@ -727,7 +696,7 @@ fn row_line_for_layout(
         (UiRowRef::Field(index), layout) => {
             let field = &model.fields[index];
             let state = model.field_state(field);
-            let current = field_current_value(field);
+            let value = field_list_value(field);
             let widths = match layout {
                 ListLayout::Field(widths) => widths,
                 _ => DEFAULT_FIELD_COLUMN_WIDTHS,
@@ -738,7 +707,7 @@ fn row_line_for_layout(
                 apply_status_style(&field.apply_status),
                 field_display_label(field),
                 field_style(state, config_key_style()),
-                &current,
+                &value,
                 field_style(state, fg_style(Color::Gray)),
             )
         }
@@ -970,34 +939,58 @@ fn append_field_diagnostics(
     }
 }
 
-/// Renders stored field state; use [`ConfigUiApp::render_details`] for scoped diagnostics.
+/// Renders stored sparse field state; use [`ConfigUiApp::render_details`] for reset availability
+/// and scoped diagnostics.
 pub fn default_field_detail_lines(field: &ConfigUiField) -> Vec<Line<'static>> {
-    field_detail_lines(field, snapshot_field_state(field))
+    field_detail_lines(field)
 }
 
-fn field_detail_lines(field: &ConfigUiField, state: ConfigUiFieldState) -> Vec<Line<'static>> {
-    let current_value = field_current_value(field);
-    let baseline_value = field_baseline_value(field);
-    let current = field_detail_value(field, &current_value, field_current_json_value(field));
-    let default_value = baseline_value
-        .as_deref()
-        .unwrap_or(UNSET_CONFIG_VALUE_LABEL);
-    let default = field_detail_value(
-        field,
-        default_value,
-        field
-            .snapshot
-            .baseline
-            .as_ref()
-            .map(|resolved| &resolved.value),
-    );
+fn field_detail_lines(field: &ConfigUiField) -> Vec<Line<'static>> {
     let mut lines = field_title_lines(field);
-    lines.push(detail_line("state", field_state_label(state)));
-    lines.extend(field_detail_value_lines("current", &current));
-    if baseline_value.is_some() && current == default {
-        lines.push(detail_line("default", "same as current"));
-    } else {
-        lines.extend(field_detail_value_lines("default", &default));
+    let override_value = match &field.snapshot.intent {
+        ConfigUiOverride::Absent => {
+            lines.push(detail_line("intent", "absent"));
+            None
+        }
+        ConfigUiOverride::Explicit(value) => {
+            lines.push(detail_line("intent", "explicit"));
+            lines.extend(json_detail_lines("override", field, value));
+            Some(value)
+        }
+        ConfigUiOverride::Invalid { input } => {
+            lines.push(detail_line("intent", "invalid"));
+            let value = field_detail_value(field, input, None);
+            lines.extend(field_detail_value_lines("input", &value));
+            None
+        }
+    };
+    if let Some(effective) = &field.snapshot.effective {
+        lines.extend(resolved_detail_lines(
+            "effective",
+            "eff. origin",
+            field,
+            effective,
+            (override_value == Some(&effective.value)).then_some("same as override"),
+        ));
+    }
+    if let Some(baseline) = &field.snapshot.baseline {
+        let same_as = field
+            .snapshot
+            .effective
+            .as_ref()
+            .filter(|effective| effective.value == baseline.value)
+            .map(|_| "same as effective")
+            .or_else(|| (override_value == Some(&baseline.value)).then_some("same as override"));
+        lines.extend(resolved_detail_lines(
+            "baseline",
+            "base origin",
+            field,
+            baseline,
+            same_as,
+        ));
+    }
+    if let Some(manager) = &field.snapshot.external_manager {
+        lines.push(detail_line("managed by", manager));
     }
     if let Some(type_label) = &field.type_label {
         lines.push(detail_line("type", type_label));
@@ -1029,6 +1022,43 @@ fn field_detail_lines(field: &ConfigUiField, state: ConfigUiFieldState) -> Vec<L
     lines
 }
 
+fn json_detail_lines(label: &str, field: &ConfigUiField, value: &JsonValue) -> Vec<Line<'static>> {
+    let rendered = render_field_edit_value(field, value);
+    field_detail_value_lines(label, &field_detail_value(field, &rendered, Some(value)))
+}
+
+fn resolved_detail_lines(
+    label: &str,
+    origin_label: &str,
+    field: &ConfigUiField,
+    resolved: &ConfigUiResolvedValue,
+    same_as: Option<&str>,
+) -> Vec<Line<'static>> {
+    let mut lines = same_as.map_or_else(
+        || json_detail_lines(label, field, &resolved.value),
+        |same_as| vec![detail_line(label, same_as)],
+    );
+    if let Some(origin) = &resolved.origin {
+        lines.push(detail_line(origin_label, origin));
+    }
+    lines
+}
+
+fn reset_detail_lines(field: &ConfigUiField) -> Vec<Line<'static>> {
+    vec![
+        Line::from(""),
+        detail_line("reset", "remove override"),
+        detail_line(
+            "inherits",
+            field
+                .snapshot
+                .baseline
+                .as_ref()
+                .map_or("unknown", |_| "baseline"),
+        ),
+    ]
+}
+
 #[derive(PartialEq)]
 enum FieldDetailValue<'a> {
     Scalar(&'a str),
@@ -1053,7 +1083,7 @@ fn field_detail_value<'a>(
             field.type_label.as_deref(),
             Some("array" | "object" | "string_list" | "string list" | "table")
         );
-    if fallback == UNSET_CONFIG_VALUE_LABEL || !structured {
+    if !structured {
         return FieldDetailValue::Scalar(fallback);
     }
 
@@ -1086,15 +1116,8 @@ fn field_detail_value_lines(label: &str, value: &FieldDetailValue<'_>) -> Vec<Li
 
 /// Renders stored choice state; use [`ConfigUiApp::render_details`] for scoped diagnostics.
 pub fn single_choice_field_detail_lines(field: &ConfigUiField) -> Vec<Line<'static>> {
-    single_choice_field_detail_lines_with_state(field, snapshot_field_state(field))
-}
-
-fn single_choice_field_detail_lines_with_state(
-    field: &ConfigUiField,
-    state: ConfigUiFieldState,
-) -> Vec<Line<'static>> {
-    let selected_value = field_current_json_value(field);
-    let mut lines = field_detail_lines(field, state);
+    let selected_value = field_projected_json_value(field);
+    let mut lines = field_detail_lines(field);
     lines.push(Line::from(""));
     append_single_choice_options(&mut lines, field, selected_value, None);
     lines
@@ -1493,7 +1516,7 @@ fn normal_control_line(app: &ConfigUiApp) -> Line<'static> {
         ConfigUiCapability::FreeText { .. } => "Enter inline  e editor".to_string(),
     };
     if app.can_unset_field(field) {
-        primary.push_str("  u reset default");
+        primary.push_str("  u inherit");
     }
     Line::from(primary)
 }
@@ -1866,6 +1889,11 @@ mod tests {
     fn detail_resolver_is_total_for_unknown_rows() {
         let app = ConfigUiApp::new(test_model(ConfigUiFieldState::Explicit));
 
+        assert!(matches!(
+            app.resolve_row(UiRowRef::Field(0)),
+            Some(ConfigUiRow::Field(field)) if field.path == "core.debug_mode"
+        ));
+
         for row in [
             UiRowRef::Field(usize::MAX),
             UiRowRef::FileAction(usize::MAX),
@@ -1873,6 +1901,7 @@ mod tests {
             UiRowRef::NativeStatus(usize::MAX),
             UiRowRef::Diagnostic(usize::MAX),
         ] {
+            assert!(app.resolve_row(row).is_none());
             assert!(app.render_details(row).is_empty());
         }
     }
@@ -2146,6 +2175,41 @@ mod tests {
         assert!(!rendered_text(&line).contains("explicit"));
     }
 
+    // Defends: the compact list shows the user's correction target first, then resolved truth,
+    // then explicit intent, and never presents missing resolution as an unset override.
+    #[test]
+    fn field_row_value_projection_distinguishes_invalid_effective_intent_and_unresolved() {
+        let mut invalid = built_field("integer", Some(&json!(1)), Some(&json!(2)));
+        invalid.snapshot.intent = ConfigUiOverride::Invalid {
+            input: "broken".to_string(),
+        };
+        invalid.snapshot.effective = Some(ConfigUiResolvedValue::new(json!(3)));
+
+        let mut resolved = built_field("integer", Some(&json!(1)), Some(&json!(2)));
+        resolved.snapshot.effective = Some(ConfigUiResolvedValue::new(json!(3)));
+
+        let mut explicit = built_field("integer", Some(&json!(1)), None);
+        explicit.snapshot.effective = None;
+
+        let unresolved = built_field("integer", None, None);
+        let model = model_with_fields(vec![invalid, resolved, explicit, unresolved]);
+
+        assert_eq!(
+            (0..4)
+                .map(
+                    |index| rendered_cells(&row_line_for_model(&model, UiRowRef::Field(index)))[2]
+                        .clone()
+                )
+                .collect::<Vec<_>>(),
+            ["broken", "3", "1", "unresolved"]
+        );
+        let invalid_details = detail_text(&model.fields[0]);
+        assert!(invalid_details.contains("intent     invalid"));
+        assert!(invalid_details.contains("input      broken"));
+        assert!(invalid_details.contains("effective  3"));
+        assert!(invalid_details.contains("baseline   2"));
+    }
+
     // Defends: removing the state column still leaves visible names for the remaining settings columns.
     #[test]
     fn field_header_names_remaining_columns() {
@@ -2350,14 +2414,21 @@ mod tests {
         );
     }
 
-    // Defends: details retain complete structures, deduplicate equal defaults, and consistently
-    // project effective values while list previews stay compact.
+    // Defends: details retain complete structures while keeping intent, effective resolution,
+    // baseline resolution, and bounded provenance visibly distinct.
     #[test]
-    fn field_details_keep_structures_complete_and_project_effective_values() {
+    fn field_details_keep_sparse_channels_and_structures_distinct() {
         let long_value = "a deliberately long nested value that the detail paragraph can wrap without hiding its surrounding structure";
-        let current = json!({"nested": [{"message": long_value}, {"enabled": true}]});
-        let different_default = json!({"nested": [{"message": "short"}]});
-        let field = built_field("object", Some(&current), Some(&different_default));
+        let intent = json!({"nested": [{"message": long_value}, {"enabled": true}]});
+        let baseline = json!({"nested": [{"message": "short"}]});
+        let mut field = built_field("object", Some(&intent), Some(&baseline));
+        field.snapshot.effective = Some(ConfigUiResolvedValue {
+            value: json!({"nested": [{"message": "applied"}]}),
+            origin: Some("runtime resolution".to_string()),
+        });
+        field.snapshot.baseline.as_mut().expect("baseline").origin =
+            Some("tool defaults".to_string());
+        field.snapshot.external_manager = Some("system policy".to_string());
 
         let model = model_with_fields(vec![field]);
         assert_eq!(
@@ -2367,11 +2438,21 @@ mod tests {
 
         let details = detail_text(&model.fields[0]);
         assert!(details.contains(&format!(
-            "current    \n  {{\n    \"nested\": [\n      {{\n        \"message\": \"{long_value}\""
+            "override   \n  {{\n    \"nested\": [\n      {{\n        \"message\": \"{long_value}\""
         )));
         assert!(details.contains(
-            "default    \n  {\n    \"nested\": [\n      {\n        \"message\": \"short\""
+            "effective  \n  {\n    \"nested\": [\n      {\n        \"message\": \"applied\""
         ));
+        assert!(details.contains(
+            "baseline   \n  {\n    \"nested\": [\n      {\n        \"message\": \"short\""
+        ));
+        assert!(details.contains("intent     explicit"));
+        assert!(details.contains("eff. origin runtime resolution"));
+        assert!(details.contains("base origin tool defaults"));
+        assert!(details.contains("managed by system policy"));
+        assert!(!details.contains("state      "));
+        assert!(!details.contains("current    "));
+        assert!(!details.contains("default    "));
         assert!(!details.contains("..."));
 
         let values = json!([1, 2, 3, 4, 5]);
@@ -2379,17 +2460,9 @@ mod tests {
         let same_details = detail_text(&same);
 
         assert_eq!(same_details.matches("    1,").count(), 1);
-        assert!(same_details.contains("default    same as current"));
-
-        let mut resolved = built_field(
-            "object",
-            Some(&json!({"requested": true})),
-            Some(&json!({"baseline": true})),
-        );
-        resolved.snapshot.effective = Some(ConfigUiResolvedValue::new(json!({"applied": true})));
-        let resolved_details = detail_text(&resolved);
-        assert!(resolved_details.contains("\"applied\": true"));
-        assert!(!resolved_details.contains("\"requested\": true"));
+        assert!(same_details.contains("override   "));
+        assert!(same_details.contains("effective  same as override"));
+        assert!(same_details.contains("baseline   same as effective"));
 
         let mut choice = built_field("string", Some(&json!("requested")), None);
         choice.capability = ConfigUiCapability::Choice {
@@ -2404,19 +2477,27 @@ mod tests {
         assert!(!choice_details.contains("(x) requested"));
     }
 
-    // Defends: non-structured details stay compact and TOML-only float values survive the structured fallback verbatim.
+    // Defends: absent and scalar channels stay compact while TOML-only float values survive the
+    // structured fallback verbatim without being mislabeled as current or default state.
     #[test]
-    fn detail_values_keep_markers_and_scalars_compact_and_special_toml_complete() {
+    fn detail_values_keep_sparse_labels_scalars_and_special_toml_complete() {
         let scalar = built_field("bool", Some(&json!(true)), Some(&json!(false)));
         let scalar_details = default_field_detail_lines(&scalar)
             .iter()
             .map(rendered_text)
             .collect::<Vec<_>>();
-        assert!(scalar_details.iter().any(|line| line == "current    true"));
-        assert!(scalar_details.iter().any(|line| line == "default    false"));
+        assert!(scalar_details.iter().any(|line| line == "override   true"));
+        assert!(
+            scalar_details
+                .iter()
+                .any(|line| line == "effective  same as override")
+        );
+        assert!(scalar_details.iter().any(|line| line == "baseline   false"));
 
         let unset = built_field("array", None, None);
-        assert!(detail_text(&unset).contains("current    not set"));
+        assert!(detail_text(&unset).contains("intent     absent"));
+        assert!(!detail_text(&unset).contains("effective  "));
+        assert!(!detail_text(&unset).contains("baseline   "));
 
         let rows = build_toml_document_fields(ConfigUiTomlDocumentSpec {
             source_id: "native",
@@ -2436,8 +2517,9 @@ mod tests {
             .expect("limits field");
         let special_details = detail_text(field);
 
-        assert!(special_details.contains("current    \n  [inf, -inf, nan]"));
-        assert!(special_details.contains("default    \n  [nan]"));
+        assert!(special_details.contains("override   \n  [inf, -inf, nan]"));
+        assert!(special_details.contains("effective  same as override"));
+        assert!(special_details.contains("baseline   \n  [nan]"));
     }
 
     // Defends: invalid field rows remain visibly exceptional even without the normal state column.
@@ -2457,7 +2539,7 @@ mod tests {
     }
 
     // Defends: exact diagnostics remain reachable through field details without an operational
-    // tab, while blocking state and diagnostic-row scope stay model-derived.
+    // tab, while blocking diagnostics style the row without relabeling inherited intent.
     #[test]
     fn scoped_diagnostic_renders_effective_field_state_message_and_scope() {
         let mut model = test_model(ConfigUiFieldState::Inherited);
@@ -2478,20 +2560,34 @@ mod tests {
             )),
             detail_lines: Vec::new(),
         });
+        model.diagnostics.push(ConfigUiDiagnostic {
+            path: "core.debug_mode".to_string(),
+            status: "notice".to_string(),
+            headline: "A second field notice".to_string(),
+            blocking: false,
+            scope: ConfigUiDiagnosticScope::Field(ConfigUiFieldId::new(
+                DEFAULT_CONFIG_SOURCE_ID,
+                "core.debug_mode",
+            )),
+            detail_lines: Vec::new(),
+        });
         let mut app = ConfigUiApp::new(model);
 
         let row = row_line_for_model(&app.model, UiRowRef::Field(0));
         assert_eq!(row.spans[1].style, state_style(ConfigUiFieldState::Invalid));
         let field_details = rendered_lines(&app.render_details(UiRowRef::Field(0)));
-        assert!(field_details.contains("state      invalid"));
+        assert!(field_details.contains("intent     absent"));
+        assert!(field_details.contains("effective  false"));
+        assert!(field_details.contains("baseline   same as effective"));
         assert!(field_details.contains("Invalid debug mode"));
+        assert!(field_details.contains("A second field notice"));
 
         app.model.diagnostics[0].blocking = false;
         app.model.diagnostics[0].status = "preserved".to_string();
         app.model.diagnostics[0].headline = "Preserved debug metadata".to_string();
         let field_details = rendered_lines(&app.render_details(UiRowRef::Field(0)));
         assert!(
-            field_details.contains("state      default"),
+            field_details.contains("intent     absent"),
             "{field_details}"
         );
         assert!(field_details.contains("Preserved debug metadata"));
@@ -2536,7 +2632,7 @@ mod tests {
         assert_eq!(rendered_cell(buffer, "ready now").fg, palette.success);
         assert_eq!(rendered_cell(buffer, "ready-value").fg, palette.muted);
         assert_eq!(rendered_cell(buffer, "Config").fg, palette.title);
-        assert_eq!(rendered_cell(buffer, "state").fg, palette.metadata_key);
+        assert_eq!(rendered_cell(buffer, "intent").fg, palette.metadata_key);
         assert_eq!(rendered_cell(buffer, "q quit").fg, palette.text);
         assert_eq!(rendered_cell(buffer, "settings").fg, Color::Black);
         assert_eq!(rendered_cell(buffer, "details").fg, Color::Black);
@@ -2674,7 +2770,10 @@ mod tests {
         let mut model = test_model(ConfigUiFieldState::Explicit);
         model.fields[0].snapshot.baseline = None;
         let mut app = ConfigUiApp::new(model);
-        assert!(rendered_text(&normal_control_line(&app)).contains("u reset default"));
+        assert!(rendered_text(&normal_control_line(&app)).contains("u inherit"));
+        let unknown = rendered_lines(&app.render_details(UiRowRef::Field(0)));
+        assert!(unknown.contains("reset      remove override"));
+        assert!(unknown.contains("inherits   unknown"));
 
         app.model.fields[0].capability = ConfigUiCapability::ReadOnly {
             reason: "Edit the source file directly.".to_string(),
@@ -2685,26 +2784,37 @@ mod tests {
         app.model.file_actions = vec![action];
         assert_eq!(
             rendered_text(&normal_control_line(&app)),
-            "e open Native config  u reset default"
+            "e open Native config  u inherit"
         );
         app.model.file_actions[0].disabled_reason = Some("Unavailable.".to_string());
         assert_eq!(
             rendered_text(&normal_control_line(&app)),
-            "file action unavailable  u reset default"
+            "file action unavailable  u inherit"
         );
 
+        app.model.fields[0].snapshot.baseline = Some(ConfigUiResolvedValue {
+            value: json!(true),
+            origin: Some("tool defaults".to_string()),
+        });
+        let known = rendered_lines(&app.render_details(UiRowRef::Field(0)));
+        assert!(known.contains("reset      remove override"));
+        assert!(known.contains("baseline   true"));
+        assert!(known.contains("base origin tool defaults"));
+        assert!(known.contains("inherits   baseline"));
+
         app.model.fields[0].can_unset = false;
-        assert!(!rendered_text(&normal_control_line(&app)).contains("reset default"));
+        assert!(!rendered_text(&normal_control_line(&app)).contains("inherit"));
+        assert!(!rendered_lines(&app.render_details(UiRowRef::Field(0))).contains("reset      "));
 
         app.model.fields[0].can_unset = true;
         app.model.fields[0].snapshot.intent = ConfigUiOverride::Absent;
         app.model.fields[0].snapshot.effective = None;
-        assert!(!rendered_text(&normal_control_line(&app)).contains("reset default"));
+        assert!(!rendered_text(&normal_control_line(&app)).contains("inherit"));
 
         app.model.fields[0].snapshot.intent = ConfigUiOverride::Explicit(json!(false));
         app.model.fields[0].snapshot.effective = Some(ConfigUiResolvedValue::new(json!(false)));
         app.model.sources[0].read_only = true;
-        assert!(!rendered_text(&normal_control_line(&app)).contains("reset default"));
+        assert!(!rendered_text(&normal_control_line(&app)).contains("inherit"));
     }
 
     // Defends: boolean controls distinguish normal-mode staging from edit-mode persistence.

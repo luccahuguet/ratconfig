@@ -372,15 +372,9 @@ impl ConfigUiField {
     pub(crate) fn matches_id(&self, identity: &ConfigUiFieldId) -> bool {
         self.source_id == identity.source_id && self.path == identity.path
     }
-
-    pub fn has_baseline_value(&self) -> bool {
-        self.snapshot.baseline.is_some()
-    }
 }
 
-pub(crate) const UNSET_CONFIG_VALUE_LABEL: &str = "not set";
-
-pub(crate) fn field_current_json_value(field: &ConfigUiField) -> Option<&JsonValue> {
+pub(crate) fn field_projected_json_value(field: &ConfigUiField) -> Option<&JsonValue> {
     match (&field.snapshot.intent, &field.snapshot.effective) {
         (ConfigUiOverride::Invalid { .. }, _) => None,
         (_, Some(resolved)) => Some(&resolved.value),
@@ -389,16 +383,18 @@ pub(crate) fn field_current_json_value(field: &ConfigUiField) -> Option<&JsonVal
     }
 }
 
-pub(crate) fn field_current_value(field: &ConfigUiField) -> String {
+pub(crate) fn field_list_value(field: &ConfigUiField) -> String {
     match &field.snapshot.intent {
         ConfigUiOverride::Invalid { input } => input.clone(),
-        ConfigUiOverride::Explicit(_) | ConfigUiOverride::Absent => field_current_json_value(field)
-            .map(|value| render_field_value(field, value))
-            .unwrap_or_else(|| UNSET_CONFIG_VALUE_LABEL.to_string()),
+        ConfigUiOverride::Explicit(_) | ConfigUiOverride::Absent => {
+            field_projected_json_value(field)
+                .map(|value| render_field_value(field, value))
+                .unwrap_or_else(|| "unresolved".to_string())
+        }
     }
 }
 
-pub(crate) fn field_baseline_value(field: &ConfigUiField) -> Option<String> {
+pub(crate) fn field_baseline_display_value(field: &ConfigUiField) -> Option<String> {
     field
         .snapshot
         .baseline
@@ -413,7 +409,7 @@ fn render_field_value(field: &ConfigUiField, value: &JsonValue) -> String {
     }
 }
 
-fn render_field_edit_value(field: &ConfigUiField, value: &JsonValue) -> String {
+pub(crate) fn render_field_edit_value(field: &ConfigUiField, value: &JsonValue) -> String {
     match value {
         JsonValue::String(value) if field.type_label.as_deref() != Some("string") => value.clone(),
         _ => render_json_edit_value(value),
@@ -1513,15 +1509,15 @@ fn row_matches_search(model: &ConfigUiModel, row: UiRowRef, search: &str) -> boo
     match row {
         UiRowRef::Field(index) => {
             let field = &model.fields[index];
-            let current = field_current_value(field);
-            let baseline = field_baseline_value(field).unwrap_or_default();
+            let projected = field_list_value(field);
+            let baseline = field_baseline_display_value(field).unwrap_or_default();
             search_matches(
                 search,
                 [
                     field.path.as_str(),
                     field.display_label.as_str(),
                     field.section_label.as_str(),
-                    current.as_str(),
+                    projected.as_str(),
                     baseline.as_str(),
                     field.description.as_str(),
                 ],
@@ -1793,7 +1789,7 @@ mod tests {
             snapshot_field_state(&explicit),
             ConfigUiFieldState::Explicit
         );
-        assert_eq!(field_current_value(&explicit), r#""pinned""#);
+        assert_eq!(field_list_value(&explicit), r#""pinned""#);
 
         let mut invalid = field("invalid", "number", "1", &[]);
         invalid.snapshot.intent = ConfigUiOverride::Invalid {
@@ -1804,8 +1800,8 @@ mod tests {
         invalid.snapshot.external_manager = Some("system policy".to_string());
         assert!(model_with_fields(vec![invalid.clone()]).validate().is_ok());
         assert_eq!(snapshot_field_state(&invalid), ConfigUiFieldState::Invalid);
-        assert_eq!(field_current_value(&invalid), "not-a-number");
-        assert_eq!(field_baseline_value(&invalid).as_deref(), Some("2"));
+        assert_eq!(field_list_value(&invalid), "not-a-number");
+        assert_eq!(field_baseline_display_value(&invalid).as_deref(), Some("2"));
 
         let mut independent = field("independent", "string", r#""intent""#, &[]);
         independent.snapshot.effective = Some(resolved(json!("effective"), "runtime"));
@@ -2301,32 +2297,29 @@ help = "Theme name"
             snapshot_field_state(&explicit),
             ConfigUiFieldState::Explicit
         );
-        assert_eq!(field_current_value(&explicit), "\"dark\"");
+        assert_eq!(field_list_value(&explicit), "\"dark\"");
         assert_eq!(
-            field_baseline_value(&explicit).as_deref(),
+            field_baseline_display_value(&explicit).as_deref(),
             Some("\"light\"")
         );
-        assert!(explicit.has_baseline_value());
 
         let defaulted = spec().build("string", None, Some(&default));
         assert_eq!(
             snapshot_field_state(&defaulted),
             ConfigUiFieldState::Inherited
         );
-        assert_eq!(field_current_value(&defaulted), "\"light\"");
-        assert!(defaulted.has_baseline_value());
+        assert_eq!(field_list_value(&defaulted), "\"light\"");
 
         let unset = spec().build("string", None, None);
         assert_eq!(snapshot_field_state(&unset), ConfigUiFieldState::Absent);
-        assert_eq!(field_current_value(&unset), "not set");
-        assert_eq!(field_baseline_value(&unset), None);
-        assert!(!unset.has_baseline_value());
+        assert_eq!(field_list_value(&unset), "unresolved");
+        assert_eq!(field_baseline_display_value(&unset), None);
 
         let control_value = json!("\0");
         let control_field = spec().build("string", Some(&control_value), Some(&control_value));
         for rendered in [
-            field_current_value(&control_field),
-            field_baseline_value(&control_field).expect("baseline"),
+            field_list_value(&control_field),
+            field_baseline_display_value(&control_field).expect("baseline"),
         ] {
             assert_eq!(
                 serde_json::from_str::<JsonValue>(&rendered).expect("valid JSON value"),
@@ -2368,7 +2361,7 @@ help = "Theme name"
         assert_eq!(field.section_label, "Plugins");
         assert_eq!(field.list_cells, vec!["plugins", "5 enabled"]);
         assert_eq!(field.tab, "advanced");
-        assert_eq!(field_current_value(&field), "[5 items]");
+        assert_eq!(field_list_value(&field), "[5 items]");
         assert_eq!(field.snapshot.intent, ConfigUiOverride::Explicit(current));
         assert!(field.rebuild_required);
         assert!(matches!(
@@ -2415,9 +2408,9 @@ help = "Theme name"
         assert_eq!(field.list_cells, vec!["widgets", "2 selected"]);
         assert_eq!(field.tab, "widgets");
         assert_eq!(field.type_label.as_deref(), Some("string list"));
-        assert_eq!(field_current_value(&field), r#"["status","clock"]"#);
+        assert_eq!(field_list_value(&field), r#"["status","clock"]"#);
         assert_eq!(
-            field_baseline_value(&field).as_deref(),
+            field_baseline_display_value(&field).as_deref(),
             Some(r#"["clock"]"#)
         );
         assert_eq!(snapshot_field_state(&field), ConfigUiFieldState::Explicit);
@@ -2541,9 +2534,9 @@ normal = "block"
                 "\"absolute\""
             ]
         );
-        assert_eq!(field_current_value(line_number), "\"relative\"");
+        assert_eq!(field_list_value(line_number), "\"relative\"");
         assert_eq!(
-            field_baseline_value(line_number).as_deref(),
+            field_baseline_display_value(line_number).as_deref(),
             Some("\"absolute\"")
         );
         assert!(matches!(
@@ -2576,9 +2569,9 @@ rulers = [80]
             snapshot_field_state(line_number),
             ConfigUiFieldState::Inherited
         );
-        assert_eq!(field_current_value(line_number), "\"relative\"");
+        assert_eq!(field_list_value(line_number), "\"relative\"");
         assert_eq!(
-            field_baseline_value(line_number).as_deref(),
+            field_baseline_display_value(line_number).as_deref(),
             Some("\"relative\"")
         );
         assert_eq!(
@@ -2595,8 +2588,11 @@ rulers = [80]
 
         let rulers = toml_field(&rows, "editor.rulers");
         assert_eq!(rulers.type_label.as_deref(), Some("array"));
-        assert_eq!(field_current_value(rulers), "[80,100]");
-        assert_eq!(field_baseline_value(rulers).as_deref(), Some("[80]"));
+        assert_eq!(field_list_value(rulers), "[80,100]");
+        assert_eq!(
+            field_baseline_display_value(rulers).as_deref(),
+            Some("[80]")
+        );
         assert_eq!(rulers.list_cells[5], "[80]");
         assert_eq!(rulers.validation, "read-only inferred TOML value");
         assert!(matches!(
@@ -2605,10 +2601,10 @@ rulers = [80]
         ));
 
         let limits = toml_field(&rows, "editor.limits");
-        assert_eq!(field_current_value(limits), "[inf, -inf, nan]");
+        assert_eq!(field_list_value(limits), "[inf, -inf, nan]");
 
         let limit = toml_field(&rows, "editor.limit");
-        assert_eq!(field_current_value(limit), "inf");
+        assert_eq!(field_list_value(limit), "inf");
         assert!(matches!(
             limit.capability,
             ConfigUiCapability::ReadOnly { .. }
@@ -2662,7 +2658,10 @@ rulers = [80, 100]
 
         assert_eq!(field.path, "\"weird.key\"");
         assert_eq!(field.display_label, "\"weird.key\"");
-        assert_eq!(field_baseline_value(field).as_deref(), Some("\"default\""));
+        assert_eq!(
+            field_baseline_display_value(field).as_deref(),
+            Some("\"default\"")
+        );
         assert_eq!(
             field.list_cells,
             vec![
@@ -2692,8 +2691,8 @@ package = { name = "ratconfig", enabled = true }
 
         let name = toml_field(&rows, "package.name");
         assert_eq!(name.type_label.as_deref(), Some("string"));
-        assert_eq!(field_current_value(name), "\"ratconfig\"");
-        assert_eq!(field_baseline_value(name), None);
+        assert_eq!(field_list_value(name), "\"ratconfig\"");
+        assert_eq!(field_baseline_display_value(name), None);
         assert_eq!(name.validation, "read-only inferred TOML value");
         assert!(matches!(
             name.capability,
@@ -2715,7 +2714,7 @@ empty = []
         let plugins = toml_field(&rows, "shell.plugins");
 
         assert_eq!(plugins.type_label.as_deref(), Some("string list"));
-        assert_eq!(field_current_value(plugins), r#"["git","status"]"#);
+        assert_eq!(field_list_value(plugins), r#"["git","status"]"#);
         assert!(matches!(
             plugins.capability,
             ConfigUiCapability::ReadOnly { .. }
