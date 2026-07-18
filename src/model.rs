@@ -499,7 +499,8 @@ pub struct ConfigUiTomlDocumentSpec<'a> {
     pub tab: &'a str,
     pub section_label: &'a str,
     pub current_toml: &'a str,
-    pub default_toml: Option<&'a str>,
+    /// Host-asserted resolution after removing the current document's overrides.
+    pub baseline_toml: Option<&'a str>,
     pub validation: &'a str,
     pub rebuild_required: bool,
     pub apply_status: ConfigUiApplyStatus,
@@ -511,15 +512,42 @@ pub struct ConfigUiTomlDocumentRows {
     pub fields: Vec<ConfigUiField>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigUiTomlDocumentError {
+    Current { message: String },
+    Baseline { message: String },
+}
+
+impl ConfigUiTomlDocumentError {
+    fn new(side: TomlDocumentSide, message: String) -> Self {
+        match side {
+            TomlDocumentSide::Current => Self::Current { message },
+            TomlDocumentSide::Baseline => Self::Baseline { message },
+        }
+    }
+}
+
+impl std::fmt::Display for ConfigUiTomlDocumentError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (side, message) = match self {
+            Self::Current { message } => ("current", message),
+            Self::Baseline { message } => ("baseline", message),
+        };
+        write!(formatter, "{side} TOML document is invalid: {message}")
+    }
+}
+
+impl std::error::Error for ConfigUiTomlDocumentError {}
+
 fn toml_document_list_table() -> ConfigUiListTable {
     ConfigUiListTable {
         columns: [
             ("table", 24),
             ("key", 28),
             ("type", 12),
-            ("state", 10),
+            ("intent", 10),
             ("value", 28),
-            ("default", 20),
+            ("baseline", 20),
         ]
         .into_iter()
         .map(|(title, width)| ConfigUiListColumn {
@@ -530,30 +558,45 @@ fn toml_document_list_table() -> ConfigUiListTable {
     }
 }
 
+/// Builds read-only rows from observed current and host-asserted baseline TOML documents.
+///
+/// Current-document literals establish explicit intent, not effective resolution. A baseline-only
+/// entry establishes identical effective and baseline values because the host supplied that
+/// document as resolution without the current source override.
 pub fn build_toml_document_fields(
     spec: ConfigUiTomlDocumentSpec<'_>,
-) -> Result<ConfigUiTomlDocumentRows, String> {
-    let current = parse_toml_document(spec.current_toml, "current TOML document")?;
-    let current_edit = parse_toml_edit_document(spec.current_toml, "current TOML document")?;
-    let default = spec
-        .default_toml
-        .map(|raw| parse_toml_document(raw, "default TOML document"))
+) -> Result<ConfigUiTomlDocumentRows, ConfigUiTomlDocumentError> {
+    let current = parse_toml_document(spec.current_toml, TomlDocumentSide::Current)?;
+    let current_edit = spec
+        .current_toml
+        .parse::<TomlEditDocument>()
+        .map_err(|source| {
+            ConfigUiTomlDocumentError::new(TomlDocumentSide::Current, source.to_string())
+        })?;
+    let baseline = spec
+        .baseline_toml
+        .map(|raw| parse_toml_document(raw, TomlDocumentSide::Baseline))
         .transpose()?;
-    let mut entries = BTreeMap::<String, TomlDocumentEntry>::new();
+    let mut entries = BTreeMap::new();
     collect_toml_document_entries(
         &current,
         Vec::new(),
         TomlDocumentSide::Current,
         &mut entries,
     );
-    if let Some(default) = &default {
-        collect_toml_document_entries(default, Vec::new(), TomlDocumentSide::Default, &mut entries);
+    if let Some(baseline) = &baseline {
+        collect_toml_document_entries(
+            baseline,
+            Vec::new(),
+            TomlDocumentSide::Baseline,
+            &mut entries,
+        );
     }
 
     let fields = entries
         .into_values()
         .map(|entry| toml_document_entry_field(&spec, &current_edit, entry))
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect();
 
     Ok(ConfigUiTomlDocumentRows {
         list_table: toml_document_list_table(),
@@ -1254,36 +1297,32 @@ fn toml_number_as_f64(value: &TomlValue) -> Option<f64> {
         .or_else(|| value.as_integer().map(|value| value as f64))
 }
 
-#[derive(Debug, Clone)]
-struct TomlDocumentEntry {
+struct TomlDocumentEntry<'a> {
     segments: Vec<String>,
-    current: Option<TomlValue>,
-    default: Option<TomlValue>,
+    current: Option<&'a TomlValue>,
+    baseline: Option<&'a TomlValue>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 enum TomlDocumentSide {
     Current,
-    Default,
+    Baseline,
 }
 
-fn parse_toml_document(raw: &str, label: &str) -> Result<TomlValue, String> {
-    let table = raw
-        .parse::<toml::Table>()
-        .map_err(|source| format!("{label} is invalid TOML: {source}"))?;
-    Ok(TomlValue::Table(table))
+fn parse_toml_document(
+    raw: &str,
+    side: TomlDocumentSide,
+) -> Result<TomlValue, ConfigUiTomlDocumentError> {
+    raw.parse::<toml::Table>()
+        .map(TomlValue::Table)
+        .map_err(|source| ConfigUiTomlDocumentError::new(side, source.to_string()))
 }
 
-fn parse_toml_edit_document(raw: &str, label: &str) -> Result<TomlEditDocument, String> {
-    raw.parse::<TomlEditDocument>()
-        .map_err(|source| format!("{label} is invalid TOML: {source}"))
-}
-
-fn collect_toml_document_entries(
-    value: &TomlValue,
+fn collect_toml_document_entries<'a>(
+    value: &'a TomlValue,
     segments: Vec<String>,
     side: TomlDocumentSide,
-    entries: &mut BTreeMap<String, TomlDocumentEntry>,
+    entries: &mut BTreeMap<String, TomlDocumentEntry<'a>>,
 ) {
     if !segments.is_empty() {
         let display_path = toml_document_display_path(&segments);
@@ -1292,11 +1331,11 @@ fn collect_toml_document_entries(
             .or_insert_with(|| TomlDocumentEntry {
                 segments: segments.clone(),
                 current: None,
-                default: None,
+                baseline: None,
             });
         match side {
-            TomlDocumentSide::Current => entry.current = Some(value.clone()),
-            TomlDocumentSide::Default => entry.default = Some(value.clone()),
+            TomlDocumentSide::Current => entry.current = Some(value),
+            TomlDocumentSide::Baseline => entry.baseline = Some(value),
         }
     }
 
@@ -1313,42 +1352,26 @@ fn collect_toml_document_entries(
 fn toml_document_entry_field(
     spec: &ConfigUiTomlDocumentSpec<'_>,
     current: &TomlEditDocument,
-    entry: TomlDocumentEntry,
-) -> Result<ConfigUiField, String> {
+    entry: TomlDocumentEntry<'_>,
+) -> ConfigUiField {
     let display_path = toml_document_display_path(&entry.segments);
     let path_is_patchable = toml_document_path_is_patchable(current.as_table(), &entry.segments);
     let observed = entry
         .current
-        .as_ref()
-        .or(entry.default.as_ref())
+        .or(entry.baseline)
         .expect("TOML entries are observed in at least one document");
     let type_label = toml_document_type_label(observed);
-    let intent = entry
-        .current
-        .as_ref()
-        .map_or(ConfigUiOverride::Absent, |value| {
-            ConfigUiOverride::Explicit(toml_document_snapshot_value(value))
-        });
-    let state = if entry.current.is_some() {
-        ConfigUiFieldState::Explicit
-    } else {
-        ConfigUiFieldState::Inherited
-    };
-    let current_value = toml_document_render_value(observed);
-    let rendered_default = entry.default.as_ref().map(toml_document_render_value);
-    let default_cell = rendered_default.unwrap_or_else(|| "-".to_string());
     let baseline = entry
-        .default
-        .as_ref()
-        .map(toml_document_snapshot_value)
-        .map(ConfigUiResolvedValue::new);
-    let validation = if spec.validation.trim().is_empty() {
-        "read-only inferred TOML value".to_string()
-    } else {
-        spec.validation.to_string()
+        .baseline
+        .map(|value| ConfigUiResolvedValue::new(toml_document_snapshot_value(value)));
+    let (intent, effective) = match entry.current {
+        Some(value) => (
+            ConfigUiOverride::Explicit(toml_document_snapshot_value(value)),
+            None,
+        ),
+        None => (ConfigUiOverride::Absent, baseline.clone()),
     };
-
-    Ok(ConfigUiField {
+    ConfigUiField {
         source_id: spec.source_id.to_string(),
         path: display_path.clone(),
         display_label: display_path.clone(),
@@ -1357,22 +1380,23 @@ fn toml_document_entry_field(
             toml_document_parent_label(&entry.segments),
             toml_document_key_label(&entry.segments, type_label),
             type_label.to_string(),
-            field_state_label(state).to_string(),
-            current_value,
-            default_cell,
+            override_intent_label(&intent).to_string(),
+            toml_document_render_value(observed),
+            entry
+                .baseline
+                .map(toml_document_render_value)
+                .unwrap_or_default(),
         ],
         tab: spec.tab.to_string(),
         type_label: Some(type_label.to_string()),
         snapshot: ConfigUiFieldSnapshot {
             intent,
-            effective: Some(ConfigUiResolvedValue::new(toml_document_snapshot_value(
-                observed,
-            ))),
+            effective,
             baseline,
             external_manager: None,
         },
         description: toml_document_description(&display_path, type_label, path_is_patchable),
-        validation,
+        validation: spec.validation.to_string(),
         rebuild_required: spec.rebuild_required,
         apply_status: spec.apply_status.clone(),
         capability: ConfigUiCapability::ReadOnly {
@@ -1380,18 +1404,15 @@ fn toml_document_entry_field(
             file_action_id: None,
         },
         can_unset: false,
-    })
+    }
 }
 
 fn toml_document_path_is_patchable(root: &TomlEditTable, segments: &[String]) -> bool {
-    if segments.is_empty()
-        || !segments
+    !segments.is_empty()
+        && segments
             .iter()
             .all(|segment| is_toml_document_bare_key(segment))
-    {
-        return false;
-    }
-    toml_document_parent_path_is_patchable(root, segments)
+        && toml_document_parent_path_is_patchable(root, segments)
 }
 
 fn is_toml_document_bare_key(segment: &str) -> bool {
@@ -1496,12 +1517,11 @@ fn toml_document_description(
     }
 }
 
-pub(crate) fn field_state_label(state: ConfigUiFieldState) -> &'static str {
-    match state {
-        ConfigUiFieldState::Explicit => "explicit",
-        ConfigUiFieldState::Inherited => "default",
-        ConfigUiFieldState::Absent => "unset",
-        ConfigUiFieldState::Invalid => "invalid",
+pub(crate) fn override_intent_label(intent: &ConfigUiOverride) -> &'static str {
+    match intent {
+        ConfigUiOverride::Absent => "absent",
+        ConfigUiOverride::Explicit(_) => "explicit",
+        ConfigUiOverride::Invalid { .. } => "invalid",
     }
 }
 
@@ -1695,21 +1715,27 @@ mod tests {
         apply_status("after save", "Host applies this after saving.")
     }
 
-    fn toml_document_rows(
+    fn toml_document_result(
         current_toml: &str,
-        default_toml: Option<&str>,
-    ) -> ConfigUiTomlDocumentRows {
+        baseline_toml: Option<&str>,
+    ) -> Result<ConfigUiTomlDocumentRows, ConfigUiTomlDocumentError> {
         build_toml_document_fields(ConfigUiTomlDocumentSpec {
             source_id: "native",
             tab: "native",
             section_label: "",
             current_toml,
-            default_toml,
+            baseline_toml,
             validation: "",
             rebuild_required: false,
             apply_status: status(),
         })
-        .expect("toml document rows")
+    }
+
+    fn toml_document_rows(
+        current_toml: &str,
+        baseline_toml: Option<&str>,
+    ) -> ConfigUiTomlDocumentRows {
+        toml_document_result(current_toml, baseline_toml).expect("toml document rows")
     }
 
     fn toml_field<'a>(rows: &'a ConfigUiTomlDocumentRows, path: &str) -> &'a ConfigUiField {
@@ -2501,7 +2527,7 @@ normal = "block"
                 .iter()
                 .map(|column| column.title.as_str())
                 .collect::<Vec<_>>(),
-            vec!["table", "key", "type", "state", "value", "default"]
+            vec!["table", "key", "type", "intent", "value", "baseline"]
         );
 
         let table = &rows.fields[0];
@@ -2516,10 +2542,6 @@ normal = "block"
                 r#"{"cursor-shape":{"normal":"block"},"line-number":"absolute","plugins":["git"],"true-color":true}"#,
             ]
         );
-        assert!(matches!(
-            table.capability,
-            ConfigUiCapability::ReadOnly { .. }
-        ));
 
         let line_number = toml_field(&rows, "editor.line-number");
         assert_eq!(line_number.type_label.as_deref(), Some("string"));
@@ -2539,15 +2561,88 @@ normal = "block"
             field_baseline_display_value(line_number).as_deref(),
             Some("\"absolute\"")
         );
-        assert!(matches!(
-            line_number.capability,
-            ConfigUiCapability::ReadOnly { .. }
-        ));
     }
 
-    // Defends: default TOML documents can supply defaulted rows without a host schema.
+    // Defends: document presence supplies intent and baseline evidence without claiming that an
+    // explicit literal is the value the application will actually use.
     #[test]
-    fn toml_document_helper_marks_defaulted_and_structured_rows() {
+    fn toml_document_helper_keeps_explicit_resolution_unknown() {
+        let rows = toml_document_rows(
+            "current_only = 1\nboth = 2\nequal = 3",
+            Some("both = 4\nequal = 3\nbaseline_only = 5"),
+        );
+
+        for (path, intent, baseline) in [
+            ("current_only", json!(1), None),
+            ("both", json!(2), Some(json!(4))),
+            ("equal", json!(3), Some(json!(3))),
+        ] {
+            let field = toml_field(&rows, path);
+            assert_eq!(field.snapshot.intent, ConfigUiOverride::Explicit(intent));
+            assert_eq!(field.snapshot.effective, None);
+            assert_eq!(
+                field.snapshot.baseline,
+                baseline.map(ConfigUiResolvedValue::new)
+            );
+        }
+        assert_eq!(
+            &toml_field(&rows, "current_only").list_cells[3..],
+            ["explicit", "1", ""]
+        );
+
+        let baseline_only = toml_field(&rows, "baseline_only");
+        let inherited = ConfigUiResolvedValue::new(json!(5));
+        assert_eq!(baseline_only.snapshot.intent, ConfigUiOverride::Absent);
+        assert_eq!(baseline_only.snapshot.effective.as_ref(), Some(&inherited));
+        assert_eq!(baseline_only.snapshot.baseline.as_ref(), Some(&inherited));
+        assert_eq!(&baseline_only.list_cells[3..], ["absent", "5", "5"]);
+
+        assert!(rows.fields.iter().all(|field| {
+            matches!(
+                field.capability,
+                ConfigUiCapability::ReadOnly {
+                    file_action_id: None,
+                    ..
+                }
+            ) && !field.can_unset
+        }));
+    }
+
+    // Defends: hosts can route whole-document parse failures without scraping an opaque string.
+    #[test]
+    fn toml_document_errors_preserve_parser_message_and_document_side() {
+        let invalid = "value = [";
+        let message = invalid.parse::<toml::Table>().unwrap_err().to_string();
+
+        let current = toml_document_result(invalid, None).expect_err("invalid current document");
+        assert_eq!(
+            current,
+            ConfigUiTomlDocumentError::Current {
+                message: message.clone()
+            }
+        );
+        assert_eq!(
+            current.to_string(),
+            format!("current TOML document is invalid: {message}")
+        );
+
+        let baseline = toml_document_result("value = 1", Some(invalid))
+            .expect_err("invalid baseline document");
+        assert_eq!(
+            baseline,
+            ConfigUiTomlDocumentError::Baseline {
+                message: message.clone()
+            }
+        );
+        assert_eq!(
+            baseline.to_string(),
+            format!("baseline TOML document is invalid: {message}")
+        );
+    }
+
+    // Defends: baseline TOML can supply inherited rows without claiming a complete schema.
+    #[test]
+    fn toml_document_helper_marks_baseline_only_and_structured_rows() {
         let rows = toml_document_rows(
             r#"
 [editor]
@@ -2580,7 +2675,7 @@ rulers = [80]
                 "editor",
                 "line-number",
                 "string",
-                "default",
+                "absent",
                 "\"relative\"",
                 "\"relative\""
             ]
@@ -2594,46 +2689,31 @@ rulers = [80]
             Some("[80]")
         );
         assert_eq!(rulers.list_cells[5], "[80]");
-        assert_eq!(rulers.validation, "read-only inferred TOML value");
-        assert!(matches!(
-            rulers.capability,
-            ConfigUiCapability::ReadOnly { .. }
-        ));
+        assert!(rulers.validation.is_empty());
 
         let limits = toml_field(&rows, "editor.limits");
         assert_eq!(field_list_value(limits), "[inf, -inf, nan]");
 
         let limit = toml_field(&rows, "editor.limit");
         assert_eq!(field_list_value(limit), "inf");
-        assert!(matches!(
-            limit.capability,
-            ConfigUiCapability::ReadOnly { .. }
-        ));
     }
 
     // Defends: host validation text remains display metadata without authorizing inferred rows.
     #[test]
-    fn toml_document_helper_preserves_read_only_validation_for_complex_rows() {
+    fn toml_document_helper_keeps_host_validation_separate_from_edit_authority() {
         let rows = build_toml_document_fields(ConfigUiTomlDocumentSpec {
             source_id: "native",
             tab: "native",
             section_label: "Editor",
-            current_toml: r#"
-[editor]
-line-number = "relative"
-rulers = [80, 100]
-"#,
-            default_toml: None,
+            current_toml: "rulers = [80, 100]",
+            baseline_toml: None,
             validation: "host validates before writing",
             rebuild_required: false,
             apply_status: status(),
         })
         .expect("toml document rows");
 
-        let line_number = toml_field(&rows, "editor.line-number");
-        assert_eq!(line_number.validation, "host validates before writing");
-
-        let rulers = toml_field(&rows, "editor.rulers");
+        let rulers = toml_field(&rows, "rulers");
         assert_eq!(rulers.validation, "host validates before writing");
         assert!(matches!(
             rulers.capability,
@@ -2643,7 +2723,7 @@ rulers = [80, 100]
 
     // Defends: quoted or otherwise non-dotted TOML paths remain inspectable instead of becoming unsafe edit routes.
     #[test]
-    fn toml_document_helper_renders_unpatchable_paths_as_read_only() {
+    fn toml_document_helper_explains_unpatchable_quoted_paths() {
         let rows = toml_document_rows(
             r#"
 "weird.key" = "value"
@@ -2673,15 +2753,12 @@ rulers = [80, 100]
                 "\"default\""
             ]
         );
-        assert!(matches!(
-            field.capability,
-            ConfigUiCapability::ReadOnly { .. }
-        ));
+        assert!(field.description.contains("edit the source file directly."));
     }
 
     // Defends: inline table children are not advertised as editable when the TOML patcher cannot patch through the parent.
     #[test]
-    fn toml_document_helper_keeps_inline_table_children_read_only() {
+    fn toml_document_helper_explains_unpatchable_inline_table_children() {
         let rows = toml_document_rows(
             r#"
 package = { name = "ratconfig", enabled = true }
@@ -2692,17 +2769,12 @@ package = { name = "ratconfig", enabled = true }
         let name = toml_field(&rows, "package.name");
         assert_eq!(name.type_label.as_deref(), Some("string"));
         assert_eq!(field_list_value(name), "\"ratconfig\"");
-        assert_eq!(field_baseline_display_value(name), None);
-        assert_eq!(name.validation, "read-only inferred TOML value");
-        assert!(matches!(
-            name.capability,
-            ConfigUiCapability::ReadOnly { .. }
-        ));
+        assert!(name.description.contains("edit the source file directly."));
     }
 
-    // Defends: inferred TOML syntax remains display-only, including string lists.
+    // Defends: syntactic string-list classification remains display-only.
     #[test]
-    fn toml_document_helper_infers_only_non_empty_string_lists() {
+    fn toml_document_helper_classifies_string_lists_without_edit_authority() {
         let rows = toml_document_rows(
             r#"
 [shell]
@@ -2722,10 +2794,6 @@ empty = []
 
         let empty = toml_field(&rows, "shell.empty");
         assert_eq!(empty.type_label.as_deref(), Some("array"));
-        assert!(matches!(
-            empty.capability,
-            ConfigUiCapability::ReadOnly { .. }
-        ));
     }
 
     // Defends: host section labels remain presentation metadata while search preserves real field order and identity.

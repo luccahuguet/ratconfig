@@ -30,8 +30,8 @@ pub use model::{
     ConfigUiListColumn, ConfigUiListTable, ConfigUiMetadata, ConfigUiModel, ConfigUiNativeStatus,
     ConfigUiOverride, ConfigUiResolvedValue, ConfigUiSchemaField, ConfigUiSettingsView,
     ConfigUiSidecar, ConfigUiSource, ConfigUiTextEncoding, ConfigUiTheme, ConfigUiThemeMapping,
-    ConfigUiThemeSwitcher, ConfigUiTomlDocumentRows, ConfigUiTomlDocumentSpec,
-    DEFAULT_CONFIG_SOURCE_ID,
+    ConfigUiThemeSwitcher, ConfigUiTomlDocumentError, ConfigUiTomlDocumentRows,
+    ConfigUiTomlDocumentSpec, DEFAULT_CONFIG_SOURCE_ID,
 };
 pub use model::{
     UiRowRef, build_toml_document_fields, collect_config_ui_schema_fields,

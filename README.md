@@ -258,23 +258,27 @@ fn patch_sections_toml(raw: &str, value: &Value) -> Result<String, TomlPatchErro
 
 ## Arbitrary TOML Documents
 
-Use `build_toml_document_fields` when a host-owned TOML file should be inspectable without declaring every field in a schema. The helper parses the current TOML text, optionally parses default TOML text, and returns ordinary `ConfigUiField` rows plus a `ConfigUiListTable` profile for the tab
+Use `build_toml_document_fields` when a host-owned TOML file should be inspectable without declaring every field in a schema. The helper parses current TOML evidence and an optional host-asserted baseline document, then returns read-only `ConfigUiField` rows plus an `intent | value | baseline` table profile. Current-document entries are explicit but have unknown effective resolution; baseline-only entries are inherited because the host has asserted the value that remains after removing this source override. Parse failures return `ConfigUiTomlDocumentError::Current` or `Baseline` with the original parser message
 
 ```rust
 use ratconfig::{
-    ConfigUiApplyStatus, ConfigUiModel, ConfigUiTomlDocumentSpec,
+    ConfigUiApplyStatus, ConfigUiModel, ConfigUiTomlDocumentError, ConfigUiTomlDocumentSpec,
     build_toml_document_fields,
     toml_adapter::{TomlPatchError, set_toml_value_text},
 };
 use serde_json::Value;
 
-fn add_native_toml_rows(model: &mut ConfigUiModel, raw: &str, default_raw: &str) -> Result<(), String> {
+fn add_native_toml_rows(
+    model: &mut ConfigUiModel,
+    raw: &str,
+    baseline_raw: &str,
+) -> Result<(), ConfigUiTomlDocumentError> {
     let document = build_toml_document_fields(ConfigUiTomlDocumentSpec {
         source_id: "helix-config",
         tab: "helix",
         section_label: "Editor settings",
         current_toml: raw,
-        default_toml: Some(default_raw),
+        baseline_toml: Some(baseline_raw),
         validation: "host validates before writing",
         rebuild_required: false,
         apply_status: ConfigUiApplyStatus {
@@ -295,7 +299,7 @@ fn patch_native_toml(raw: &str, path: &str, value: &Value) -> Result<String, Tom
 }
 ```
 
-The generated rows include tables, scalar leaves, arrays, sparse intent/effective/baseline snapshots, deterministic table/key ordering, and compact previews of complete structured values. Inferred rows are inspection-only because TOML syntax is not enough evidence to grant edit authority. A host can replace an inferred row's capability with one backed by its schema and validation policy
+The generated rows include tables, scalar leaves, arrays, sparse intent/effective/baseline snapshots, deterministic table/key ordering, and compact previews of complete structured values. Inferred rows are inspection-only because TOML syntax is not enough evidence to grant edit authority or choose a file action. A host can replace the capability when its schema and validation policy authorize editing, or attach an exact file action while keeping the row read-only
 
 To route a read-only field to a source file, declare `ReadOnly { file_action_id: Some(action_id), .. }` and provide exactly one file action with the same source id and action id. Ratconfig does not guess from tab membership or from other actions owned by the source. Disabled actions remain unavailable
 
@@ -531,6 +535,7 @@ Before cutting a release:
 - `ConfigUiSource` is unique by id and independent of tabs, selected rows drive source headers, and `operational_tab` replaces reserved-name routing for diagnostics and status rows
 - `ConfigUiDiagnostic` adds required global/source/field scope, and effective field validity is derived from matching blocking diagnostics instead of a duplicate field-spec flag
 - Built-in rows and details present invalid input, sparse override intent, effective resolution, baseline resolution, origins, external management, and reset-to-inherited behavior without relabeling intent when a blocking diagnostic applies; custom detail callbacks resolve rows through `ConfigUiApp::resolve_row`
+- Inferred TOML rows use host-asserted `baseline_toml`, expose `intent | value | baseline`, leave explicit effective resolution unknown, remain read-only without an exact host capability, and return typed current/baseline parse errors
 - `ConfigUiEditState` adds a required grapheme-boundary cursor; `ConfigUiKey` adds Home, End, Delete, and owned paste input and is no longer `Copy`
 - Free-form fields use `Enter` for cursor-aware single-line editing and normal-mode `e` for the host-owned external editor; choice controls remain native
 - The outer-borderless body uses padded content, a single center divider, and an inset tab separator

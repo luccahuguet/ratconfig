@@ -2,7 +2,7 @@
 use super::*;
 use crate::model::{
     ConfigUiFieldState, field_counts_for_tab, field_list_value, field_projected_json_value,
-    render_field_edit_value, visible_rows_for_tab_search,
+    override_intent_label, render_field_edit_value, visible_rows_for_tab_search,
 };
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
@@ -947,18 +947,17 @@ pub fn default_field_detail_lines(field: &ConfigUiField) -> Vec<Line<'static>> {
 
 fn field_detail_lines(field: &ConfigUiField) -> Vec<Line<'static>> {
     let mut lines = field_title_lines(field);
+    lines.push(detail_line(
+        "intent",
+        override_intent_label(&field.snapshot.intent),
+    ));
     let override_value = match &field.snapshot.intent {
-        ConfigUiOverride::Absent => {
-            lines.push(detail_line("intent", "absent"));
-            None
-        }
+        ConfigUiOverride::Absent => None,
         ConfigUiOverride::Explicit(value) => {
-            lines.push(detail_line("intent", "explicit"));
             lines.extend(json_detail_lines("override", field, value));
             Some(value)
         }
         ConfigUiOverride::Invalid { input } => {
-            lines.push(detail_line("intent", "invalid"));
             let value = field_detail_value(field, input, None);
             lines.extend(field_detail_value_lines("input", &value));
             None
@@ -2504,7 +2503,7 @@ mod tests {
             tab: "native",
             section_label: "",
             current_toml: "limits = [inf, -inf, nan]",
-            default_toml: Some("limits = [nan]"),
+            baseline_toml: Some("limits = [nan]"),
             validation: "",
             rebuild_required: false,
             apply_status: apply_status("after save", "Applied after saving."),
@@ -2518,7 +2517,7 @@ mod tests {
         let special_details = detail_text(field);
 
         assert!(special_details.contains("override   \n  [inf, -inf, nan]"));
-        assert!(special_details.contains("effective  same as override"));
+        assert!(!special_details.contains("effective  "));
         assert!(special_details.contains("baseline   \n  [nan]"));
     }
 

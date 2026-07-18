@@ -2027,7 +2027,7 @@ theme = "light"
 [editor]
 line-number = "relative"
 "#,
-            default_toml: None,
+            baseline_toml: None,
             validation: "",
             rebuild_required: false,
             apply_status: after_save_status(),
