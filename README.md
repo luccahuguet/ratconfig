@@ -524,7 +524,7 @@ Before cutting a release:
 - tag the release as `vX.Y.Z` after the version commit is ready
 - update downstream pinned-git consumers such as main Yazelix after the Ratconfig commit or tag is pushed
 
-### 6.0.0 (unreleased)
+### 6.0.0
 
 - `ConfigUiModel::recommended_fields` and `ConfigUiSettingsView::Overview` replace the previous focused allowlist and view; Overview combines recommendations with fields that are explicit, locally invalid, externally managed, or named by exact diagnostics, while All remains the complete inventory
 - `ConfigUiFieldSnapshot` separates absent/explicit/invalid override intent from optional effective and baseline resolutions, provenance, and external-management labels; the parallel string value fields and sentinel defaults are absent from the model
