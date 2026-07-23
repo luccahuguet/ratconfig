@@ -7,7 +7,9 @@
 //! persistence, model reloads, notices, and post-save apply behavior through
 //! the intent callback.
 
-use crate::{ConfigUiApp, ConfigUiIntent, ConfigUiKey, UiRowRef, draw_config_ui_with_details};
+use crate::{
+    ConfigUiApp, ConfigUiIntent, ConfigUiKey, UiRowRef, draw_config_ui, draw_config_ui_with_details,
+};
 use ratatui::crossterm::{
     event::{
         self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
@@ -15,7 +17,7 @@ use ratatui::crossterm::{
     },
     execute,
 };
-use ratatui::{DefaultTerminal, text::Line};
+use ratatui::{Frame, text::Line};
 use std::{error::Error, fmt, io};
 
 #[derive(Debug)]
@@ -89,52 +91,51 @@ pub fn run_config_ui<HostError>(
     app: &mut ConfigUiApp,
     handle_intent: impl FnMut(&mut ConfigUiApp, ConfigUiIntent) -> Result<(), HostError>,
 ) -> Result<(), CrosstermRunnerError<HostError>> {
-    run_config_ui_with_details(app, ConfigUiApp::render_details, handle_intent)
+    run_config_ui_impl(app, draw_config_ui, handle_intent)
 }
 
 pub fn run_config_ui_with_details<DetailLines, HandleIntent, HostError>(
     app: &mut ConfigUiApp,
     detail_lines: DetailLines,
-    mut handle_intent: HandleIntent,
+    handle_intent: HandleIntent,
 ) -> Result<(), CrosstermRunnerError<HostError>>
 where
     DetailLines: Fn(&ConfigUiApp, UiRowRef) -> Vec<Line<'static>>,
     HandleIntent: FnMut(&mut ConfigUiApp, ConfigUiIntent) -> Result<(), HostError>,
 {
+    run_config_ui_impl(
+        app,
+        |frame, app| draw_config_ui_with_details(frame, app, &detail_lines),
+        handle_intent,
+    )
+}
+
+fn run_config_ui_impl<HostError>(
+    app: &mut ConfigUiApp,
+    mut draw: impl FnMut(&mut Frame<'_>, &mut ConfigUiApp),
+    mut handle_intent: impl FnMut(&mut ConfigUiApp, ConfigUiIntent) -> Result<(), HostError>,
+) -> Result<(), CrosstermRunnerError<HostError>> {
     let mut terminal = ratatui::try_init().inspect_err(|_| {
         let _ = ratatui::try_restore();
     })?;
     execute!(io::stdout(), EnableBracketedPaste).inspect_err(|_| {
         let _ = ratatui::try_restore();
     })?;
-    let run_result = run_config_ui_terminal(&mut terminal, app, detail_lines, &mut handle_intent);
-    let paste_restore_result = execute!(io::stdout(), DisableBracketedPaste);
-    let restore_result = ratatui::try_restore();
-
-    run_result?;
-    paste_restore_result?;
-    restore_result.map_err(CrosstermRunnerError::from)
-}
-
-fn run_config_ui_terminal<DetailLines, HandleIntent, HostError>(
-    terminal: &mut DefaultTerminal,
-    app: &mut ConfigUiApp,
-    detail_lines: DetailLines,
-    handle_intent: &mut HandleIntent,
-) -> Result<(), CrosstermRunnerError<HostError>>
-where
-    DetailLines: Fn(&ConfigUiApp, UiRowRef) -> Vec<Line<'static>>,
-    HandleIntent: FnMut(&mut ConfigUiApp, ConfigUiIntent) -> Result<(), HostError>,
-{
-    loop {
-        terminal.draw(|frame| draw_config_ui_with_details(frame, app, &detail_lines))?;
+    let run_result: Result<_, CrosstermRunnerError<HostError>> = (|| loop {
+        terminal.draw(|frame| draw(frame, app))?;
         let intent = handle_crossterm_event(app, event::read()?);
         match intent {
             ConfigUiIntent::None => {}
             ConfigUiIntent::Exit => return Ok(()),
             intent => handle_intent(app, intent).map_err(CrosstermRunnerError::Host)?,
         }
-    }
+    })();
+    let paste_restore_result = execute!(io::stdout(), DisableBracketedPaste);
+    let restore_result = ratatui::try_restore();
+
+    run_result?;
+    paste_restore_result?;
+    restore_result.map_err(CrosstermRunnerError::from)
 }
 
 #[cfg(test)]

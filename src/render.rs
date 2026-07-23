@@ -106,6 +106,14 @@ struct HeaderMetadata {
 
 impl ConfigUiApp {
     pub fn render_details(&self, row: UiRowRef) -> Vec<Line<'static>> {
+        self.render_details_for_viewport(row, None)
+    }
+
+    fn render_details_for_viewport(
+        &self,
+        row: UiRowRef,
+        viewport: Option<Rect>,
+    ) -> Vec<Line<'static>> {
         match self.resolve_row(row) {
             Some(ConfigUiRow::Field(field)) => {
                 let mut lines = match self
@@ -113,11 +121,26 @@ impl ConfigUiApp {
                     .as_ref()
                     .filter(|edit| field.matches_id(&edit.field_id))
                 {
+                    Some(edit)
+                        if edit.mode == ConfigUiEditMode::Choice && is_choice_picker(field) =>
+                    {
+                        choice_detail_lines_for_viewport(
+                            single_choice_detail_lines(field, edit),
+                            capability_choices(field).len(),
+                            edit.choice_index,
+                            viewport,
+                        )
+                    }
                     Some(edit) if edit.mode == ConfigUiEditMode::Choice => {
                         single_choice_detail_lines(field, edit)
                     }
                     Some(edit) if edit.mode == ConfigUiEditMode::MultiChoice => {
-                        multi_choice_detail_lines(field, edit)
+                        choice_detail_lines_for_viewport(
+                            multi_choice_detail_lines(field, edit),
+                            edit_choices(field, &edit.input).len(),
+                            edit.choice_index,
+                            viewport,
+                        )
                     }
                     _ if matches!(
                         field.capability,
@@ -144,13 +167,23 @@ impl ConfigUiApp {
 }
 
 pub fn draw_config_ui(frame: &mut Frame<'_>, app: &mut ConfigUiApp) {
-    draw_config_ui_with_details(frame, app, ConfigUiApp::render_details);
+    draw_config_ui_impl(frame, app, |app, row, viewport| {
+        app.render_details_for_viewport(row, Some(viewport))
+    });
 }
 
 pub fn draw_config_ui_with_details(
     frame: &mut Frame<'_>,
     app: &mut ConfigUiApp,
     detail_lines: impl Fn(&ConfigUiApp, UiRowRef) -> Vec<Line<'static>>,
+) {
+    draw_config_ui_impl(frame, app, |app, row, _| detail_lines(app, row));
+}
+
+fn draw_config_ui_impl(
+    frame: &mut Frame<'_>,
+    app: &mut ConfigUiApp,
+    detail_lines: impl Fn(&ConfigUiApp, UiRowRef, Rect) -> Vec<Line<'static>>,
 ) {
     let area = frame.area();
     let [header, tabs, separator, body, footer] = Layout::vertical([
@@ -368,7 +401,7 @@ fn render_body(
     frame: &mut Frame<'_>,
     app: &mut ConfigUiApp,
     area: Rect,
-    detail_lines: &impl Fn(&ConfigUiApp, UiRowRef) -> Vec<Line<'static>>,
+    detail_lines: &impl Fn(&ConfigUiApp, UiRowRef, Rect) -> Vec<Line<'static>>,
 ) {
     let [settings_area, divider_area, details_area] = Layout::horizontal([
         Constraint::Fill(1),
@@ -617,16 +650,16 @@ fn render_details(
     app: &ConfigUiApp,
     area: Rect,
     row: Option<UiRowRef>,
-    detail_lines: &impl Fn(&ConfigUiApp, UiRowRef) -> Vec<Line<'static>>,
+    detail_lines: &impl Fn(&ConfigUiApp, UiRowRef, Rect) -> Vec<Line<'static>>,
 ) {
+    let (title_area, content_area) = pane_areas(area);
     let lines = match row {
-        Some(row) => detail_lines(app, row),
+        Some(row) => detail_lines(app, row, content_area),
         None => vec![Line::from(Span::styled(
             empty_settings_message(app),
             fg_style(Color::Gray),
         ))],
     };
-    let (title_area, content_area) = pane_areas(area);
     frame.render_widget(
         Paragraph::new(themed_line(Line::from("details"), app.active_theme)),
         title_area,
@@ -1200,6 +1233,130 @@ pub fn multi_choice_detail_lines(
     }
 
     lines
+}
+
+fn choice_detail_lines_for_viewport(
+    mut lines: Vec<Line<'static>>,
+    option_count: usize,
+    focused_index: usize,
+    viewport: Option<Rect>,
+) -> Vec<Line<'static>> {
+    let Some(viewport) = viewport else {
+        return lines;
+    };
+    let content_height = usize::from(viewport.height);
+    let content_width = usize::from(viewport.width);
+    if option_count == 0
+        || Paragraph::new(lines.clone())
+            .wrap(Wrap { trim: false })
+            .line_count(viewport.width)
+            <= content_height
+    {
+        return lines;
+    }
+    for line in &mut lines {
+        truncate_line(line, content_width);
+    }
+
+    let options = lines.split_off(lines.len() - option_count);
+    if lines.last().is_some_and(empty_line) {
+        lines.pop();
+    }
+    while lines.len() >= content_height {
+        let Some(index) = lines.iter().rposition(empty_line) else {
+            break;
+        };
+        lines.remove(index);
+    }
+
+    let available = content_height.saturating_sub(lines.len());
+    if options.len() <= available {
+        lines.extend(options);
+        return lines;
+    }
+
+    let focused_index = focused_index.min(options.len() - 1);
+    if available == 0 {
+        lines.truncate(content_height);
+        if let Some(context) = lines.last_mut() {
+            context.spans.insert(0, choice_overflow_span(false, true));
+            context.spans.insert(1, Span::raw(" "));
+            truncate_line(context, content_width);
+        }
+        return lines;
+    }
+    if available == 1 {
+        let mut focused = options
+            .into_iter()
+            .nth(focused_index)
+            .expect("focused choice");
+        focused.spans.insert(
+            2,
+            choice_overflow_span(focused_index > 0, focused_index + 1 < option_count),
+        );
+        focused.spans.insert(3, Span::raw(" "));
+        truncate_line(&mut focused, content_width);
+        lines.push(focused);
+        return lines;
+    }
+
+    let capacity = available - 1;
+    let start = (focused_index + 1)
+        .saturating_sub(capacity)
+        .min(option_count - capacity);
+    let end = start + capacity;
+    let above = start > 0;
+    let below = end < option_count;
+    if above {
+        lines.push(choice_overflow_line(true, below, content_width));
+    }
+    lines.extend(options.into_iter().skip(start).take(capacity));
+    if below && !above {
+        lines.push(choice_overflow_line(false, true, content_width));
+    }
+    lines
+}
+
+fn empty_line(line: &Line<'_>) -> bool {
+    line.spans.iter().all(|span| span.content.is_empty())
+}
+
+fn choice_overflow_line(above: bool, below: bool, width: usize) -> Line<'static> {
+    let mut line = Line::from(choice_overflow_span(above, below));
+    truncate_line(&mut line, width);
+    line
+}
+
+fn choice_overflow_span(above: bool, below: bool) -> Span<'static> {
+    Span::styled(
+        match (above, below) {
+            (true, true) => "  ↑ more · ↓ more",
+            (true, false) => "  ↑ more",
+            (false, _) => "  ↓ more",
+        },
+        fg_style(Color::Gray),
+    )
+}
+
+fn truncate_line(line: &mut Line<'static>, width: usize) {
+    let mut remaining = width;
+    for index in 0..line.spans.len() {
+        let span_width = line.spans[index].width();
+        if span_width > remaining {
+            line.spans[index].content = if remaining == 1 && line.spans[index].content == "> " {
+                ">".into()
+            } else {
+                truncate_cells(&line.spans[index].content, remaining).into()
+            };
+            line.spans.truncate(index + 1);
+            return;
+        }
+        remaining -= span_width;
+        if remaining == 0 {
+            line.spans.truncate(index + 1);
+            return;
+        }
+    }
 }
 
 fn choice_option_line(
@@ -2890,6 +3047,124 @@ mod tests {
             rendered_text(&edit_control_line(field, ConfigUiEditMode::MultiChoice))
                 .contains("J/K reorder")
         );
+    }
+
+    // Defends: long choice editors keep their logical cursor and pinned context visible as focus
+    // moves, wraps, changes picker kind, and is recomputed for a shorter terminal.
+    #[test]
+    fn choice_picker_viewport_follows_focus() {
+        const CHOICES: &[&str] = &[
+            "zero", "one", "two", "three", "four", "five", "six", "seven",
+        ];
+        let mut app = ConfigUiApp::new(model_with_fields(vec![field(
+            "ui.theme", "string", "zero", CHOICES,
+        )]));
+        assert_eq!(app.handle_key(ConfigUiKey::Enter), ConfigUiIntent::None);
+        let mut terminal = Terminal::new(TestBackend::new(72, 16)).expect("test terminal");
+
+        let initial = render_app(&mut terminal, &mut app);
+        assert!(initial.contains("selected"));
+        assert!(initial.contains("> (x) zero"));
+        assert!(initial.contains("↓ more"));
+
+        for choice in CHOICES.iter().skip(1) {
+            app.handle_key(ConfigUiKey::Down);
+            let screen = render_app(&mut terminal, &mut app);
+            assert!(screen.contains("selected"));
+            assert!(screen.contains(&format!("> ( ) {choice}")));
+        }
+        assert!(render_app(&mut terminal, &mut app).contains("↑ more"));
+
+        for (index, choice) in CHOICES[..CHOICES.len() - 1].iter().enumerate().rev() {
+            app.handle_key(ConfigUiKey::Up);
+            let marker = if index == 0 { "(x)" } else { "( )" };
+            assert!(render_app(&mut terminal, &mut app).contains(&format!("> {marker} {choice}")));
+        }
+        app.handle_key(ConfigUiKey::Up);
+        assert!(render_app(&mut terminal, &mut app).contains("> ( ) seven"));
+        app.handle_key(ConfigUiKey::Down);
+        let wrapped_first = render_app(&mut terminal, &mut app);
+        assert!(wrapped_first.contains("> (x) zero"));
+        assert!(wrapped_first.contains("↓ more"));
+        for _ in 0..4 {
+            app.handle_key(ConfigUiKey::Down);
+        }
+        terminal.backend_mut().resize(72, 14);
+        let resized = render_app(&mut terminal, &mut app);
+        assert!(resized.contains("selected"));
+        assert!(resized.contains("> ( ) four"));
+        assert!(resized.contains("↑ more"));
+        assert!(resized.contains("↓ more"));
+
+        terminal.backend_mut().resize(72, 10);
+        let cramped = render_app(&mut terminal, &mut app);
+        assert!(cramped.contains("selected"));
+        assert!(cramped.contains("> ( ) four"));
+        terminal.backend_mut().resize(72, 14);
+
+        let mut multi_app = ConfigUiApp::new(model_with_fields(vec![field(
+            "ui.widgets",
+            "string_list",
+            r#"["zero","two"]"#,
+            CHOICES,
+        )]));
+        multi_app.handle_key(ConfigUiKey::Enter);
+        multi_app.handle_key(ConfigUiKey::Down);
+        let distinct_markers = render_app(&mut terminal, &mut multi_app);
+        assert!(distinct_markers.contains("  [x] zero"));
+        assert!(distinct_markers.contains("> [ ] one"));
+        for _ in 0..3 {
+            multi_app.handle_key(ConfigUiKey::Down);
+        }
+        let followed_multi = render_app(&mut terminal, &mut multi_app);
+        assert!(followed_multi.contains("enabled"));
+        assert!(followed_multi.contains("> [ ] four"));
+
+        let mut ordered_field = field("ui.widgets", "string_list", r#"["zero","two"]"#, CHOICES);
+        ordered_field.display_label = "Widgets".to_string();
+        let ConfigUiCapability::MultiChoice { ordered, .. } = &mut ordered_field.capability else {
+            panic!("multichoice field");
+        };
+        *ordered = true;
+        let mut ordered_app = ConfigUiApp::new(model_with_fields(vec![ordered_field]));
+        ordered_app.handle_key(ConfigUiKey::Enter);
+        terminal.backend_mut().resize(72, 11);
+        let one_option_row = render_app(&mut terminal, &mut ordered_app);
+        assert!(one_option_row.contains("> [x]   ↓ more zero"));
+        assert!(!one_option_row.contains("↑ more"));
+
+        const LONG_CHOICES: &[&str] = &[
+            "this-choice-label-is-deliberately-long-enough-to-wrap-several-times-zero",
+            "this-choice-label-is-deliberately-long-enough-to-wrap-several-times-one",
+            "this-choice-label-is-deliberately-long-enough-to-wrap-several-times-two",
+            "this-choice-label-is-deliberately-long-enough-to-wrap-several-times-three",
+            "this-choice-label-is-deliberately-long-enough-to-wrap-several-times-four",
+        ];
+        let mut narrow_app = ConfigUiApp::new(model_with_fields(vec![field(
+            "ui.theme",
+            "string",
+            LONG_CHOICES[0],
+            LONG_CHOICES,
+        )]));
+        narrow_app.handle_key(ConfigUiKey::Enter);
+        for _ in 0..4 {
+            narrow_app.handle_key(ConfigUiKey::Down);
+        }
+        terminal.backend_mut().resize(40, 14);
+        assert!(render_app(&mut terminal, &mut narrow_app).contains("> ( ) this"));
+        terminal.backend_mut().resize(7, 14);
+        assert!(render_app(&mut terminal, &mut narrow_app).contains('>'));
+
+        let field = app.active_edit_field().expect("edited choice field");
+        let edit = app.edit().expect("choice edit");
+        let tiny = choice_detail_lines_for_viewport(
+            single_choice_detail_lines(field, edit),
+            CHOICES.len(),
+            edit.choice_index,
+            Some(Rect::new(0, 0, 20, 1)),
+        );
+        assert_eq!(tiny.len(), 1);
+        assert!(rendered_text(&tiny[0]).contains("↓ more"));
     }
 
     // Defends: text edit controls expose the host-owned external editor path without changing picker controls.

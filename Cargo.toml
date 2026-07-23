@@ -17,4 +17,4 @@ unicode-segmentation = "1.13.3"
 [features]
 default = ["ui"]
 crossterm-runner = ["ui", "ratatui/crossterm"]
-ui = ["dep:ratatui"]
+ui = ["dep:ratatui", "ratatui/unstable-rendered-line-info"]
