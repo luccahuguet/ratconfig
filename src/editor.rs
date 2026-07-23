@@ -28,6 +28,7 @@ pub struct ConfigUiApp {
     pub(crate) search_active: bool,
     pub(crate) edit: Option<ConfigUiEditState>,
     pub(crate) notice: Option<ConfigUiNotice>,
+    pub(crate) shortcut_help_scroll: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,6 +206,7 @@ impl ConfigUiApp {
             search_active: false,
             edit: None,
             notice: None,
+            shortcut_help_scroll: None,
         })
     }
 
@@ -543,6 +545,10 @@ impl ConfigUiApp {
     }
 
     pub fn handle_key(&mut self, key: ConfigUiKey) -> ConfigUiIntent {
+        if self.shortcut_help_scroll.is_some() {
+            self.handle_shortcut_help_key(key);
+            return ConfigUiIntent::None;
+        }
         if self.edit.is_some() {
             return self.handle_edit_key(key);
         }
@@ -551,6 +557,19 @@ impl ConfigUiApp {
             return ConfigUiIntent::None;
         }
         self.handle_normal_key(key)
+    }
+
+    fn handle_shortcut_help_key(&mut self, key: ConfigUiKey) {
+        self.shortcut_help_scroll = match key {
+            ConfigUiKey::Esc | ConfigUiKey::Char('?') => None,
+            ConfigUiKey::Down | ConfigUiKey::Char('j') => self
+                .shortcut_help_scroll
+                .map(|scroll| scroll.saturating_add(1)),
+            ConfigUiKey::Up | ConfigUiKey::Char('k') => self
+                .shortcut_help_scroll
+                .map(|scroll| scroll.saturating_sub(1)),
+            _ => self.shortcut_help_scroll,
+        };
     }
 
     fn begin_edit_field(&mut self, field_index: usize) {
@@ -640,6 +659,10 @@ impl ConfigUiApp {
 
     fn handle_normal_key(&mut self, key: ConfigUiKey) -> ConfigUiIntent {
         match key {
+            ConfigUiKey::Char('?') => {
+                self.shortcut_help_scroll = Some(0);
+                ConfigUiIntent::None
+            }
             ConfigUiKey::Esc if !self.search.is_empty() => {
                 self.search.clear();
                 self.clamp_selection();
@@ -2546,7 +2569,8 @@ line-number = "relative"
         assert!(!app.can_unset_field(&app.model.fields[0]));
         assert_eq!(app.handle_key(ConfigUiKey::Char('u')), ConfigUiIntent::None);
         assert_eq!(app.handle_key(ConfigUiKey::Char('2')), ConfigUiIntent::None);
-        assert_eq!(app.search, "u2");
+        assert_eq!(app.handle_key(ConfigUiKey::Char('?')), ConfigUiIntent::None);
+        assert_eq!(app.search, "u2?");
         assert_eq!(app.selected_tab, 0);
 
         app.search_active = false;
@@ -2556,8 +2580,57 @@ line-number = "relative"
         assert_eq!(app.handle_key(ConfigUiKey::Char('u')), ConfigUiIntent::None);
         assert_eq!(app.handle_key(ConfigUiKey::Char('2')), ConfigUiIntent::None);
         assert_eq!(app.handle_key(ConfigUiKey::Char('a')), ConfigUiIntent::None);
-        assert_eq!(app.edit.as_ref().expect("text edit").input, "1u2a");
+        assert_eq!(app.handle_key(ConfigUiKey::Char('?')), ConfigUiIntent::None);
+        assert_eq!(app.edit.as_ref().expect("text edit").input, "1u2a?");
         assert_eq!(app.selected_tab, 0);
+    }
+
+    // Defends: shortcut help captures only its private navigation keys and closes without
+    // mutating editor, selection, search, notice, or host-visible intent state.
+    #[test]
+    fn shortcut_help_is_a_non_mutating_private_mode() {
+        let mut app = ConfigUiApp::new(test_model());
+        app.selected_row = 1;
+        app.search = "theme".to_string();
+        app.notice_info("Keep this notice.");
+        let before = (
+            app.selected_tab,
+            app.selected_row,
+            app.settings_view,
+            app.search.clone(),
+            app.search_active,
+            app.edit.clone(),
+            app.notice.clone(),
+        );
+
+        assert_eq!(app.handle_key(ConfigUiKey::Char('?')), ConfigUiIntent::None);
+        assert_eq!(app.shortcut_help_scroll, Some(0));
+        assert_eq!(app.handle_key(ConfigUiKey::Char('q')), ConfigUiIntent::None);
+        assert!(app.shortcut_help_scroll.is_some());
+        app.handle_key(ConfigUiKey::Down);
+        app.handle_key(ConfigUiKey::Char('j'));
+        assert_eq!(app.shortcut_help_scroll, Some(2));
+        app.handle_key(ConfigUiKey::Up);
+        app.handle_key(ConfigUiKey::Char('k'));
+        assert_eq!(app.shortcut_help_scroll, Some(0));
+        app.handle_key(ConfigUiKey::Esc);
+        assert!(app.shortcut_help_scroll.is_none());
+        assert_eq!(
+            (
+                app.selected_tab,
+                app.selected_row,
+                app.settings_view,
+                app.search.clone(),
+                app.search_active,
+                app.edit.clone(),
+                app.notice.clone(),
+            ),
+            before
+        );
+
+        app.handle_key(ConfigUiKey::Char('?'));
+        app.handle_key(ConfigUiKey::Char('?'));
+        assert!(app.shortcut_help_scroll.is_none());
     }
 
     // Defends: vertical row navigation wraps within the visible rows and stays stable for empty views.

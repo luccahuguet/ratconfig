@@ -309,6 +309,8 @@ Populate `ConfigUiModel::file_actions` when the UI should show rows for host-own
 
 For a `FreeText` field, normal-mode `Enter` starts inline editing while `e` starts the same staged edit and immediately emits `ConfigUiIntent::EditTextExternally`. Inline editing supports grapheme-safe Left/Right movement, Home/End, Backspace/Delete, insertion and single-line paste at the cursor, and `Ctrl+u` to clear. `Ctrl+e` externalizes an edit already in progress. The external intent carries the stable field identity and exact staged input buffer. Hosts can write that input to a temporary file, open the user's editor, read the edited text back, apply any host-owned newline or multiline policy, then call `ConfigUiApp::apply_external_text_edit(&field, edited)`. Ratconfig does not spawn editors, create temporary files, or save automatically; `Enter` emits `SetField` and `Esc` cancels the staged edit
 
+Footer shortcuts are contextual key/action pairs rather than a fixed command sentence. Active search owns both footer rows and exposes `Enter/Esc Done` plus `Ctrl+u Clear`; edit modes show only their usable save, cancel, movement, selection, reorder, clear, and external-editor controls. Narrow terminals retain whole prioritized hints and mark omitted hints with `…`. Normal-mode `?` opens the complete scrollable shortcut inventory; `j/k` or Up/Down scroll it, and `Esc` or `?` closes it without changing selection, search, edits, notices, or host state. Search and free-text editing continue to accept `?` as input
+
 The optional crossterm runner enables bracketed paste and translates its key and paste events into Ratconfig's reducer vocabulary. Its callback is invoked while the runner's terminal session is active; hosts that launch a full-screen editor must own any terminal restore/re-entry policy themselves, or use the lower-level editor/render APIs and own the event loop
 
 Hosts that want ratconfig to own the crossterm terminal setup, draw loop, event reads, and key conversion can enable the optional runner:
@@ -538,6 +540,7 @@ Before cutting a release:
 - Inferred TOML rows use host-asserted `baseline_toml`, expose `intent | value | baseline`, leave explicit effective resolution unknown, remain read-only without an exact host capability, and return typed current/baseline parse errors
 - `ConfigUiEditState` adds a required grapheme-boundary cursor; `ConfigUiKey` adds Home, End, Delete, and owned paste input and is no longer `Copy`
 - Free-form fields use `Enter` for cursor-aware single-line editing and normal-mode `e` for the host-owned external editor; choice controls remain native
+- Contextual footer hints keep key/action pairs atomic at narrow widths, active search and edit modes advertise only usable commands, and normal-mode `?` opens a non-mutating scrollable inventory generated from the same shortcut descriptors
 - The outer-borderless body uses padded content, a single center divider, and an inset tab separator
 
 ### 5.0.0

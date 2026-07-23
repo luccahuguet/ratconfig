@@ -10,6 +10,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs, Wrap};
 use serde_json::Value as JsonValue;
+use std::borrow::Cow;
 use unicode_segmentation::UnicodeSegmentation;
 
 const HORIZONTAL_PADDING: u16 = 1;
@@ -24,6 +25,8 @@ const HEADER_MIN_SOURCE_LABEL_WIDTH: usize = 4;
 const HEADER_SOURCE_LABEL_WIDTH: usize = 18;
 const STATUS_COLUMN_WIDTH: usize = 10;
 const STATUS_ITEM_COLUMN_WIDTH: usize = 24;
+const HINT_SEPARATOR: &str = " · ";
+const HINT_OVERFLOW: &str = " · …";
 
 #[derive(Clone, Copy)]
 struct ConfigUiThemePalette {
@@ -198,7 +201,11 @@ fn draw_config_ui_impl(
     render_header(frame, app, header);
     render_tabs(frame, app, tabs);
     render_tab_separator(frame, app.active_theme, separator);
-    render_body(frame, app, body, &detail_lines);
+    if app.shortcut_help_scroll.is_some() {
+        render_shortcut_help(frame, app, body);
+    } else {
+        render_body(frame, app, body, &detail_lines);
+    }
     render_footer(frame, app, footer);
 }
 
@@ -424,6 +431,41 @@ fn render_body(
         details_area,
         rows.get(app.selected_row).copied(),
         detail_lines,
+    );
+}
+
+fn render_shortcut_help(frame: &mut Frame<'_>, app: &mut ConfigUiApp, area: Rect) {
+    let [title_area, _, content_area] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .areas(area);
+    let title_area = horizontal_inset(title_area);
+    let content_area = horizontal_inset(content_area);
+    let lines = shortcut_help_lines(app);
+    let paragraph =
+        Paragraph::new(themed_lines(lines, app.active_theme)).wrap(Wrap { trim: false });
+    let line_count = paragraph.line_count(content_area.width);
+    let max_scroll = line_count.saturating_sub(usize::from(content_area.height));
+    let scroll = app
+        .shortcut_help_scroll
+        .expect("shortcut help is open while rendered")
+        .min(max_scroll);
+    app.shortcut_help_scroll = Some(scroll);
+    let visible_end = (scroll + usize::from(content_area.height)).min(line_count);
+    let title = if max_scroll == 0 {
+        "shortcuts".to_string()
+    } else {
+        format!("shortcuts · {}–{visible_end}/{line_count}", scroll + 1)
+    };
+    frame.render_widget(
+        Paragraph::new(themed_line(Line::from(title), app.active_theme)),
+        title_area,
+    );
+    frame.render_widget(
+        paragraph.scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0)),
+        content_area,
     );
 }
 
@@ -1502,58 +1544,327 @@ pub fn native_status_detail_lines(status: &ConfigUiNativeStatus) -> Vec<Line<'st
 }
 
 fn render_footer(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect) {
-    if let Some(edit) = &app.edit {
+    let width = usize::from(area.width);
+    let lines = if app.shortcut_help_scroll.is_some() {
+        vec![
+            Line::from("Keyboard shortcuts"),
+            control_line(SHORTCUT_HELP_HINTS, width),
+        ]
+    } else if app.search_active {
+        vec![search_status_line(app), control_line(SEARCH_HINTS, width)]
+    } else if let Some(edit) = &app.edit {
         let Some(field) = app.active_edit_field() else {
             return;
         };
-        let editing = edit_status_line(field, edit, area.width as usize);
-        let status = app.notice.as_ref().map_or_else(
-            || edit_control_line(field, edit.mode),
-            |notice| notice_line(notice, area.width as usize),
-        );
-        frame.render_widget(
-            Paragraph::new(themed_lines(vec![editing, status], app.active_theme)),
-            area,
-        );
-        return;
-    }
-
-    let notice = app.notice.as_ref().map_or_else(
-        || normal_control_line(app),
-        |notice| notice_line(notice, area.width as usize),
-    );
-    let controls = footer_control_line(app);
-    frame.render_widget(
-        Paragraph::new(themed_lines(vec![notice, controls], app.active_theme)),
-        area,
-    );
+        vec![
+            app.notice.as_ref().map_or_else(
+                || edit_status_line(field, edit, width),
+                |notice| notice_line(notice, width),
+            ),
+            control_line(edit_hints(field, edit.mode), width),
+        ]
+    } else {
+        vec![
+            app.notice.as_ref().map_or_else(
+                || selected_row_control_line(app, width),
+                |notice| notice_line(notice, width),
+            ),
+            control_line(&navigation_hints(app, false), width),
+        ]
+    };
+    frame.render_widget(Paragraph::new(themed_lines(lines, app.active_theme)), area);
 }
 
-fn footer_control_line(app: &ConfigUiApp) -> Line<'static> {
-    let search = if app.search_active {
-        format!("search: {}_", app.search)
-    } else if app.search.is_empty() {
-        "/ search".to_string()
-    } else {
-        "Esc clears search".to_string()
-    };
-    let mut spans = vec![Span::raw("q quit ")];
+#[derive(Clone)]
+struct ControlHint {
+    key: &'static str,
+    action: Cow<'static, str>,
+    priority: u8,
+}
+
+const fn hint(key: &'static str, action: &'static str, priority: u8) -> ControlHint {
+    ControlHint {
+        key,
+        action: Cow::Borrowed(action),
+        priority,
+    }
+}
+
+const SEARCH_HINTS: &[ControlHint] = &[
+    hint("Enter/Esc", "Done", 0),
+    hint("Ctrl+u", "Clear", 1),
+    hint("Backspace", "Delete", 2),
+    hint("Type/Paste", "Input", 3),
+];
+const SHORTCUT_HELP_HINTS: &[ControlHint] =
+    &[hint("Esc/?", "Close", 0), hint("j/k/↑/↓", "Scroll", 1)];
+const FREE_TEXT_NORMAL_HINTS: &[ControlHint] =
+    &[hint("Enter", "Inline", 0), hint("e", "Editor", 0)];
+const TOGGLE_NORMAL_HINTS: &[ControlHint] = &[hint("Space", "Stage", 0), hint("e", "Edit", 1)];
+const PICKER_NORMAL_HINTS: &[ControlHint] = &[hint("Enter/e/Space", "Open picker", 0)];
+const INHERIT_HINTS: &[ControlHint] = &[hint("u", "Inherit", 0)];
+const TEXT_EDIT_HINTS: &[ControlHint] = &[
+    hint("Enter", "Save", 0),
+    hint("Esc", "Cancel", 0),
+    hint("Ctrl+e", "Editor", 1),
+    hint("Ctrl+u", "Clear", 1),
+    hint("←/→", "Move", 2),
+    hint("Home/End", "Line ends", 2),
+    hint("Del/Backspace", "Delete", 2),
+    hint("Type/Paste", "Insert", 3),
+];
+const TOGGLE_EDIT_HINTS: &[ControlHint] = &[
+    hint("Enter", "Save", 0),
+    hint("Esc", "Cancel", 0),
+    hint("Arrows/Space", "Toggle", 1),
+];
+const CHOICE_EDIT_HINTS: &[ControlHint] = &[
+    hint("Enter", "Save", 0),
+    hint("Esc", "Cancel", 0),
+    hint("hjkl/Arrows", "Move", 1),
+    hint("Space", "Select", 1),
+];
+const MULTI_CHOICE_EDIT_HINTS: &[ControlHint] = &[
+    hint("Enter", "Save", 0),
+    hint("Esc", "Cancel", 0),
+    hint("hjkl/Arrows", "Move", 1),
+    hint("Space", "Enable/disable", 1),
+    hint("J/K", "Reorder", 1),
+];
+
+fn navigation_hints(app: &ConfigUiApp, complete: bool) -> Vec<ControlHint> {
+    let mut hints = vec![hint(
+        if !complete {
+            "q"
+        } else if app.search.is_empty() {
+            "q/Esc/Ctrl+c"
+        } else {
+            "q/Ctrl+c"
+        },
+        "Quit",
+        1,
+    )];
+    if !app.search.is_empty() {
+        hints.push(hint("Esc", "Clear search", 2));
+    }
     if app.can_toggle_settings_view() {
         let target = match app.settings_view {
             ConfigUiSettingsView::Overview => "All",
             ConfigUiSettingsView::All => "Overview",
         };
-        spans.push(Span::styled(
-            format!("a {target} "),
-            fg_style(Color::Yellow),
-        ));
+        hints.push(hint("a", target, 2));
+    } else if complete {
+        hints.push(hint("a", "All/Overview when available", 2));
     }
-    spans.extend([
-        Span::raw("Tab tabs "),
-        Span::raw("j/k move "),
-        Span::styled(search, fg_style(Color::Yellow)),
-    ]);
+    if complete || app.model.tabs.len() > 1 {
+        hints.push(hint("Tab/Shift+Tab/h/l/←/→", "Switch tab", 3));
+        hints.push(hint("1–9", "Select tab", 4));
+    }
+    if complete || app.visible_rows().len() > 1 {
+        hints.push(hint("j/k/↑/↓", "Move", 4));
+    }
+    hints.push(hint("/", "Search", 3));
+    hints.push(hint("?", "Help", 0));
+    hints
+}
+
+fn multi_choice_edit_hints(ordered: bool) -> &'static [ControlHint] {
+    let visible = MULTI_CHOICE_EDIT_HINTS.len() - usize::from(!ordered);
+    &MULTI_CHOICE_EDIT_HINTS[..visible]
+}
+
+fn file_action_hint(label: &str, field_shortcut: bool) -> ControlHint {
+    ControlHint {
+        key: if field_shortcut { "e" } else { "Enter/e/Space" },
+        action: Cow::Owned(format!("Open {label}")),
+        priority: 0,
+    }
+}
+
+fn edit_hints(field: &ConfigUiField, mode: ConfigUiEditMode) -> &'static [ControlHint] {
+    match mode {
+        ConfigUiEditMode::Text => TEXT_EDIT_HINTS,
+        ConfigUiEditMode::Choice if is_choice_picker(field) => CHOICE_EDIT_HINTS,
+        ConfigUiEditMode::Choice => TOGGLE_EDIT_HINTS,
+        ConfigUiEditMode::MultiChoice => {
+            multi_choice_edit_hints(is_ordered_multi_choice_field(field))
+        }
+    }
+}
+
+fn selected_row_control_line(app: &ConfigUiApp, width: usize) -> Line<'static> {
+    let selected = app
+        .visible_rows()
+        .get(app.selected_row)
+        .and_then(|row| app.resolve_row(*row));
+    let capability_action = app
+        .selected_capability_file_action()
+        .map(|(_, action)| action);
+    let mut hints = match selected {
+        Some(ConfigUiRow::FileAction(action)) if action.disabled_reason.is_none() => {
+            vec![file_action_hint(&action.label, false)]
+        }
+        Some(ConfigUiRow::Field(field)) => match &field.capability {
+            ConfigUiCapability::ReadOnly { .. } => capability_action
+                .filter(|action| action.disabled_reason.is_none())
+                .map_or_else(Vec::new, |action| {
+                    vec![file_action_hint(&action.label, true)]
+                }),
+            ConfigUiCapability::Toggle { .. } => TOGGLE_NORMAL_HINTS.to_vec(),
+            ConfigUiCapability::Choice { .. } | ConfigUiCapability::MultiChoice { .. } => {
+                PICKER_NORMAL_HINTS.to_vec()
+            }
+            ConfigUiCapability::FreeText { .. } => FREE_TEXT_NORMAL_HINTS.to_vec(),
+        },
+        _ => Vec::new(),
+    };
+    if let Some(ConfigUiRow::Field(field)) = selected
+        && app.can_unset_field(field)
+    {
+        hints.extend_from_slice(INHERIT_HINTS);
+    }
+    if !hints.is_empty() {
+        return control_line(&hints, width);
+    }
+    let status = match selected {
+        Some(ConfigUiRow::FileAction(action)) => action
+            .disabled_reason
+            .clone()
+            .unwrap_or_else(|| "File action unavailable".to_string()),
+        Some(ConfigUiRow::Field(field)) => match &field.capability {
+            ConfigUiCapability::ReadOnly { reason, .. } => capability_action
+                .and_then(|action| action.disabled_reason.clone())
+                .unwrap_or_else(|| format!("Read-only: {reason}")),
+            _ => "No action available".to_string(),
+        },
+        _ => "Select a setting or file row".to_string(),
+    };
+    Line::from(truncate(&status, width))
+}
+
+fn search_status_line(app: &ConfigUiApp) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("search: ", fg_style(Color::Yellow)),
+        Span::styled(format!("{}_", app.search), fg_style(Color::White)),
+    ])
+}
+
+fn hint_width(hint: &ControlHint) -> usize {
+    terminal_width(hint.key) + 1 + terminal_width(&hint.action)
+}
+
+fn selected_hints_width(hints: &[ControlHint], selected: &[usize]) -> usize {
+    selected
+        .iter()
+        .map(|index| hint_width(&hints[*index]))
+        .sum::<usize>()
+        + selected.len().saturating_sub(1) * terminal_width(HINT_SEPARATOR)
+}
+
+fn styled_hint_spans(hint: &ControlHint) -> [Span<'static>; 3] {
+    [
+        Span::styled(hint.key, bold_fg_style(Color::Yellow)),
+        Span::raw(" "),
+        Span::styled(hint.action.clone(), fg_style(Color::White)),
+    ]
+}
+
+fn control_line(hints: &[ControlHint], width: usize) -> Line<'static> {
+    let mut selected = (0..hints.len()).collect::<Vec<_>>();
+    let clipped = selected_hints_width(hints, &selected) > width;
+    if clipped {
+        selected.clear();
+        let mut candidates = (0..hints.len()).collect::<Vec<_>>();
+        candidates.sort_by_key(|index| (hints[*index].priority, *index));
+        let hint_budget = width.saturating_sub(terminal_width(HINT_OVERFLOW));
+        let mut used = 0;
+        for &index in &candidates {
+            let extra = hint_width(&hints[index])
+                + if selected.is_empty() {
+                    0
+                } else {
+                    terminal_width(HINT_SEPARATOR)
+                };
+            if used + extra <= hint_budget {
+                selected.push(index);
+                used += extra;
+            }
+        }
+        if selected.is_empty()
+            && let Some(index) = candidates
+                .into_iter()
+                .find(|index| hint_width(&hints[*index]) <= width)
+        {
+            selected.push(index);
+        }
+        selected.sort_unstable();
+    }
+
+    let selected_width = selected_hints_width(hints, &selected);
+    let mut spans = Vec::new();
+    for index in selected {
+        if !spans.is_empty() {
+            spans.push(Span::styled(HINT_SEPARATOR, fg_style(Color::Gray)));
+        }
+        spans.extend(styled_hint_spans(&hints[index]));
+    }
+    if clipped && width > 0 {
+        if spans.is_empty() {
+            spans.push(Span::styled("…", fg_style(Color::Gray)));
+        } else if selected_width + terminal_width(HINT_OVERFLOW) <= width {
+            spans.push(Span::styled(HINT_OVERFLOW, fg_style(Color::Gray)));
+        } else if selected_width < width {
+            spans.push(Span::styled("…", fg_style(Color::Gray)));
+        }
+    }
     Line::from(spans)
+}
+
+fn shortcut_help_lines(app: &ConfigUiApp) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    append_help_section(&mut lines, "Navigation", &navigation_hints(app, true));
+    append_help_section(&mut lines, "Search", SEARCH_HINTS);
+    append_help_section(&mut lines, "Free text · normal", FREE_TEXT_NORMAL_HINTS);
+    append_help_section(&mut lines, "Free text · editing", TEXT_EDIT_HINTS);
+    append_help_section(&mut lines, "Toggle · normal", TOGGLE_NORMAL_HINTS);
+    append_help_section(&mut lines, "Toggle · editing", TOGGLE_EDIT_HINTS);
+    append_help_section(&mut lines, "Choice · normal", PICKER_NORMAL_HINTS);
+    append_help_section(&mut lines, "Choice · editing", CHOICE_EDIT_HINTS);
+    append_help_section(
+        &mut lines,
+        "Multi-choice · editing",
+        multi_choice_edit_hints(false),
+    );
+    append_help_section(
+        &mut lines,
+        "Ordered multi-choice · editing",
+        multi_choice_edit_hints(true),
+    );
+    append_help_section(
+        &mut lines,
+        "File action",
+        &[file_action_hint("file", false)],
+    );
+    append_help_section(
+        &mut lines,
+        "Read-only field action",
+        &[file_action_hint("file", true)],
+    );
+    append_help_section(&mut lines, "Inheritance · when available", INHERIT_HINTS);
+    append_help_section(&mut lines, "Shortcut help", SHORTCUT_HELP_HINTS);
+    lines
+}
+
+fn append_help_section(lines: &mut Vec<Line<'static>>, title: &'static str, hints: &[ControlHint]) {
+    if !lines.is_empty() {
+        lines.push(Line::from(""));
+    }
+    lines.push(styled_line(title, bold_fg_style(Color::Cyan)));
+    for hint in hints {
+        let mut spans = vec![Span::raw("  ")];
+        spans.extend(styled_hint_spans(hint));
+        lines.push(Line::from(spans));
+    }
 }
 
 fn notice_line(notice: &ConfigUiNotice, width: usize) -> Line<'static> {
@@ -1642,74 +1953,6 @@ fn text_edit_window(input: &str, cursor: usize, width: usize) -> String {
     let before = graphemes[start..cursor_index].concat();
     let after = graphemes[cursor_index..end].concat();
     format!("{before}_{after}")
-}
-
-fn normal_control_line(app: &ConfigUiApp) -> Line<'static> {
-    if let Some((_, action)) = app.selected_file_action() {
-        return Line::from(if action.disabled_reason.is_some() {
-            "file action unavailable"
-        } else {
-            "Enter/e/Space open file"
-        });
-    }
-    let Some(field) = app.selected_field() else {
-        return Line::from("Select a setting row to edit");
-    };
-    let mut primary = match &field.capability {
-        ConfigUiCapability::ReadOnly { reason, .. } => {
-            match app.selected_capability_file_action() {
-                Some((_, action)) if action.disabled_reason.is_none() => {
-                    format!("e open {}", action.label)
-                }
-                Some(_) => "file action unavailable".to_string(),
-                None => format!("read-only: {reason}"),
-            }
-        }
-        ConfigUiCapability::Toggle { .. } => "Space stage  e edit".to_string(),
-        ConfigUiCapability::Choice { .. } | ConfigUiCapability::MultiChoice { .. } => {
-            "Enter/e/Space picker".to_string()
-        }
-        ConfigUiCapability::FreeText { .. } => "Enter inline  e editor".to_string(),
-    };
-    if app.can_unset_field(field) {
-        primary.push_str("  u inherit");
-    }
-    Line::from(primary)
-}
-
-fn edit_control_line(field: &ConfigUiField, mode: ConfigUiEditMode) -> Line<'static> {
-    match mode {
-        ConfigUiEditMode::Text => raw_line([
-            "Enter save  Esc cancel  ",
-            "←/→ move  Home/End  Del/Backspace  ",
-            "Ctrl+u clear  ",
-            "Ctrl+e editor",
-        ]),
-        ConfigUiEditMode::Choice if is_choice_picker(field) => raw_line([
-            "hjkl/Arrows move  ",
-            "Space select  ",
-            "Enter save  ",
-            "Esc cancel",
-        ]),
-        ConfigUiEditMode::Choice => raw_line(["Space toggle  ", "Enter save  ", "Esc cancel"]),
-        ConfigUiEditMode::MultiChoice if is_ordered_multi_choice_field(field) => raw_line([
-            "hjkl/Arrows move  ",
-            "Space toggle  ",
-            "J/K reorder  ",
-            "Enter save  ",
-            "Esc cancel",
-        ]),
-        ConfigUiEditMode::MultiChoice => raw_line([
-            "hjkl/Arrows move  ",
-            "Space enable/disable  ",
-            "Enter save  ",
-            "Esc cancel",
-        ]),
-    }
-}
-
-fn raw_line<const N: usize>(parts: [&'static str; N]) -> Line<'static> {
-    parts.into_iter().map(Span::raw).collect()
 }
 
 fn themed_lines(lines: Vec<Line<'static>>, theme: ConfigUiTheme) -> Vec<Line<'static>> {
@@ -2080,14 +2323,14 @@ mod tests {
         let text = render_app(&mut terminal, &mut app);
         assert!(text.contains("Overview 1/2"));
         assert!(text.contains("a All"));
-        assert!(text.contains("/ search"));
+        assert!(text.contains("/ Search"));
 
         app.handle_key(ConfigUiKey::Char('a'));
         assert_eq!(app.visible_rows().len(), 2);
         let text = render_app(&mut terminal, &mut app);
         assert!(text.contains("All 2/Overview 1"));
         assert!(text.contains("a Overview"));
-        assert!(text.contains("/ search"));
+        assert!(text.contains("/ Search"));
 
         app.search_active = true;
         let text = render_app(&mut terminal, &mut app);
@@ -2136,6 +2379,108 @@ mod tests {
         app.settings_view = ConfigUiSettingsView::All;
         let text = render_app(&mut terminal, &mut app);
         assert!(text.contains("All 12/Overview 10"));
+    }
+
+    // Defends: shortcut presentation is contextual, atomically fitted and styled, while the
+    // complete shared inventory remains reachable through a bounded non-mutating help view.
+    #[test]
+    fn contextual_shortcuts_fit_and_share_scrollable_help() {
+        let mut app = ConfigUiApp::new(test_model(ConfigUiFieldState::Explicit));
+        let mut terminal = Terminal::new(TestBackend::new(96, 16)).expect("test terminal");
+
+        let normal = render_app(&mut terminal, &mut app);
+        assert!(normal.contains("Space Stage"));
+        assert!(normal.contains("? Help"));
+        let buffer = terminal.backend().buffer();
+        assert_eq!(rendered_cell(buffer, "?").fg, Color::Yellow);
+        assert_eq!(rendered_cell(buffer, "Help").fg, Color::White);
+        assert_eq!(rendered_cell(buffer, "·").fg, Color::Gray);
+
+        app.handle_key(ConfigUiKey::Char('/'));
+        let search = render_app(&mut terminal, &mut app);
+        assert!(search.contains("search: _"));
+        assert!(search.contains("Enter/Esc Done"));
+        assert!(search.contains("Ctrl+u Clear"));
+        assert!(!search.contains("q Quit"));
+        assert!(!search.contains("Space Stage"));
+        app.handle_key(ConfigUiKey::Char('?'));
+        assert!(render_app(&mut terminal, &mut app).contains("search: ?_"));
+        assert!(app.shortcut_help_scroll.is_none());
+        app.handle_key(ConfigUiKey::Enter);
+        let applied_search = render_app(&mut terminal, &mut app);
+        assert!(applied_search.contains("Esc Clear search"));
+        assert!(!applied_search.contains("Enter/Esc Done"));
+        app.handle_key(ConfigUiKey::Esc);
+
+        let narrow = control_line(&navigation_hints(&app, false), 21);
+        let narrow_text = rendered_text(&narrow);
+        assert!(narrow.width() <= 21);
+        assert!(narrow_text.contains("? Help"));
+        assert!(narrow_text.ends_with('…'));
+        assert!(!narrow_text.contains("/ Search"));
+        assert_eq!(
+            rendered_text(&control_line(&navigation_hints(&app, false), 6)),
+            "? Help"
+        );
+        assert_eq!(
+            rendered_text(&control_line(&navigation_hints(&app, false), 15)),
+            "? Help · …"
+        );
+
+        let help = rendered_lines(&shortcut_help_lines(&app));
+        for expected in [
+            "Navigation",
+            "Search",
+            "Free text · editing",
+            "Ctrl+u Clear",
+            "Toggle · editing",
+            "Arrows/Space Toggle",
+            "Choice · editing",
+            "Multi-choice · editing",
+            "J/K Reorder",
+            "File action",
+            "u Inherit",
+            "Shortcut help",
+            "Esc/? Close",
+        ] {
+            assert!(
+                help.contains(expected),
+                "missing {expected:?} from:\n{help}"
+            );
+        }
+
+        let selected_row = app.selected_row;
+        app.handle_key(ConfigUiKey::Char('?'));
+        terminal.backend_mut().resize(64, 14);
+        let help_top = render_app(&mut terminal, &mut app);
+        assert!(help_top.contains("shortcuts ·"));
+        assert!(help_top.contains("Navigation"));
+        for _ in 0..100 {
+            app.handle_key(ConfigUiKey::Down);
+        }
+        let help_bottom = render_app(&mut terminal, &mut app);
+        assert!(help_bottom.contains("Shortcut help"));
+        assert!(help_bottom.contains("Esc/? Close"));
+        let bottom = app.shortcut_help_scroll.expect("open help scroll");
+        assert!(bottom > 0);
+        app.handle_key(ConfigUiKey::Up);
+        render_app(&mut terminal, &mut app);
+        assert_eq!(app.shortcut_help_scroll, Some(bottom - 1));
+        app.handle_key(ConfigUiKey::Esc);
+        assert!(app.shortcut_help_scroll.is_none());
+        assert_eq!(app.selected_row, selected_row);
+
+        let text_model = model_with_fields(vec![field("ui.text", "string", r#""value""#, &[])]);
+        let mut text_app = ConfigUiApp::new(text_model);
+        text_app.handle_key(ConfigUiKey::Enter);
+        terminal.backend_mut().resize(120, 16);
+        let text_edit = render_app(&mut terminal, &mut text_app);
+        assert!(text_edit.contains("Enter Save"));
+        assert!(text_edit.contains("Esc Cancel"));
+        assert!(text_edit.contains("Ctrl+u Clear"));
+        text_app.handle_key(ConfigUiKey::Char('?'));
+        assert!(text_app.edit().expect("text edit").input.ends_with('?'));
+        assert!(text_app.shortcut_help_scroll.is_none());
     }
 
     // Defends: headings are derived from filtered field rows and selection indices continue to target only real rows.
@@ -2789,7 +3134,8 @@ mod tests {
         assert_eq!(rendered_cell(buffer, "ready-value").fg, palette.muted);
         assert_eq!(rendered_cell(buffer, "Config").fg, palette.title);
         assert_eq!(rendered_cell(buffer, "intent").fg, palette.metadata_key);
-        assert_eq!(rendered_cell(buffer, "q quit").fg, palette.text);
+        assert_eq!(rendered_cell(buffer, "q").fg, palette.accent);
+        assert_eq!(rendered_cell(buffer, "Quit").fg, palette.text);
         assert_eq!(rendered_cell(buffer, "settings").fg, Color::Black);
         assert_eq!(rendered_cell(buffer, "details").fg, Color::Black);
         assert_eq!(rendered_cell(buffer, "(1) general").fg, palette.accent);
@@ -2926,7 +3272,7 @@ mod tests {
         let mut model = test_model(ConfigUiFieldState::Explicit);
         model.fields[0].snapshot.baseline = None;
         let mut app = ConfigUiApp::new(model);
-        assert!(rendered_text(&normal_control_line(&app)).contains("u inherit"));
+        assert!(rendered_text(&selected_row_control_line(&app, usize::MAX)).contains("u Inherit"));
         let unknown = rendered_lines(&app.render_details(UiRowRef::Field(0)));
         assert!(unknown.contains("reset      remove override"));
         assert!(unknown.contains("inherits   unknown"));
@@ -2939,13 +3285,13 @@ mod tests {
         action.source_id = DEFAULT_CONFIG_SOURCE_ID.to_string();
         app.model.file_actions = vec![action];
         assert_eq!(
-            rendered_text(&normal_control_line(&app)),
-            "e open Native config  u inherit"
+            rendered_text(&selected_row_control_line(&app, usize::MAX)),
+            "e Open Native config · u Inherit"
         );
         app.model.file_actions[0].disabled_reason = Some("Unavailable.".to_string());
         assert_eq!(
-            rendered_text(&normal_control_line(&app)),
-            "file action unavailable  u inherit"
+            rendered_text(&selected_row_control_line(&app, usize::MAX)),
+            "u Inherit"
         );
 
         app.model.fields[0].snapshot.baseline = Some(ConfigUiResolvedValue {
@@ -2959,18 +3305,18 @@ mod tests {
         assert!(known.contains("inherits   baseline"));
 
         app.model.fields[0].can_unset = false;
-        assert!(!rendered_text(&normal_control_line(&app)).contains("inherit"));
+        assert!(!rendered_text(&selected_row_control_line(&app, usize::MAX)).contains("Inherit"));
         assert!(!rendered_lines(&app.render_details(UiRowRef::Field(0))).contains("reset      "));
 
         app.model.fields[0].can_unset = true;
         app.model.fields[0].snapshot.intent = ConfigUiOverride::Absent;
         app.model.fields[0].snapshot.effective = None;
-        assert!(!rendered_text(&normal_control_line(&app)).contains("inherit"));
+        assert!(!rendered_text(&selected_row_control_line(&app, usize::MAX)).contains("Inherit"));
 
         app.model.fields[0].snapshot.intent = ConfigUiOverride::Explicit(json!(false));
         app.model.fields[0].snapshot.effective = Some(ConfigUiResolvedValue::new(json!(false)));
         app.model.sources[0].read_only = true;
-        assert!(!rendered_text(&normal_control_line(&app)).contains("inherit"));
+        assert!(!rendered_text(&selected_row_control_line(&app, usize::MAX)).contains("Inherit"));
     }
 
     // Defends: boolean controls distinguish normal-mode staging from edit-mode persistence.
@@ -2984,9 +3330,9 @@ mod tests {
         on.label = Some("Enabled".to_string());
         let mut app = ConfigUiApp::new(model);
 
-        let normal = rendered_text(&normal_control_line(&app));
-        assert!(normal.contains("Space stage"));
-        assert!(!normal.contains("Enter/Space stage"));
+        let normal = rendered_text(&selected_row_control_line(&app, usize::MAX));
+        assert!(normal.contains("Space Stage"));
+        assert!(!normal.contains("Enter/Space Stage"));
 
         let details = |app: &ConfigUiApp| rendered_lines(&app.render_details(UiRowRef::Field(0)));
         assert!(details(&app).contains("  (x) Disabled\n  ( ) Enabled"));
@@ -2995,10 +3341,13 @@ mod tests {
         assert!(details(&app).contains("  ( ) Disabled\n  (x) Enabled"));
 
         let field = app.selected_field().expect("boolean field");
-        let editing = rendered_text(&edit_control_line(field, ConfigUiEditMode::Choice));
-        assert!(editing.contains("Space toggle"));
-        assert!(editing.contains("Enter save"));
-        assert!(editing.contains("Esc cancel"));
+        let editing = rendered_text(&control_line(
+            edit_hints(field, ConfigUiEditMode::Choice),
+            usize::MAX,
+        ));
+        assert!(editing.contains("Arrows/Space Toggle"));
+        assert!(editing.contains("Enter Save"));
+        assert!(editing.contains("Esc Cancel"));
     }
 
     // Defends: ordered multichoice editing exposes selected order and the generic reorder command.
@@ -3043,10 +3392,19 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["  [x] status", "> [x] clock", "  [ ] mode"]
         );
-        assert!(
-            rendered_text(&edit_control_line(field, ConfigUiEditMode::MultiChoice))
-                .contains("J/K reorder")
-        );
+        let advertises_reorder = |field: &ConfigUiField| {
+            rendered_text(&control_line(
+                edit_hints(field, ConfigUiEditMode::MultiChoice),
+                usize::MAX,
+            ))
+            .contains("J/K Reorder")
+        };
+        assert!(advertises_reorder(field));
+        let ConfigUiCapability::MultiChoice { ordered, .. } = &mut field.capability else {
+            unreachable!("multi-choice capability")
+        };
+        *ordered = false;
+        assert!(!advertises_reorder(field));
     }
 
     // Defends: long choice editors keep their logical cursor and pinned context visible as focus
@@ -3177,17 +3535,27 @@ mod tests {
         let field = &model.fields[0];
         let app = ConfigUiApp::new(model.clone());
 
-        assert!(rendered_text(&normal_control_line(&app)).contains("Enter inline  e editor"));
+        assert!(
+            rendered_text(&selected_row_control_line(&app, usize::MAX))
+                .contains("Enter Inline · e Editor")
+        );
 
-        let text_controls = rendered_text(&edit_control_line(field, ConfigUiEditMode::Text));
-        assert!(text_controls.starts_with("Enter save  Esc cancel"));
-        assert!(text_controls.contains("Ctrl+e editor"));
-        assert!(text_controls.contains("Ctrl+u clear"));
+        let text_controls = rendered_text(&control_line(
+            edit_hints(field, ConfigUiEditMode::Text),
+            usize::MAX,
+        ));
+        assert!(text_controls.starts_with("Enter Save · Esc Cancel"));
+        assert!(text_controls.contains("Ctrl+e Editor"));
+        assert!(text_controls.contains("Ctrl+u Clear"));
         assert!(text_controls.contains("Home/End"));
         assert!(text_controls.contains("Del/Backspace"));
 
         assert!(
-            !rendered_text(&edit_control_line(field, ConfigUiEditMode::Choice)).contains("editor")
+            !rendered_text(&control_line(
+                edit_hints(field, ConfigUiEditMode::Choice),
+                usize::MAX,
+            ))
+            .contains("Editor")
         );
     }
 
