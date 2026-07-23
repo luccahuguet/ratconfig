@@ -20,9 +20,9 @@ pub struct ConfigUiApp {
     pub(crate) selected_row: usize,
     /// Current view outside active search.
     ///
-    /// [`ConfigUiApp::try_new`] selects Overview when the model contains an Overview/All distinction. Models
-    /// whose views contain the same fields start in All. Normal-mode `a` toggles the view when the
-    /// selected tab has non-Overview fields. Search spans All without changing this saved view.
+    /// [`ConfigUiApp::try_new`] selects Overview when any tab has a meaningful reduction. Smaller
+    /// reductions project All, while normal-mode `a` toggles meaningful views. Search and model
+    /// replacement preserve this preference.
     pub(crate) settings_view: ConfigUiSettingsView,
     pub(crate) search: String,
     pub(crate) search_active: bool,
@@ -187,11 +187,11 @@ fn insert_at_cursor(edit: &mut ConfigUiEditState, text: &str) {
 impl ConfigUiApp {
     /// Validates a model and creates an editor.
     ///
-    /// Models with `recommended_fields: None` start in All because every field belongs to Overview.
+    /// Models start in Overview only when at least one tab has a meaningful reduced view.
     pub fn try_new(model: ConfigUiModel) -> Result<Self, String> {
         model.validate()?;
         let active_theme = config_ui_theme_for_model(&model, ConfigUiTheme::Dark);
-        let settings_view = if model_has_non_overview_fields(&model) {
+        let settings_view = if model_has_meaningful_overview(&model) {
             ConfigUiSettingsView::Overview
         } else {
             ConfigUiSettingsView::All
@@ -257,6 +257,8 @@ impl ConfigUiApp {
         self.selected_row
     }
 
+    /// Returns the saved view preference. A negligible tab can project All while this remains
+    /// [`ConfigUiSettingsView::Overview`].
     pub fn settings_view(&self) -> ConfigUiSettingsView {
         self.settings_view
     }
@@ -323,17 +325,8 @@ impl ConfigUiApp {
         }
 
         let active_theme = config_ui_theme_for_model(&model, self.active_theme);
-        let settings_view = if self.settings_view == ConfigUiSettingsView::Overview
-            && !model_has_non_overview_fields(&model)
-        {
-            ConfigUiSettingsView::All
-        } else {
-            self.settings_view
-        };
-
         self.model = model;
         self.active_theme = active_theme;
-        self.settings_view = settings_view;
         self.edit = edit;
         self.selected_tab = selected
             .as_ref()
@@ -413,13 +406,12 @@ impl ConfigUiApp {
         )
     }
 
-    pub(crate) fn selected_tab_has_non_overview_fields(&self) -> bool {
-        let counts = field_counts_for_tab(&self.model, self.selected_tab);
-        counts.overview < counts.total
+    pub(crate) fn selected_tab_has_meaningful_overview(&self) -> bool {
+        field_counts_for_tab(&self.model, self.selected_tab).has_meaningful_overview()
     }
 
     pub(crate) fn can_toggle_settings_view(&self) -> bool {
-        !self.search_active && self.search.is_empty() && self.selected_tab_has_non_overview_fields()
+        !self.search_active && self.search.is_empty() && self.selected_tab_has_meaningful_overview()
     }
 
     fn toggle_settings_view(&mut self) {
@@ -1011,11 +1003,8 @@ impl ConfigUiApp {
     }
 }
 
-fn model_has_non_overview_fields(model: &ConfigUiModel) -> bool {
-    (0..model.tabs.len()).any(|tab| {
-        let counts = field_counts_for_tab(model, tab);
-        counts.overview < counts.total
-    })
+fn model_has_meaningful_overview(model: &ConfigUiModel) -> bool {
+    (0..model.tabs.len()).any(|tab| field_counts_for_tab(model, tab).has_meaningful_overview())
 }
 
 fn edit_is_compatible(old: &ConfigUiField, new: &ConfigUiField, edit: &ConfigUiEditState) -> bool {
@@ -1408,7 +1397,10 @@ mod tests {
         ConfigUiFieldId, ConfigUiFieldState, ConfigUiOverride, ConfigUiResolvedValue,
         ConfigUiTheme, ConfigUiThemeMapping, ConfigUiThemeSwitcher, ConfigUiTomlDocumentSpec,
         DEFAULT_CONFIG_SOURCE_ID, build_toml_document_fields,
-        test_support::{after_save_status, field, field_with_source, model_with_fields},
+        test_support::{
+            after_save_status, field, field_with_source, model_with_fields,
+            model_with_overview_counts,
+        },
     };
     #[cfg(feature = "ui")]
     use crate::{patch::PatchMutation, toml_adapter::set_toml_value_text};
@@ -1734,7 +1726,7 @@ theme = "light"
         );
         assert_eq!(app.search(), "theme");
         assert!(app.search_active());
-        assert_eq!(app.settings_view(), ConfigUiSettingsView::Overview);
+        assert_eq!(app.settings_view(), ConfigUiSettingsView::All);
         assert_eq!(
             app.notice().map(|notice| notice.text.as_str()),
             Some("Host reload warning.")
@@ -2471,11 +2463,19 @@ line-number = "relative"
         crate::model::set_field_state_for_test(&mut recommended, ConfigUiFieldState::Inherited);
         let mut hidden = field("advanced.hidden", "string", r#""hidden""#, &[]);
         crate::model::set_field_state_for_test(&mut hidden, ConfigUiFieldState::Inherited);
+        let hidden_fields = ["concealed.two", "concealed.three"].map(|path| {
+            let mut field = field(path, "string", r#""hidden""#, &[]);
+            crate::model::set_field_state_for_test(&mut field, ConfigUiFieldState::Inherited);
+            field
+        });
         let explicit = field("advanced.explicit", "string", r#""set""#, &[]);
         let mut other_tab = field("other.visible", "string", r#""other""#, &[]);
         crate::model::set_field_state_for_test(&mut other_tab, ConfigUiFieldState::Inherited);
         other_tab.tab = "other".to_string();
-        let mut model = model_with_fields(vec![recommended, hidden, explicit, other_tab]);
+        let mut fields = vec![recommended, hidden];
+        fields.extend(hidden_fields);
+        fields.extend([explicit, other_tab]);
+        let mut model = model_with_fields(fields);
         model.tabs.push("other".to_string());
         model.recommended_fields = Some(vec![
             ConfigUiFieldId::new(DEFAULT_CONFIG_SOURCE_ID, "core.visible"),
@@ -2486,7 +2486,7 @@ line-number = "relative"
         assert_eq!(app.settings_view, ConfigUiSettingsView::Overview);
         assert_eq!(
             app.visible_rows(),
-            vec![UiRowRef::Field(0), UiRowRef::Field(2)]
+            vec![UiRowRef::Field(0), UiRowRef::Field(4)]
         );
 
         assert_eq!(app.handle_key(ConfigUiKey::Char('a')), ConfigUiIntent::None);
@@ -2504,7 +2504,7 @@ line-number = "relative"
             Some("advanced.explicit")
         );
         app.handle_key(ConfigUiKey::Char('a'));
-        assert_eq!(app.selected_row, 2);
+        assert_eq!(app.selected_row, 4);
 
         app.handle_key(ConfigUiKey::Char('a'));
         app.handle_key(ConfigUiKey::Char('/'));
@@ -2523,13 +2523,45 @@ line-number = "relative"
         assert!(app.search.is_empty());
         assert_eq!(
             app.visible_rows(),
-            vec![UiRowRef::Field(0), UiRowRef::Field(2)]
+            vec![UiRowRef::Field(0), UiRowRef::Field(4)]
         );
 
         app.next_tab();
-        assert!(!app.selected_tab_has_non_overview_fields());
+        assert!(!app.selected_tab_has_meaningful_overview());
+        assert_eq!(app.visible_rows(), vec![UiRowRef::Field(5)]);
         app.handle_key(ConfigUiKey::Char('a'));
         assert_eq!(app.settings_view, ConfigUiSettingsView::Overview);
+    }
+
+    // Defends: attention changes may collapse Overview during reload without losing a stable
+    // selection or compatible staged edit.
+    #[test]
+    fn replacement_preserves_preference_through_a_negligible_overview() {
+        let mut app = ConfigUiApp::new(model_with_overview_counts(9, 12));
+        app.selected_row = 8;
+        app.begin_edit_field(8);
+        let selected = app.selected_field().expect("selected field").id();
+
+        let mut replacement = app.model.clone();
+        crate::model::set_field_state_for_test(
+            &mut replacement.fields[9],
+            ConfigUiFieldState::Explicit,
+        );
+        app.replace_model(replacement).expect("valid replacement");
+
+        assert_eq!(app.settings_view(), ConfigUiSettingsView::Overview);
+        assert_eq!(app.visible_rows().len(), 12);
+        assert_eq!(app.edit().map(|edit| &edit.field_id), Some(&selected));
+        assert_eq!(app.selected_field().map(ConfigUiField::id), Some(selected));
+
+        let mut restored = app.model.clone();
+        crate::model::set_field_state_for_test(
+            &mut restored.fields[9],
+            ConfigUiFieldState::Inherited,
+        );
+        app.replace_model(restored).expect("valid replacement");
+        assert_eq!(app.settings_view(), ConfigUiSettingsView::Overview);
+        assert_eq!(app.visible_rows().len(), 9);
     }
 
     // Defends: normal-mode digits select the matching first-nine tab and reset row selection without changing out-of-range state.

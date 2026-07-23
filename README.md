@@ -155,7 +155,7 @@ fn recommend_fields(model: &mut ConfigUiModel) {
 
 Overview contains recommended fields plus omitted fields that are explicit, locally invalid, externally managed, or named by an exact field-scoped diagnostic. This keeps active configuration, provenance, and field-specific attention visible without making diagnostics change snapshot intent. `recommended_fields: Some(Vec::new())` creates an attention-only Overview. `recommended_fields: None` recommends every field, so Overview and All contain the same fields
 
-`ConfigUiApp` starts in Overview only when `recommended_fields: Some(...)` leaves at least one field All-only anywhere in the model. It starts in All when both views contain the same fields. Normal-mode `a` toggles the selected tab between Overview and All when that distinction exists. A non-empty search spans All fields without changing the saved view. The settings heading reports Overview and total counts, and file actions plus host-routed operational rows remain reachable in either view
+Ratconfig exposes Overview for a tab only when it hides at least three fields and at least 25% of that tab's field inventory after attention fields are included. Smaller reductions behave as All without changing host recommendations or the saved view preference. `ConfigUiApp` starts in Overview only when at least one tab has a meaningful distinction; otherwise it starts in All. Normal-mode `a` toggles the selected tab only when its distinction is meaningful. A non-empty search spans All fields without changing the saved view. Meaningful views report Overview and total counts, while file actions and host-routed operational rows remain reachable in either view and do not affect the threshold
 
 Generated TOML rows use the same identity contract. Hosts can classify fields returned by `build_toml_document_fields` with `ConfigUiFieldId::new(source_id, path)` without reconstructing the rows
 
@@ -528,7 +528,7 @@ Before cutting a release:
 
 ### 6.0.0
 
-- `ConfigUiModel::recommended_fields` and `ConfigUiSettingsView::Overview` replace the previous focused allowlist and view; Overview combines recommendations with fields that are explicit, locally invalid, externally managed, or named by exact diagnostics, while All remains the complete inventory
+- `ConfigUiModel::recommended_fields` and `ConfigUiSettingsView::Overview` replace the previous focused allowlist and view; Overview combines recommendations with fields that are explicit, locally invalid, externally managed, or named by exact diagnostics, remains distinct only when it hides at least three fields and 25% of a tab, and otherwise projects that tab as All
 - `ConfigUiFieldSnapshot` separates absent/explicit/invalid override intent from optional effective and baseline resolutions, provenance, and external-management labels; the parallel string value fields and sentinel defaults are absent from the model
 - `ConfigUiCapability` is the sole editor-authorization surface for read-only, free-text, toggle, choice, and multichoice fields; `type_label` is display-only, and the intermediate `kind`, `allowed_values`, and `ConfigUiEditBehavior` field APIs are removed
 - Field intents carry `ConfigUiFieldId`, `OpenFile` carries stable source/action identity with its validated path payload, edits start inside Ratconfig without `BeginEdit`, and external editor results are applied by field identity

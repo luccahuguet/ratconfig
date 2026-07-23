@@ -521,7 +521,7 @@ fn render_list(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect, rows: &[UiR
 
 fn settings_title(app: &ConfigUiApp, width: usize) -> String {
     let counts = field_counts_for_tab(&app.model, app.selected_tab);
-    if counts.overview == counts.total {
+    if !counts.has_meaningful_overview() {
         return if app.search.is_empty() {
             "settings".to_string()
         } else {
@@ -741,7 +741,7 @@ fn empty_settings_message(app: &ConfigUiApp) -> &'static str {
     if !app.search.is_empty() {
         "No settings match this search."
     } else if app.settings_view == ConfigUiSettingsView::Overview
-        && app.selected_tab_has_non_overview_fields()
+        && app.selected_tab_has_meaningful_overview()
     {
         if app.search_active {
             "Overview empty. Search All."
@@ -2137,7 +2137,9 @@ pub fn truncate_start(value: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{apply_status, field, field_with_source, model_with_fields};
+    use crate::test_support::{
+        apply_status, field, field_with_source, model_with_fields, model_with_overview_counts,
+    };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::{Buffer, Cell};
@@ -2308,27 +2310,20 @@ mod tests {
     // Defends: narrow layouts expose the active view, honest counts, and the matching toggle without hiding search scope.
     #[test]
     fn overview_all_view_state_and_controls_remain_clear_in_a_narrow_ui() {
-        let mut recommended = field("core.visible", "string", r#""core""#, &[]);
-        crate::model::set_field_state_for_test(&mut recommended, ConfigUiFieldState::Inherited);
-        let mut hidden = field("hidden.secret", "string", r#""secret""#, &[]);
-        crate::model::set_field_state_for_test(&mut hidden, ConfigUiFieldState::Inherited);
-        let mut model = model_with_fields(vec![recommended, hidden]);
-        model.recommended_fields = Some(vec![ConfigUiFieldId::new(
-            DEFAULT_CONFIG_SOURCE_ID,
-            "core.visible",
-        )]);
+        let mut model = model_with_overview_counts(9, 12);
+        model.fields[9].path = "hidden.secret".to_string();
         let mut app = ConfigUiApp::new(model);
         let mut terminal = Terminal::new(TestBackend::new(46, 16)).expect("test terminal");
 
         let text = render_app(&mut terminal, &mut app);
-        assert!(text.contains("Overview 1/2"));
+        assert!(text.contains("Overview 9/12"));
         assert!(text.contains("a All"));
         assert!(text.contains("/ Search"));
 
         app.handle_key(ConfigUiKey::Char('a'));
-        assert_eq!(app.visible_rows().len(), 2);
+        assert_eq!(app.visible_rows().len(), 12);
         let text = render_app(&mut terminal, &mut app);
-        assert!(text.contains("All 2/Overview 1"));
+        assert!(text.contains("All 12/Overview 9"));
         assert!(text.contains("a Overview"));
         assert!(text.contains("/ Search"));
 
@@ -2339,7 +2334,7 @@ mod tests {
 
         app.search_active = false;
         app.search = "secret".to_string();
-        assert_eq!(app.visible_rows(), vec![UiRowRef::Field(1)]);
+        assert_eq!(app.visible_rows(), vec![UiRowRef::Field(9)]);
         let text = render_app(&mut terminal, &mut app);
         assert!(text.contains("search All · secret"));
         assert!(!text.contains("a Overview"));
@@ -2348,7 +2343,7 @@ mod tests {
         app.model.recommended_fields = Some(Vec::new());
         app.settings_view = ConfigUiSettingsView::Overview;
         let text = render_app(&mut terminal, &mut app);
-        assert!(text.contains("Overview 0/2"));
+        assert!(text.contains("Overview 0/12"));
         assert!(text.contains("Overview empty"));
         assert!(text.contains("Press a for All"));
         assert!(text.contains("a All"));
@@ -2359,26 +2354,13 @@ mod tests {
         assert!(!text.contains("Press a"));
 
         app.search_active = false;
-        for index in 2..12 {
-            let mut extra = app.model.fields[0].clone();
-            extra.path = format!("extra.setting_{index}");
-            app.model.fields.push(extra);
-        }
-        app.model.recommended_fields = Some(
-            app.model
-                .fields
-                .iter()
-                .take(10)
-                .map(|field| ConfigUiFieldId::new(field.source_id.clone(), field.path.clone()))
-                .collect(),
-        );
+        app.model = model_with_overview_counts(10, 13);
         app.settings_view = ConfigUiSettingsView::Overview;
         let text = render_app(&mut terminal, &mut app);
-        assert!(text.contains("Overview 10/12"));
-
-        app.settings_view = ConfigUiSettingsView::All;
-        let text = render_app(&mut terminal, &mut app);
-        assert!(text.contains("All 12/Overview 10"));
+        assert_eq!(app.visible_rows().len(), 13);
+        assert!(text.contains("settings"));
+        assert!(!text.contains("Overview 10/13"));
+        assert!(!text.contains("a All"));
     }
 
     // Defends: shortcut presentation is contextual, atomically fitted and styled, while the

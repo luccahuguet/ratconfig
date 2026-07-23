@@ -102,3 +102,24 @@ pub(crate) fn model_with_fields(fields: Vec<ConfigUiField>) -> ConfigUiModel {
         theme_switcher: None,
     }
 }
+
+pub(crate) fn model_with_overview_counts(overview: usize, total: usize) -> ConfigUiModel {
+    let fields = (0..total)
+        .map(|index| {
+            let mut field = field(&format!("setting.{index}"), "string", r#""value""#, &[]);
+            crate::model::set_field_state_for_test(
+                &mut field,
+                crate::ConfigUiFieldState::Inherited,
+            );
+            field
+        })
+        .collect::<Vec<_>>();
+    let mut model = model_with_fields(fields);
+    model.recommended_fields = Some(
+        model.fields[..overview]
+            .iter()
+            .map(ConfigUiField::id)
+            .collect(),
+    );
+    model
+}
