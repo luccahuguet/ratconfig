@@ -189,12 +189,18 @@ fn draw_config_ui_impl(
     detail_lines: impl Fn(&ConfigUiApp, UiRowRef, Rect) -> Vec<Line<'static>>,
 ) {
     let area = frame.area();
+    let footer_height = 1 + u16::from(
+        app.shortcut_help_scroll.is_some()
+            || app.search_active
+            || app.edit.is_some()
+            || app.notice.is_some(),
+    );
     let [header, tabs, separator, body, footer] = Layout::vertical([
         Constraint::Length(2),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(8),
-        Constraint::Length(2),
+        Constraint::Length(footer_height),
     ])
     .areas(area);
 
@@ -1563,14 +1569,13 @@ fn render_footer(frame: &mut Frame<'_>, app: &ConfigUiApp, area: Rect) {
             ),
             control_line(edit_hints(field, edit.mode), width),
         ]
-    } else {
+    } else if let Some(notice) = &app.notice {
         vec![
-            app.notice.as_ref().map_or_else(
-                || selected_row_control_line(app, width),
-                |notice| notice_line(notice, width),
-            ),
+            notice_line(notice, width),
             control_line(&navigation_hints(app, false), width),
         ]
+    } else {
+        vec![normal_control_line(app, width)]
     };
     frame.render_widget(Paragraph::new(themed_lines(lines, app.active_theme)), area);
 }
@@ -1599,10 +1604,10 @@ const SEARCH_HINTS: &[ControlHint] = &[
 const SHORTCUT_HELP_HINTS: &[ControlHint] =
     &[hint("Esc/?", "Close", 0), hint("j/k/↑/↓", "Scroll", 1)];
 const FREE_TEXT_NORMAL_HINTS: &[ControlHint] =
-    &[hint("Enter", "Inline", 0), hint("e", "Editor", 0)];
-const TOGGLE_NORMAL_HINTS: &[ControlHint] = &[hint("Space", "Stage", 0), hint("e", "Edit", 1)];
-const PICKER_NORMAL_HINTS: &[ControlHint] = &[hint("Enter/e/Space", "Open picker", 0)];
-const INHERIT_HINTS: &[ControlHint] = &[hint("u", "Inherit", 0)];
+    &[hint("Enter", "Inline", 2), hint("e", "Editor", 3)];
+const TOGGLE_NORMAL_HINTS: &[ControlHint] = &[hint("Space", "Stage", 2), hint("e", "Edit", 3)];
+const PICKER_NORMAL_HINTS: &[ControlHint] = &[hint("Enter/e/Space", "Open picker", 2)];
+const INHERIT_HINTS: &[ControlHint] = &[hint("u", "Inherit", 2)];
 const TEXT_EDIT_HINTS: &[ControlHint] = &[
     hint("Enter", "Save", 0),
     hint("Esc", "Cancel", 0),
@@ -1642,28 +1647,31 @@ fn navigation_hints(app: &ConfigUiApp, complete: bool) -> Vec<ControlHint> {
             "q/Ctrl+c"
         },
         "Quit",
-        1,
+        2,
     )];
     if !app.search.is_empty() {
         hints.push(hint("Esc", "Clear search", 2));
+    }
+    if !complete {
+        hints.extend_from_slice(INHERIT_HINTS);
     }
     if app.can_toggle_settings_view() {
         let target = match app.settings_view {
             ConfigUiSettingsView::Overview => "All",
             ConfigUiSettingsView::All => "Overview",
         };
-        hints.push(hint("a", target, 2));
+        hints.push(hint("a", target, 1));
     } else if complete {
         hints.push(hint("a", "All/Overview when available", 2));
     }
     if complete || app.model.tabs.len() > 1 {
-        hints.push(hint("Tab/Shift+Tab/h/l/←/→", "Switch tab", 3));
+        hints.push(hint("h/l/←/→", "Switch tab", 3));
         hints.push(hint("1–9", "Select tab", 4));
     }
     if complete || app.visible_rows().len() > 1 {
         hints.push(hint("j/k/↑/↓", "Move", 4));
     }
-    hints.push(hint("/", "Search", 3));
+    hints.push(hint("/", "Search", 1));
     hints.push(hint("?", "Help", 0));
     hints
 }
@@ -1677,7 +1685,7 @@ fn file_action_hint(label: &str, field_shortcut: bool) -> ControlHint {
     ControlHint {
         key: if field_shortcut { "e" } else { "Enter/e/Space" },
         action: Cow::Owned(format!("Open {label}")),
-        priority: 0,
+        priority: 2,
     }
 }
 
@@ -1692,7 +1700,7 @@ fn edit_hints(field: &ConfigUiField, mode: ConfigUiEditMode) -> &'static [Contro
     }
 }
 
-fn selected_row_control_line(app: &ConfigUiApp, width: usize) -> Line<'static> {
+fn selected_row_hints(app: &ConfigUiApp) -> Vec<ControlHint> {
     let selected = app
         .visible_rows()
         .get(app.selected_row)
@@ -1700,7 +1708,7 @@ fn selected_row_control_line(app: &ConfigUiApp, width: usize) -> Line<'static> {
     let capability_action = app
         .selected_capability_file_action()
         .map(|(_, action)| action);
-    let mut hints = match selected {
+    match selected {
         Some(ConfigUiRow::FileAction(action)) if action.disabled_reason.is_none() => {
             vec![file_action_hint(&action.label, false)]
         }
@@ -1717,29 +1725,13 @@ fn selected_row_control_line(app: &ConfigUiApp, width: usize) -> Line<'static> {
             ConfigUiCapability::FreeText { .. } => FREE_TEXT_NORMAL_HINTS.to_vec(),
         },
         _ => Vec::new(),
-    };
-    if let Some(ConfigUiRow::Field(field)) = selected
-        && app.can_unset_field(field)
-    {
-        hints.extend_from_slice(INHERIT_HINTS);
     }
-    if !hints.is_empty() {
-        return control_line(&hints, width);
-    }
-    let status = match selected {
-        Some(ConfigUiRow::FileAction(action)) => action
-            .disabled_reason
-            .clone()
-            .unwrap_or_else(|| "File action unavailable".to_string()),
-        Some(ConfigUiRow::Field(field)) => match &field.capability {
-            ConfigUiCapability::ReadOnly { reason, .. } => capability_action
-                .and_then(|action| action.disabled_reason.clone())
-                .unwrap_or_else(|| format!("Read-only: {reason}")),
-            _ => "No action available".to_string(),
-        },
-        _ => "Select a setting or file row".to_string(),
-    };
-    Line::from(truncate(&status, width))
+}
+
+fn normal_control_line(app: &ConfigUiApp, width: usize) -> Line<'static> {
+    let mut hints = selected_row_hints(app);
+    hints.extend(navigation_hints(app, false));
+    control_line(&hints, width)
 }
 
 fn search_status_line(app: &ConfigUiApp) -> Line<'static> {
@@ -2194,6 +2186,14 @@ mod tests {
         panic!("{text:?} was not rendered");
     }
 
+    fn rendered_row(buffer: &Buffer, y: u16) -> String {
+        (buffer.area.x..buffer.area.right())
+            .map(|x| buffer[(x, y)].symbol())
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    }
+
     fn contrast_ratio(foreground: Color, background: Color) -> f64 {
         fn luminance(color: Color) -> f64 {
             let (red, green, blue) = match color {
@@ -2367,13 +2367,31 @@ mod tests {
     // complete shared inventory remains reachable through a bounded non-mutating help view.
     #[test]
     fn contextual_shortcuts_fit_and_share_scrollable_help() {
-        let mut app = ConfigUiApp::new(test_model(ConfigUiFieldState::Explicit));
-        let mut terminal = Terminal::new(TestBackend::new(96, 16)).expect("test terminal");
+        let mut model = model_with_fields(vec![
+            field("core.mode", "string", r#""a""#, &["a", "b"]),
+            field("core.theme", "string", r#""dark""#, &["dark", "light"]),
+        ]);
+        model.tabs.push("advanced".to_string());
+        let mut app = ConfigUiApp::new(model);
+        let mut terminal = Terminal::new(TestBackend::new(120, 16)).expect("test terminal");
 
-        let normal = render_app(&mut terminal, &mut app);
-        assert!(normal.contains("Space Stage"));
-        assert!(normal.contains("? Help"));
+        render_app(&mut terminal, &mut app);
         let buffer = terminal.backend().buffer();
+        let footer = rendered_row(buffer, buffer.area.bottom() - 1);
+        for hint in [
+            "Enter/e/Space Open picker",
+            "u Inherit",
+            "q Quit",
+            "h/l/←/→ Switch tab",
+            "1–9 Select tab",
+            "j/k/↑/↓ Move",
+            "/ Search",
+            "? Help",
+        ] {
+            assert!(footer.contains(hint), "missing {hint:?} from {footer:?}");
+        }
+        assert!(!footer.contains("Tab/Shift+Tab"));
+        assert!(!rendered_row(buffer, buffer.area.bottom() - 2).contains("Open picker"));
         assert_eq!(rendered_cell(buffer, "?").fg, Color::Yellow);
         assert_eq!(rendered_cell(buffer, "Help").fg, Color::White);
         assert_eq!(rendered_cell(buffer, "·").fg, Color::Gray);
@@ -2384,7 +2402,7 @@ mod tests {
         assert!(search.contains("Enter/Esc Done"));
         assert!(search.contains("Ctrl+u Clear"));
         assert!(!search.contains("q Quit"));
-        assert!(!search.contains("Space Stage"));
+        assert!(!search.contains("Open picker"));
         app.handle_key(ConfigUiKey::Char('?'));
         assert!(render_app(&mut terminal, &mut app).contains("search: ?_"));
         assert!(app.shortcut_help_scroll.is_none());
@@ -2399,7 +2417,7 @@ mod tests {
         assert!(narrow.width() <= 21);
         assert!(narrow_text.contains("? Help"));
         assert!(narrow_text.ends_with('…'));
-        assert!(!narrow_text.contains("/ Search"));
+        assert!(narrow_text.contains("/ Search"));
         assert_eq!(
             rendered_text(&control_line(&navigation_hints(&app, false), 6)),
             "? Help"
@@ -2412,6 +2430,7 @@ mod tests {
         let help = rendered_lines(&shortcut_help_lines(&app));
         for expected in [
             "Navigation",
+            "1–9 Select tab",
             "Search",
             "Free text · editing",
             "Ctrl+u Clear",
@@ -3247,14 +3266,14 @@ mod tests {
         assert_eq!(span_width(&line, 1), STATUS_ITEM_COLUMN_WIDTH);
     }
 
-    // Defends: normal controls derive reset visibility from override/source authority instead of
-    // baseline knowledge or editor capability.
+    // Defends: normal controls keep inheritance discoverable while details derive actual reset
+    // availability from override/source authority instead of baseline knowledge or capability.
     #[test]
-    fn normal_controls_follow_selected_row_capabilities() {
+    fn normal_controls_keep_inherit_discoverable_and_details_contextual() {
         let mut model = test_model(ConfigUiFieldState::Explicit);
         model.fields[0].snapshot.baseline = None;
         let mut app = ConfigUiApp::new(model);
-        assert!(rendered_text(&selected_row_control_line(&app, usize::MAX)).contains("u Inherit"));
+        assert!(rendered_text(&normal_control_line(&app, usize::MAX)).contains("u Inherit"));
         let unknown = rendered_lines(&app.render_details(UiRowRef::Field(0)));
         assert!(unknown.contains("reset      remove override"));
         assert!(unknown.contains("inherits   unknown"));
@@ -3266,15 +3285,11 @@ mod tests {
         let mut action = file_action(true, false, false, None);
         action.source_id = DEFAULT_CONFIG_SOURCE_ID.to_string();
         app.model.file_actions = vec![action];
-        assert_eq!(
-            rendered_text(&selected_row_control_line(&app, usize::MAX)),
-            "e Open Native config · u Inherit"
-        );
+        let controls = rendered_text(&normal_control_line(&app, usize::MAX));
+        assert!(controls.contains("e Open Native config"));
         app.model.file_actions[0].disabled_reason = Some("Unavailable.".to_string());
-        assert_eq!(
-            rendered_text(&selected_row_control_line(&app, usize::MAX)),
-            "u Inherit"
-        );
+        let controls = rendered_text(&normal_control_line(&app, usize::MAX));
+        assert!(!controls.contains("Open Native config"));
 
         app.model.fields[0].snapshot.baseline = Some(ConfigUiResolvedValue {
             value: json!(true),
@@ -3287,18 +3302,7 @@ mod tests {
         assert!(known.contains("inherits   baseline"));
 
         app.model.fields[0].can_unset = false;
-        assert!(!rendered_text(&selected_row_control_line(&app, usize::MAX)).contains("Inherit"));
         assert!(!rendered_lines(&app.render_details(UiRowRef::Field(0))).contains("reset      "));
-
-        app.model.fields[0].can_unset = true;
-        app.model.fields[0].snapshot.intent = ConfigUiOverride::Absent;
-        app.model.fields[0].snapshot.effective = None;
-        assert!(!rendered_text(&selected_row_control_line(&app, usize::MAX)).contains("Inherit"));
-
-        app.model.fields[0].snapshot.intent = ConfigUiOverride::Explicit(json!(false));
-        app.model.fields[0].snapshot.effective = Some(ConfigUiResolvedValue::new(json!(false)));
-        app.model.sources[0].read_only = true;
-        assert!(!rendered_text(&selected_row_control_line(&app, usize::MAX)).contains("Inherit"));
     }
 
     // Defends: boolean controls distinguish normal-mode staging from edit-mode persistence.
@@ -3312,7 +3316,7 @@ mod tests {
         on.label = Some("Enabled".to_string());
         let mut app = ConfigUiApp::new(model);
 
-        let normal = rendered_text(&selected_row_control_line(&app, usize::MAX));
+        let normal = rendered_text(&normal_control_line(&app, usize::MAX));
         assert!(normal.contains("Space Stage"));
         assert!(!normal.contains("Enter/Space Stage"));
 
@@ -3518,7 +3522,7 @@ mod tests {
         let app = ConfigUiApp::new(model.clone());
 
         assert!(
-            rendered_text(&selected_row_control_line(&app, usize::MAX))
+            rendered_text(&normal_control_line(&app, usize::MAX))
                 .contains("Enter Inline · e Editor")
         );
 
