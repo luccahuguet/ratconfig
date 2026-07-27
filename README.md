@@ -128,6 +128,8 @@ Populate `ConfigUiModel::tab_list_tables` and matching `ConfigUiField::list_cell
 
 Hosts do not choose widths for the default list. Ratconfig sizes status and setting from every row in the selected tab, then gives the remaining cells to value; search and selection leave column starts unchanged
 
+File actions mixed into the default field list show a neutral dash under `takes effect`; their existing or absent file state remains in details, while read-only and error states stay visible in the list
+
 `ConfigUiField::can_unset` declares host authorization to remove an override independently of editor capability and baseline knowledge. Ratconfig exposes that action only when the flag is true for `Explicit` or `Invalid` intent on a writable source, and emits `ConfigUiIntent::UnsetField`. A known baseline can preview the inherited result, while `snapshot.baseline: None` keeps that result unknown without blocking an authorized unset
 
 The default settings list projects one compact value without collapsing the snapshot channels: locally invalid input is the correction target, otherwise a known effective value wins, otherwise explicit intent is shown, and a field with none of those renders as `unresolved`. Details label intent, explicit override or invalid input, effective value, baseline, their optional origins, and external management separately. Missing effective and baseline values are omitted rather than fabricated. When reset is authorized, the details and `u inherit` control describe removal of the override; a known baseline is the inherited preview, while an unknown baseline remains an authorized reset with an unknown result

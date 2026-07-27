@@ -645,7 +645,10 @@ fn field_column_widths(
         }
         UiRowRef::FileAction(index) => {
             let action = &model.file_actions[*index];
-            Some((file_action_status_label(action), action.label.as_str()))
+            Some((
+                file_action_field_status_label(action),
+                action.label.as_str(),
+            ))
         }
         _ => None,
     });
@@ -812,14 +815,19 @@ fn row_line_for_layout(
         }
         (UiRowRef::FileAction(index), layout) => {
             let action = &model.file_actions[index];
+            let status = file_action_field_status_label(action);
+            let status_style = match status {
+                "error" | "read-only" => file_action_status_style(action),
+                _ => fg_style(Color::Gray),
+            };
             let widths = match layout {
                 ListLayout::Field(widths) => widths,
                 _ => DEFAULT_FIELD_COLUMN_WIDTHS,
             };
             field_row_line(
                 widths,
-                file_action_status_label(action),
-                file_action_status_style(action),
+                status,
+                status_style,
                 &action.label,
                 config_key_style(),
                 &action.path.display().to_string(),
@@ -2040,6 +2048,13 @@ pub fn file_action_status_label(action: &ConfigUiFileAction) -> &'static str {
         "existing"
     } else {
         "absent"
+    }
+}
+
+fn file_action_field_status_label(action: &ConfigUiFileAction) -> &'static str {
+    match file_action_status_label(action) {
+        status @ ("error" | "read-only") => status,
+        _ => "—",
     }
 }
 
@@ -3621,7 +3636,8 @@ mod tests {
         }
     }
 
-    // Defends: file action rows expose neutral absent states without weakening existing, read-only, or error states.
+    // Defends: file actions do not present file existence as apply timing, while exceptional
+    // states remain visible in the field list and full state remains available in details.
     #[test]
     fn file_action_rows_render_host_file_states() {
         let mut model = test_model(ConfigUiFieldState::Explicit);
@@ -3635,9 +3651,9 @@ mod tests {
         ];
 
         for (index, (status, style)) in [
-            ("existing", Style::default().fg(Color::Green)),
-            ("absent", Style::default().fg(Color::Gray)),
-            ("absent", Style::default().fg(Color::Gray)),
+            ("—", Style::default().fg(Color::Gray)),
+            ("—", Style::default().fg(Color::Gray)),
+            ("—", Style::default().fg(Color::Gray)),
             ("read-only", Style::default().fg(Color::Yellow)),
             (
                 "error",
