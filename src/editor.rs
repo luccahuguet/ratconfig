@@ -793,6 +793,7 @@ impl ConfigUiApp {
             | ConfigUiKey::Down
             | ConfigUiKey::Left
             | ConfigUiKey::Char(' ')
+            | ConfigUiKey::Char('j' | 'k' | 'h' | 'l')
                 if !multi_choice =>
             {
                 self.notice = None;
@@ -804,7 +805,8 @@ impl ConfigUiApp {
     }
 
     fn cycle_toggle_edit(&mut self) {
-        self.replace_choice_input(|field, edit| toggled_choice_input(field, &edit.input));
+        self.move_choice_edit(1);
+        self.select_single_choice_edit();
     }
 
     fn move_choice_edit(&mut self, delta: isize) {
@@ -1253,18 +1255,6 @@ pub(crate) fn multi_choice_order_label(field: &ConfigUiField, values: &[JsonValu
             .collect::<Vec<_>>()
             .join(", ")
     }
-}
-
-fn toggled_choice_input(field: &ConfigUiField, input: &str) -> Result<String, String> {
-    let ConfigUiCapability::Toggle { off, on } = &field.capability else {
-        return Err(format!("{} is not a toggle.", field.path));
-    };
-    let current = parse_choice_input(field, input)?;
-    Ok(render_json_edit_value(if current == off.value {
-        &on.value
-    } else {
-        &off.value
-    }))
 }
 
 pub(crate) fn toggled_multi_choice_input(
@@ -2712,6 +2702,14 @@ line-number = "relative"
     #[test]
     fn reducer_drives_single_select_and_multiselect_edits() {
         let mut app = ConfigUiApp::new(test_model());
+
+        app.begin_edit_field(0);
+        assert_eq!(app.edit.as_ref().expect("toggle edit").input, "false");
+        assert_eq!(app.handle_key(ConfigUiKey::Char('j')), ConfigUiIntent::None);
+        assert_eq!(app.edit.as_ref().expect("toggle edit").input, "true");
+        assert_eq!(app.handle_key(ConfigUiKey::Char('k')), ConfigUiIntent::None);
+        assert_eq!(app.edit.as_ref().expect("toggle edit").input, "false");
+        app.handle_key(ConfigUiKey::Esc);
 
         app.begin_edit_field(1);
         assert_eq!(app.edit.as_ref().expect("single edit").choice_index, 0);

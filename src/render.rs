@@ -1222,7 +1222,7 @@ pub fn single_choice_detail_lines(
         &mut lines,
         field,
         selected_value.as_ref(),
-        is_choice_picker(field).then_some(edit.choice_index),
+        Some(edit.choice_index),
     );
 
     lines
@@ -1621,7 +1621,7 @@ const TEXT_EDIT_HINTS: &[ControlHint] = &[
 const TOGGLE_EDIT_HINTS: &[ControlHint] = &[
     hint("Enter", "Save", 0),
     hint("Esc", "Cancel", 0),
-    hint("Arrows/Space", "Toggle", 1),
+    hint("hjkl/Arrows/Space", "Toggle", 1),
 ];
 const CHOICE_EDIT_HINTS: &[ControlHint] = &[
     hint("Enter", "Save", 0),
@@ -2435,7 +2435,7 @@ mod tests {
             "Free text · editing",
             "Ctrl+u Clear",
             "Toggle · editing",
-            "Arrows/Space Toggle",
+            "hjkl/Arrows/Space Toggle",
             "Choice · editing",
             "Multi-choice · editing",
             "J/K Reorder",
@@ -3324,14 +3324,22 @@ mod tests {
         assert!(details(&app).contains("  (x) Disabled\n  ( ) Enabled"));
 
         assert_eq!(app.handle_key(ConfigUiKey::Char(' ')), ConfigUiIntent::None);
-        assert!(details(&app).contains("  ( ) Disabled\n  (x) Enabled"));
+        assert!(details(&app).contains("  ( ) Disabled\n> (x) Enabled"));
+        let focused = single_choice_detail_lines(
+            app.selected_field().expect("boolean field"),
+            app.edit().expect("toggle edit"),
+        )
+        .into_iter()
+        .find(|line| rendered_text(line).starts_with("> "))
+        .expect("focused toggle choice");
+        assert_eq!(focused.spans[0].style.fg, Some(Color::Yellow));
 
         let field = app.selected_field().expect("boolean field");
         let editing = rendered_text(&control_line(
             edit_hints(field, ConfigUiEditMode::Choice),
             usize::MAX,
         ));
-        assert!(editing.contains("Arrows/Space Toggle"));
+        assert!(editing.contains("hjkl/Arrows/Space Toggle"));
         assert!(editing.contains("Enter Save"));
         assert!(editing.contains("Esc Cancel"));
     }

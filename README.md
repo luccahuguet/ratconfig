@@ -208,6 +208,8 @@ Every field declares one editor capability. Ratconfig never infers write authori
 
 `MultiChoice { ordered: false }` emits selected values in capability order. `ordered: true` preserves the staged order and enables picker reorder controls. Choice values and rendered labels must be unique, and the host still validates every emitted value before persistence
 
+Toggle editors show a focused choice pointer and accept `hjkl`, arrow keys, or `Space` to switch the staged value
+
 ```rust
 use ratconfig::{
     ConfigUiApplyStatus, ConfigUiCapability, ConfigUiChoice, ConfigUiField,
