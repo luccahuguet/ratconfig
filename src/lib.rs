@@ -35,9 +35,10 @@ pub use model::{
 };
 pub use model::{
     UiRowRef, build_toml_document_fields, collect_config_ui_schema_fields,
-    config_contract_fields_from_toml, config_ui_metadata_from_toml, effective_string_config,
-    effective_string_list_config, get_json_path, render_json_edit_value, render_json_value,
-    schema_tabs, string_list_values_from_json, tab_index, toml_value_to_json,
+    collect_resolved_config_ui_schema_fields, config_contract_fields_from_toml,
+    config_ui_metadata_from_toml, effective_string_config, effective_string_list_config,
+    get_json_path, render_json_edit_value, render_json_value, schema_tabs,
+    string_list_values_from_json, tab_index, toml_value_to_json,
 };
 #[cfg(feature = "ui")]
 pub use render::*;
