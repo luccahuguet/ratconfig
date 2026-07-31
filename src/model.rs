@@ -1192,17 +1192,26 @@ pub fn collect_config_ui_schema_fields(
     root_path: &str,
 ) -> Vec<ConfigUiSchemaField> {
     let mut fields = Vec::new();
-    collect_schema_fields(schema, schema, root_path, &mut fields);
+    collect_schema_fields(None, schema, root_path, &mut fields);
+    fields
+}
+
+pub fn collect_resolved_config_ui_schema_fields(
+    schema: &JsonValue,
+    root_path: &str,
+) -> Vec<ConfigUiSchemaField> {
+    let mut fields = Vec::new();
+    collect_schema_fields(Some(schema), schema, root_path, &mut fields);
     fields
 }
 
 fn collect_schema_fields(
-    root: &JsonValue,
+    root: Option<&JsonValue>,
     schema: &JsonValue,
     path: &str,
     out: &mut Vec<ConfigUiSchemaField>,
 ) {
-    let schema = resolve_schema(root, schema);
+    let schema = root.map_or(schema, |root| resolve_schema(root, schema));
     let kind = schema_type(schema);
     if kind == "object" {
         let Some(properties) = schema.get("properties").and_then(JsonValue::as_object) else {
@@ -2311,7 +2320,17 @@ mod tests {
         });
 
         assert_eq!(
-            collect_config_ui_schema_fields(&schema, "app"),
+            collect_config_ui_schema_fields(&schema, "app")
+                .into_iter()
+                .find(|field| field.path == "app.module"),
+            Some(ConfigUiSchemaField {
+                path: "app.module".to_string(),
+                kind: "unknown".to_string(),
+                allowed_values: Vec::new(),
+            })
+        );
+        assert_eq!(
+            collect_resolved_config_ui_schema_fields(&schema, "app"),
             vec![
                 ConfigUiSchemaField {
                     path: "app.dynamic".to_string(),

@@ -161,10 +161,12 @@ Ratconfig exposes Overview for a tab only when it hides at least three fields an
 
 Generated TOML rows use the same identity contract. Hosts can classify fields returned by `build_toml_document_fields` with `ConfigUiFieldId::new(source_id, path)` without reconstructing the rows
 
-`collect_config_ui_schema_fields` flattens finite JSON Schema properties,
-follows local `$ref` definitions, keeps dynamic objects as one field, and treats
-a single non-null type as the field kind. The helper supplies discovery
-metadata only; hosts still decide defaults, validation, and write capability
+`collect_resolved_config_ui_schema_fields` flattens finite JSON Schema
+properties, follows local `$ref` definitions, keeps dynamic objects as one
+field, and treats a single non-null type as the field kind. The original
+`collect_config_ui_schema_fields` keeps unresolved traversal for established
+host inventories. Both helpers supply discovery metadata only; hosts still
+decide defaults, validation, and write capability
 
 ## Scoped Diagnostics
 
