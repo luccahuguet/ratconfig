@@ -1192,11 +1192,17 @@ pub fn collect_config_ui_schema_fields(
     root_path: &str,
 ) -> Vec<ConfigUiSchemaField> {
     let mut fields = Vec::new();
-    collect_schema_fields(schema, root_path, &mut fields);
+    collect_schema_fields(schema, schema, root_path, &mut fields);
     fields
 }
 
-fn collect_schema_fields(schema: &JsonValue, path: &str, out: &mut Vec<ConfigUiSchemaField>) {
+fn collect_schema_fields(
+    root: &JsonValue,
+    schema: &JsonValue,
+    path: &str,
+    out: &mut Vec<ConfigUiSchemaField>,
+) {
+    let schema = resolve_schema(root, schema);
     let kind = schema_type(schema);
     if kind == "object" {
         let Some(properties) = schema.get("properties").and_then(JsonValue::as_object) else {
@@ -1204,7 +1210,7 @@ fn collect_schema_fields(schema: &JsonValue, path: &str, out: &mut Vec<ConfigUiS
             return;
         };
         for (name, property) in properties {
-            collect_schema_fields(property, &format!("{path}.{name}"), out);
+            collect_schema_fields(root, property, &format!("{path}.{name}"), out);
         }
         return;
     }
@@ -1240,10 +1246,38 @@ fn schema_field(schema: &JsonValue, path: &str, kind: &str) -> ConfigUiSchemaFie
 }
 
 fn schema_type(schema: &JsonValue) -> &str {
-    schema
-        .get("type")
-        .and_then(JsonValue::as_str)
-        .unwrap_or("unknown")
+    match schema.get("type") {
+        Some(JsonValue::String(kind)) => kind,
+        Some(JsonValue::Array(kinds)) => {
+            let mut non_null = kinds
+                .iter()
+                .filter_map(JsonValue::as_str)
+                .filter(|kind| *kind != "null");
+            match (non_null.next(), non_null.next()) {
+                (Some(kind), None) => kind,
+                _ => "unknown",
+            }
+        }
+        _ => "unknown",
+    }
+}
+
+fn resolve_schema<'a>(root: &'a JsonValue, schema: &'a JsonValue) -> &'a JsonValue {
+    let mut resolved = schema;
+    for _ in 0..16 {
+        let Some(pointer) = resolved
+            .get("$ref")
+            .and_then(JsonValue::as_str)
+            .and_then(|reference| reference.strip_prefix('#'))
+        else {
+            break;
+        };
+        let Some(next) = root.pointer(pointer) else {
+            break;
+        };
+        resolved = next;
+    }
+    resolved
 }
 
 fn schema_enum_values(schema: &JsonValue) -> Vec<String> {
@@ -2254,6 +2288,24 @@ mod tests {
                 "rules": {
                     "type": "array",
                     "items": { "type": "object" }
+                },
+                "nullable": {
+                    "type": ["string", "null"]
+                },
+                "dynamic": {
+                    "type": "object",
+                    "additionalProperties": { "type": "string" }
+                },
+                "module": {
+                    "$ref": "#/$defs/Module"
+                }
+            },
+            "$defs": {
+                "Module": {
+                    "type": "object",
+                    "properties": {
+                        "disabled": { "type": "boolean" }
+                    }
                 }
             }
         });
@@ -2262,8 +2314,23 @@ mod tests {
             collect_config_ui_schema_fields(&schema, "app"),
             vec![
                 ConfigUiSchemaField {
+                    path: "app.dynamic".to_string(),
+                    kind: "object".to_string(),
+                    allowed_values: Vec::new(),
+                },
+                ConfigUiSchemaField {
                     path: "app.enabled".to_string(),
                     kind: "boolean".to_string(),
+                    allowed_values: Vec::new(),
+                },
+                ConfigUiSchemaField {
+                    path: "app.module.disabled".to_string(),
+                    kind: "boolean".to_string(),
+                    allowed_values: Vec::new(),
+                },
+                ConfigUiSchemaField {
+                    path: "app.nullable".to_string(),
+                    kind: "string".to_string(),
                     allowed_values: Vec::new(),
                 },
                 ConfigUiSchemaField {

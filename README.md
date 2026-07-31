@@ -161,6 +161,11 @@ Ratconfig exposes Overview for a tab only when it hides at least three fields an
 
 Generated TOML rows use the same identity contract. Hosts can classify fields returned by `build_toml_document_fields` with `ConfigUiFieldId::new(source_id, path)` without reconstructing the rows
 
+`collect_config_ui_schema_fields` flattens finite JSON Schema properties,
+follows local `$ref` definitions, keeps dynamic objects as one field, and treats
+a single non-null type as the field kind. The helper supplies discovery
+metadata only; hosts still decide defaults, validation, and write capability
+
 ## Scoped Diagnostics
 
 Hosts classify every diagnostic as blocking or nonblocking and scope it globally, to one source, or to one exact `ConfigUiFieldId`. Every exact-field diagnostic keeps that field visible in Overview without changing its snapshot intent; only a blocking diagnostic renders it as invalid. Source/global blockers mark matching fields invalid without expanding Overview, and nonblocking diagnostics remain informational. Exact-field diagnostics can exist without an operational tab, while source/global diagnostics, sidecars, and native-status rows require `operational_tab` to name one declared tab. That tab uses Ratconfig's generic status layout and cannot also contain fields or a list-table profile. No tab name is reserved, and `schema_tabs` returns only host/schema-declared tabs
