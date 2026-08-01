@@ -437,18 +437,18 @@ pub(crate) fn field_baseline_display_value(field: &ConfigUiField) -> Option<Stri
 }
 
 fn render_field_value(field: &ConfigUiField, value: &JsonValue) -> String {
-    if let ConfigUiCapability::OptionalString { disabled } = &field.capability
-        && disabled.value == *value
-    {
-        return disabled.display_label();
-    }
-    match value {
-        JsonValue::String(value) if field.type_label.as_deref() != Some("string") => value.clone(),
-        _ => render_json_value(value),
-    }
+    render_field_value_with(field, value, render_json_value)
 }
 
 pub(crate) fn render_field_edit_value(field: &ConfigUiField, value: &JsonValue) -> String {
+    render_field_value_with(field, value, render_json_edit_value)
+}
+
+fn render_field_value_with(
+    field: &ConfigUiField,
+    value: &JsonValue,
+    render_json: fn(&JsonValue) -> String,
+) -> String {
     if let ConfigUiCapability::OptionalString { disabled } = &field.capability
         && disabled.value == *value
     {
@@ -456,7 +456,7 @@ pub(crate) fn render_field_edit_value(field: &ConfigUiField, value: &JsonValue) 
     }
     match value {
         JsonValue::String(value) if field.type_label.as_deref() != Some("string") => value.clone(),
-        _ => render_json_edit_value(value),
+        _ => render_json(value),
     }
 }
 
