@@ -23,6 +23,7 @@ pub struct ConfigUiModel {
     /// [`ConfigUiSettingsView::All`] because there is no Overview/All distinction. `Some`
     /// recommends exactly its identities; explicit, invalid, externally managed, and
     /// fields named by exact diagnostics remain visible in Overview when omitted.
+    /// Both views place recommended fields first while preserving host order within each group.
     pub recommended_fields: Option<Vec<ConfigUiFieldId>>,
     pub file_actions: Vec<ConfigUiFileAction>,
     pub sidecars: Vec<ConfigUiSidecar>,
@@ -164,8 +165,7 @@ pub(crate) fn visible_rows_for_tab_search_in_view(
         && search.is_empty()
         && field_counts_for_tab(model, selected_tab).has_meaningful_overview();
 
-    (0..model.fields.len())
-        .filter(|index| model.fields[*index].tab == tab)
+    field_indices_for_tab(model, tab)
         .filter(|index| {
             !show_overview || field_is_visible_in_overview(model, &model.fields[*index])
         })
@@ -206,11 +206,30 @@ fn field_is_visible_in_overview(model: &ConfigUiModel, field: &ConfigUiField) ->
                 ConfigUiDiagnosticScope::Field(identity) if field.matches_id(identity)
             )
         })
-        || model.recommended_fields.as_ref().is_none_or(|recommended| {
-            recommended
-                .iter()
-                .any(|identity| field.matches_id(identity))
+        || field_is_recommended(model, field)
+}
+
+fn field_indices_for_tab<'a>(
+    model: &'a ConfigUiModel,
+    tab: &'a str,
+) -> impl Iterator<Item = usize> + 'a {
+    let fields = 0..model.fields.len();
+    fields
+        .clone()
+        .filter(move |index| {
+            model.fields[*index].tab == tab && field_is_recommended(model, &model.fields[*index])
         })
+        .chain(fields.filter(move |index| {
+            model.fields[*index].tab == tab && !field_is_recommended(model, &model.fields[*index])
+        }))
+}
+
+fn field_is_recommended(model: &ConfigUiModel, field: &ConfigUiField) -> bool {
+    model.recommended_fields.as_ref().is_none_or(|recommended| {
+        recommended
+            .iter()
+            .any(|identity| field.matches_id(identity))
+    })
 }
 
 fn file_action_rows_for_tab<'a>(

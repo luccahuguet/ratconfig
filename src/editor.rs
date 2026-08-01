@@ -2446,79 +2446,78 @@ line-number = "relative"
         assert!(!app.search_active);
     }
 
-    // Defends: Overview is the focused default, search widens without changing it, and toggles preserve a surviving selection.
+    // Defends: Overview and All share a stable core-first order, search widens without
+    // changing the saved view, and toggles preserve a surviving selection.
     #[test]
-    fn reducer_controls_overview_all_views_without_hidden_selection_or_search_state_leaks() {
-        let mut recommended = field("core.visible", "string", r#""core""#, &[]);
-        crate::model::set_field_state_for_test(&mut recommended, ConfigUiFieldState::Inherited);
-        let mut hidden = field("advanced.hidden", "string", r#""hidden""#, &[]);
-        crate::model::set_field_state_for_test(&mut hidden, ConfigUiFieldState::Inherited);
-        let hidden_fields = ["concealed.two", "concealed.three"].map(|path| {
+    fn reducer_keeps_core_order_stable_across_overview_and_all() {
+        fn selected_path(app: &ConfigUiApp) -> Option<&str> {
+            app.selected_field().map(|field| field.path.as_str())
+        }
+
+        let inherited = |path| {
             let mut field = field(path, "string", r#""hidden""#, &[]);
             crate::model::set_field_state_for_test(&mut field, ConfigUiFieldState::Inherited);
             field
-        });
-        let explicit = field("advanced.explicit", "string", r#""set""#, &[]);
-        let mut other_tab = field("other.visible", "string", r#""other""#, &[]);
-        crate::model::set_field_state_for_test(&mut other_tab, ConfigUiFieldState::Inherited);
-        other_tab.tab = "other".to_string();
-        let mut fields = vec![recommended, hidden];
-        fields.extend(hidden_fields);
-        fields.extend([explicit, other_tab]);
+        };
+        let mut fields = vec![
+            inherited("advanced.before"),
+            inherited("core.one"),
+            inherited("advanced.middle"),
+            inherited("core.two"),
+            inherited("advanced.after-one"),
+            inherited("advanced.after-two"),
+            field("advanced.explicit", "string", r#""set""#, &[]),
+            inherited("other.visible"),
+        ];
+        fields[7].tab = "other".to_string();
         let mut model = model_with_fields(fields);
         model.tabs.push("other".to_string());
         model.recommended_fields = Some(vec![
-            ConfigUiFieldId::new(DEFAULT_CONFIG_SOURCE_ID, "core.visible"),
+            ConfigUiFieldId::new(DEFAULT_CONFIG_SOURCE_ID, "core.one"),
+            ConfigUiFieldId::new(DEFAULT_CONFIG_SOURCE_ID, "core.two"),
             ConfigUiFieldId::new(DEFAULT_CONFIG_SOURCE_ID, "other.visible"),
         ]);
         let mut app = ConfigUiApp::new(model);
 
         assert_eq!(app.settings_view, ConfigUiSettingsView::Overview);
-        assert_eq!(
-            app.visible_rows(),
-            vec![UiRowRef::Field(0), UiRowRef::Field(4)]
-        );
+        assert_eq!(app.visible_rows(), [1, 3, 6].map(UiRowRef::Field));
 
+        app.selected_row = 1;
         assert_eq!(app.handle_key(ConfigUiKey::Char('a')), ConfigUiIntent::None);
         assert_eq!(app.settings_view, ConfigUiSettingsView::All);
-        app.selected_row = 1;
+        assert_eq!(selected_path(&app), Some("core.two"));
         assert_eq!(
-            app.selected_field().map(|field| field.path.as_str()),
-            Some("advanced.hidden")
+            app.visible_rows(),
+            [1, 3, 0, 2, 4, 5, 6].map(UiRowRef::Field)
         );
 
         app.handle_key(ConfigUiKey::Char('a'));
         assert_eq!(app.settings_view, ConfigUiSettingsView::Overview);
-        assert_eq!(
-            app.selected_field().map(|field| field.path.as_str()),
-            Some("advanced.explicit")
-        );
+        assert_eq!(selected_path(&app), Some("core.two"));
         app.handle_key(ConfigUiKey::Char('a'));
-        assert_eq!(app.selected_row, 4);
+        app.selected_row = 3;
+        assert_eq!(selected_path(&app), Some("advanced.middle"));
+        app.handle_key(ConfigUiKey::Char('a'));
+        assert_eq!(selected_path(&app), Some("advanced.explicit"));
+        app.handle_key(ConfigUiKey::Char('a'));
+        assert_eq!(app.selected_row, 6);
 
         app.handle_key(ConfigUiKey::Char('a'));
-        app.handle_key(ConfigUiKey::Char('/'));
+        app.search_active = true;
         app.handle_key(ConfigUiKey::Char('a'));
         assert_eq!(app.search, "a");
         assert_eq!(app.settings_view, ConfigUiSettingsView::Overview);
-        app.handle_key(ConfigUiKey::Ctrl('u'));
-        for ch in "advanced.hidden".chars() {
-            app.handle_key(ConfigUiKey::Char(ch));
-        }
-        assert_eq!(app.visible_rows(), vec![UiRowRef::Field(1)]);
-        app.handle_key(ConfigUiKey::Enter);
+        app.search_active = false;
+        app.search = "advanced.middle".to_string();
+        assert_eq!(app.visible_rows(), vec![UiRowRef::Field(2)]);
         app.handle_key(ConfigUiKey::Char('a'));
         assert_eq!(app.settings_view, ConfigUiSettingsView::Overview);
-        app.handle_key(ConfigUiKey::Esc);
-        assert!(app.search.is_empty());
-        assert_eq!(
-            app.visible_rows(),
-            vec![UiRowRef::Field(0), UiRowRef::Field(4)]
-        );
+        app.search.clear();
+        assert_eq!(app.visible_rows(), [1, 3, 6].map(UiRowRef::Field));
 
         app.next_tab();
         assert!(!app.selected_tab_has_meaningful_overview());
-        assert_eq!(app.visible_rows(), vec![UiRowRef::Field(5)]);
+        assert_eq!(app.visible_rows(), vec![UiRowRef::Field(7)]);
         app.handle_key(ConfigUiKey::Char('a'));
         assert_eq!(app.settings_view, ConfigUiSettingsView::Overview);
     }
