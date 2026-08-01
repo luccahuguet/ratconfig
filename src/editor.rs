@@ -905,7 +905,7 @@ impl ConfigUiApp {
         };
         let external = matches!(
             self.model.fields[field_index].capability,
-            ConfigUiCapability::FreeText { .. }
+            ConfigUiCapability::FreeText { .. } | ConfigUiCapability::OptionalString { .. }
         );
         self.begin_edit_field(field_index);
         if external {
@@ -1015,6 +1015,10 @@ fn edit_is_compatible(old: &ConfigUiField, new: &ConfigUiField, edit: &ConfigUiE
             ConfigUiCapability::FreeText { encoding: old },
             ConfigUiCapability::FreeText { encoding: new },
         ) => old == new,
+        (
+            ConfigUiCapability::OptionalString { disabled: old },
+            ConfigUiCapability::OptionalString { disabled: new },
+        ) => old == new,
         (ConfigUiCapability::Toggle { .. }, ConfigUiCapability::Toggle { .. })
         | (ConfigUiCapability::Choice { .. }, ConfigUiCapability::Choice { .. }) => {
             parse_choice_input(new, &edit.input)
@@ -1076,6 +1080,11 @@ fn edit_state_for_field(field: &ConfigUiField) -> Result<ConfigUiEditState, Stri
         ConfigUiCapability::FreeText { encoding } => {
             (free_text_seed(field, *encoding)?, ConfigUiEditMode::Text, 0)
         }
+        ConfigUiCapability::OptionalString { disabled } => (
+            optional_string_seed(field, disabled)?,
+            ConfigUiEditMode::Text,
+            0,
+        ),
         ConfigUiCapability::Toggle { .. } | ConfigUiCapability::Choice { .. } => {
             let value = direct_choice_seed(field)?;
             let index = capability_choice_index(field, value).ok_or_else(|| {
@@ -1123,6 +1132,30 @@ fn free_text_seed(field: &ConfigUiField, encoding: ConfigUiTextEncoding) -> Resu
     }
 }
 
+fn optional_string_seed(
+    field: &ConfigUiField,
+    disabled: &ConfigUiChoice,
+) -> Result<String, String> {
+    let value = match &field.snapshot.intent {
+        crate::ConfigUiOverride::Explicit(value) => value,
+        crate::ConfigUiOverride::Absent => match &field.snapshot.effective {
+            Some(resolved) => &resolved.value,
+            None => return Ok(String::new()),
+        },
+        crate::ConfigUiOverride::Invalid { input } => return Ok(input.clone()),
+    };
+    if value == &disabled.value {
+        Ok(render_json_edit_value(value))
+    } else if let JsonValue::String(value) = value {
+        Ok(value.clone())
+    } else {
+        Err(format!(
+            "{} has a value that is neither a string nor its disabled sentinel.",
+            field.path
+        ))
+    }
+}
+
 fn direct_choice_seed(field: &ConfigUiField) -> Result<&JsonValue, String> {
     match &field.snapshot.intent {
         crate::ConfigUiOverride::Explicit(value) => Ok(value),
@@ -1148,6 +1181,13 @@ fn parse_edit_input(field: &ConfigUiField, input: &str) -> Result<JsonValue, Str
         ConfigUiCapability::FreeText {
             encoding: ConfigUiTextEncoding::Json,
         } => parse_choice_input(field, input),
+        ConfigUiCapability::OptionalString { disabled } => {
+            if input == render_json_edit_value(&disabled.value) {
+                Ok(disabled.value.clone())
+            } else {
+                Ok(JsonValue::String(input.to_string()))
+            }
+        }
         ConfigUiCapability::Toggle { .. } | ConfigUiCapability::Choice { .. } => {
             let value = parse_choice_input(field, input)?;
             if capability_has_value(field, &value) {
@@ -1183,6 +1223,7 @@ pub(crate) fn capability_choices(field: &ConfigUiField) -> Vec<&ConfigUiChoice> 
         ConfigUiCapability::Toggle { off, on } => vec![off, on],
         ConfigUiCapability::Choice { choices }
         | ConfigUiCapability::MultiChoice { choices, .. } => choices.iter().collect(),
+        ConfigUiCapability::OptionalString { disabled } => vec![disabled],
         ConfigUiCapability::ReadOnly { .. } | ConfigUiCapability::FreeText { .. } => Vec::new(),
     }
 }
@@ -2157,6 +2198,28 @@ line-number = "relative"
         assert_eq!(
             parse_edit_input(&string_field, "search, git").expect("free string"),
             json!("search, git")
+        );
+
+        let mut optional_string = field("ui.shortcut", "string or false", "false", &[]);
+        optional_string.capability = ConfigUiCapability::OptionalString {
+            disabled: ConfigUiChoice {
+                value: json!(false),
+                label: Some("Unmapped".to_string()),
+            },
+        };
+        assert_eq!(
+            parse_edit_input(&optional_string, "Alt Shift A").expect("string choice"),
+            json!("Alt Shift A")
+        );
+        assert_eq!(
+            parse_edit_input(&optional_string, "false").expect("disabled choice"),
+            json!(false)
+        );
+        assert_eq!(
+            edit_state_for_field(&optional_string)
+                .expect("disabled optional string edit")
+                .input,
+            "false"
         );
     }
 

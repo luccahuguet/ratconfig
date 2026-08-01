@@ -1730,7 +1730,9 @@ fn selected_row_hints(app: &ConfigUiApp) -> Vec<ControlHint> {
             ConfigUiCapability::Choice { .. } | ConfigUiCapability::MultiChoice { .. } => {
                 PICKER_NORMAL_HINTS.to_vec()
             }
-            ConfigUiCapability::FreeText { .. } => FREE_TEXT_NORMAL_HINTS.to_vec(),
+            ConfigUiCapability::FreeText { .. } | ConfigUiCapability::OptionalString { .. } => {
+                FREE_TEXT_NORMAL_HINTS.to_vec()
+            }
         },
         _ => Vec::new(),
     }

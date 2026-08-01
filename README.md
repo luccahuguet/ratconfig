@@ -211,7 +211,7 @@ Diagnostic scope routes state; it does not infer validity from `path`, parse a n
 
 ## Field Capabilities
 
-Every field declares one editor capability. Ratconfig never infers write authority from `type_label`, rendered syntax, a baseline, or schema metadata. `ReadOnly` supplies a nonblank reason and can name one exact `(source_id, action_id)` file action. `FreeText` chooses string or JSON encoding. `Toggle`, `Choice`, and `MultiChoice` carry exact host-approved JSON values with optional friendly labels. A mutating capability requires a writable declared source
+Every field declares one editor capability. Ratconfig never infers write authority from `type_label`, rendered syntax, a baseline, or schema metadata. `ReadOnly` supplies a nonblank reason and can name one exact `(source_id, action_id)` file action. `FreeText` chooses string or JSON encoding. `OptionalString` edits ordinary strings without JSON quoting and maps one exact non-string sentinel to a host-supplied label. `Toggle`, `Choice`, and `MultiChoice` carry exact host-approved JSON values with optional friendly labels. A mutating capability requires a writable declared source
 
 `type_label` is optional display metadata only. It can describe a host type without affecting editor selection or authorization
 

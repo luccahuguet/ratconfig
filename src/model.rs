@@ -334,6 +334,10 @@ pub enum ConfigUiCapability {
     FreeText {
         encoding: ConfigUiTextEncoding,
     },
+    /// An arbitrary string or one exact non-string sentinel rendered with a friendly label.
+    OptionalString {
+        disabled: ConfigUiChoice,
+    },
     Toggle {
         off: ConfigUiChoice,
         on: ConfigUiChoice,
@@ -433,6 +437,11 @@ pub(crate) fn field_baseline_display_value(field: &ConfigUiField) -> Option<Stri
 }
 
 fn render_field_value(field: &ConfigUiField, value: &JsonValue) -> String {
+    if let ConfigUiCapability::OptionalString { disabled } = &field.capability
+        && disabled.value == *value
+    {
+        return disabled.display_label();
+    }
     match value {
         JsonValue::String(value) if field.type_label.as_deref() != Some("string") => value.clone(),
         _ => render_json_value(value),
@@ -440,6 +449,11 @@ fn render_field_value(field: &ConfigUiField, value: &JsonValue) -> String {
 }
 
 pub(crate) fn render_field_edit_value(field: &ConfigUiField, value: &JsonValue) -> String {
+    if let ConfigUiCapability::OptionalString { disabled } = &field.capability
+        && disabled.value == *value
+    {
+        return disabled.display_label();
+    }
     match value {
         JsonValue::String(value) if field.type_label.as_deref() != Some("string") => value.clone(),
         _ => render_json_edit_value(value),
@@ -1007,6 +1021,15 @@ fn validate_capability(
             }
         }
         ConfigUiCapability::FreeText { .. } => {}
+        ConfigUiCapability::OptionalString { disabled } => {
+            if disabled.value.is_string() {
+                return Err(format!(
+                    "field {} optional-string sentinel must be non-string",
+                    field.path
+                ));
+            }
+            validate_choices(field, [disabled])?;
+        }
         ConfigUiCapability::Toggle { off, on } => {
             if off.value == on.value {
                 return Err(format!(
@@ -2202,6 +2225,12 @@ mod tests {
         invalid(model, "must define at least one choice");
 
         let mut model = base.clone();
+        model.fields[0].capability = ConfigUiCapability::OptionalString {
+            disabled: choice(json!("reserved"), Some("Disabled")),
+        };
+        invalid(model, "optional-string sentinel must be non-string");
+
+        let mut model = base.clone();
         model.fields[0].capability = ConfigUiCapability::Choice {
             choices: vec![choice(json!(1), Some("one")), choice(json!(1), Some("uno"))],
         };
@@ -2453,6 +2482,19 @@ help = "Theme name"
             ConfigUiFieldState::Inherited
         );
         assert_eq!(field_list_value(&defaulted), "\"light\"");
+
+        let mut disabled = spec().build("string or false", Some(&json!(false)), Some(&default));
+        disabled.capability = ConfigUiCapability::OptionalString {
+            disabled: ConfigUiChoice {
+                value: json!(false),
+                label: Some("Unmapped".to_string()),
+            },
+        };
+        assert_eq!(field_list_value(&disabled), "Unmapped");
+        assert_eq!(
+            render_field_edit_value(&disabled, &json!(false)),
+            "Unmapped"
+        );
 
         let unset = spec().build("string", None, None);
         assert_eq!(snapshot_field_state(&unset), ConfigUiFieldState::Absent);
